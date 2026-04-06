@@ -1,6 +1,6 @@
 ---
 name: dippy-auto
-description: Analyze Dippy decision logs and interactively promote patterns to .dippy or .dippy-auto rules
+description: Analyze Dippy decision logs and interactively promote patterns to .dippy or .dippy-auto rules. Use when user mentions updating dippy, improving dippy, dippy rules, dippy config, auto-approve commands, reduce prompts, or fix permission prompts.
 user_invocable: true
 ---
 
