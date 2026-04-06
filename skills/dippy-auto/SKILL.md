@@ -1,5 +1,5 @@
 ---
-name: dippy-sync
+name: dippy-auto
 description: Analyze Dippy decision logs and interactively promote patterns to .dippy or .dippy-auto rules
 user_invocable: true
 ---

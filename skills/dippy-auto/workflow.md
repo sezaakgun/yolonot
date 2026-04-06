@@ -91,7 +91,7 @@ After the user finishes (quit or all patterns processed):
 
 3. If confirmed:
    - Append rules to the appropriate files with a timestamp comment
-   - Format: `# Auto-promoted by dippy-sync (YYYY-MM-DD)` header
+   - Format: `# Auto-promoted by dippy-auto (YYYY-MM-DD)` header
    - Show confirmation of what was written
 
 4. If not confirmed, discard and exit.
@@ -100,7 +100,7 @@ After the user finishes (quit or all patterns processed):
 
 After applying, optionally suggest:
 - "These patterns won't appear as ASK anymore. Old log entries will naturally age out."
-- "Run /dippy-sync again anytime to check for new patterns."
+- "Run /dippy-auto again anytime to check for new patterns."
 
 ---
 
