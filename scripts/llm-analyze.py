@@ -71,6 +71,54 @@ def get_command():
     return sys.stdin.read().strip()
 
 
+def load_rules():
+    """Load .dippy-auto rules from project dir or home dir."""
+    rules = []
+    for path in [".dippy-auto", os.path.expanduser("~/.dippy-auto")]:
+        if not os.path.isfile(path):
+            continue
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) != 2:
+                    continue
+                action_type, pattern = parts
+                if "-" not in action_type:
+                    continue
+                action, rule_type = action_type.split("-", 1)
+                if action in ("allow", "deny", "ask") and rule_type in ("path", "cmd"):
+                    rules.append((action, rule_type, pattern))
+    return rules
+
+
+def match_glob(pattern, text):
+    """Simple glob match: * matches any characters."""
+    import fnmatch
+    return fnmatch.fnmatch(text, pattern)
+
+
+def check_rules(command, rules):
+    """Check command against rules. Returns (action, pattern) or None."""
+    # Extract script path if present
+    script_path = ""
+    match = re.search(r'[\s]([^\s]+\.(py|sh|js|rb|ts))(\s|$)', " " + command)
+    if match:
+        script_path = match.group(1)
+
+    for action, rule_type, pattern in rules:
+        if rule_type == "cmd":
+            if match_glob(pattern, command):
+                return action, pattern
+        elif rule_type == "path":
+            if script_path and match_glob(pattern, script_path):
+                return action, pattern
+
+    return None
+
+
 def read_script_file(command):
     """If command references a script file, read its contents."""
     match = re.search(r'[\s]([^\s]+\.(py|sh|js|rb|ts))(\s|$)', " " + command)
@@ -162,6 +210,19 @@ def main():
         print('{"decision":"ask","reasoning":"no command provided"}')
         return
 
+    # Check local rules BEFORE calling LLM
+    rules = load_rules()
+    rule_match = check_rules(command, rules)
+    if rule_match:
+        action, pattern = rule_match
+        print(json.dumps({
+            "decision": action,
+            "confidence": 1.0,
+            "reasoning": f"matched rule: {action}-{pattern}",
+        }))
+        return
+
+    # No rule matched — call LLM
     prompt = build_prompt(command)
 
     try:
