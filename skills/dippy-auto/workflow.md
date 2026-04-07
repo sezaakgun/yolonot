@@ -1,116 +1,166 @@
-# Dippy Sync Workflow
+# Dippy Auto Workflow
 
-**Goal:** Analyze Dippy's decision history and interactively promote frequent patterns to config rules.
+**Goal:** Analyze decision history and interactively improve .dippy and .dippy-auto rules.
 
-**Your Role:** An assistant that reads Dippy logs, finds patterns, and asks the user what to do with each one.
+**Your Role:** An assistant that reads logs, finds patterns, and asks the user what to do with each one.
 
 ---
 
 ## EXECUTION
 
-### Step 1: Read Dippy Logs
+### Step 1: Read Decision Logs
 
-Read the Dippy hook-approvals log file at `~/.claude/hook-approvals.log`.
+Read two data sources:
 
-Parse each line to extract:
-- Timestamp
-- Decision type: `APPROVED`, `ASK`, `DENIED`
-- Command summary (the text after the decision type)
+**Source A — dippy-auto decisions:** `~/.dippy-auto/decisions.jsonl`
+- Each line is JSON with: ts, session_id, command, cwd, project, layer (dippy/rule/llm), decision, confidence, reasoning
+- This is what WE decided
 
-If the file doesn't exist or is empty, tell the user and HALT.
+**Source B — Dippy log:** `~/.claude/hook-approvals.log`
+- Each line: `YYYY-MM-DD HH:MM:SS [LEVEL] DECISION: command_summary`
+- Decisions: APPROVED, ASK, DENIED
+- This is what DIPPY decided (before our LLM layer)
 
-### Step 2: Analyze Patterns
+**Source C — User overrides:** `~/.claude/audit/raw/*.jsonl`
+- Look for PermissionRequest events where `tool_name=Bash`
+- Extract: session_id, tool_input.decision (what user chose)
+- Only read last 7 days of files
 
-Group ASK entries by command summary. Count occurrences.
+If no decision log exists, tell the user they need to use the system for a while first and HALT.
 
-Filter to patterns with **5+ occurrences** (configurable via argument).
+### Step 2: Analyze False Denies
 
-Sort by count descending.
+Cross-reference decisions.jsonl with audit PermissionRequest events:
+- Find entries where our decision was "deny" or "ask"
+- Match by session_id (and approximate timestamp if needed)
+- Check if the user then approved (PermissionRequest with decision=allow)
+- Group by command prefix (first 2-3 tokens)
+- Count occurrences
 
-Also group by the **project/cwd** where the command was run (if available in the log). If a pattern appears in 3+ different projects, mark it as a "global candidate." Otherwise mark it as "project candidate."
-
-### Step 3: Present Findings
-
-Show the user a summary:
-
-```
-Found X patterns from Y total ASK decisions.
-
-GLOBAL CANDIDATES (appeared in 3+ projects):
-  1. git add         — 46x asked across 5 projects
-  2. git commit      — 37x asked across 4 projects
-  3. mkdir -p        — 38x asked across 6 projects
-
-PROJECT CANDIDATES (specific to current project):
-  4. docker compose  — 32x asked (only in claude-auto-mode)
-  5. go build        — 30x asked (only in claude-auto-mode)
-```
-
-### Step 4: Interactive Decision Loop
-
-For each pattern (starting with highest count), ask the user:
+Present findings:
 
 ```
-Pattern: "git add" (46x asked)
-Scope: global (seen in 5 projects)
+FALSE DENIES (we blocked, you approved):
 
-What should we do?
-  a) allow — auto-approve, add to .dippy
-  b) deny  — auto-block, add to .dippy
-  c) ask   — always prompt user (add to .dippy-auto as ask rule)
-  d) llm   — let LLM decide each time (add to .dippy-auto as LLM fallback — no rule)
-  e) skip  — do nothing, move to next
-  q) quit  — stop and apply changes so far
+  1. curl https://staging.insider.com/*  — 8x denied, you approved all 8
+     Layer: llm | Reason: "unknown external URL"
+     Suggestion: add "allow-cmd curl https://staging*" to .dippy-auto
+
+  2. python3 test_*.py — 4x denied, you approved all 4
+     Layer: llm | Reason: "sys import flagged as dangerous"
+     Suggestion: add "allow-path test_*.py" to .dippy-auto
+
+  3. git push origin feature-* — 3x asked by dippy
+     Suggestion: add "allow git push" to .dippy (remove deny rule)
 ```
 
-Based on user's choice and scope:
-- **Global + allow/deny** → append to `~/.dippy`
-- **Global + ask** → append to `~/.dippy-auto`
-- **Project + allow/deny** → append to `.dippy` in current project
-- **Project + ask** → append to `.dippy-auto` in current project
-- **llm** → skip (the LLM layer already handles unmatched commands)
-- **skip** → do nothing
+### Step 3: Analyze Risky Allows
 
-### Step 5: Apply Changes
+Read decisions.jsonl for allow decisions where layer=llm:
+- Group by command prefix
+- Show confidence levels
+- These are commands auto-approved without user verification
 
-After the user finishes (quit or all patterns processed):
+Present findings:
 
-1. Show a summary of all changes to be made:
-   ```
-   Changes to apply:
-     ~/.dippy:
-       + allow git add
-       + allow git commit
-     .dippy (project):
-       + allow docker compose
-     ~/.dippy-auto:
-       + ask-cmd *aws kinesis*
-   ```
+```
+RISKY ALLOWS (auto-approved by LLM, worth reviewing):
 
-2. Ask user to confirm: "Apply these changes? (yes/no)"
+  1. docker compose exec db psql * — 23x allowed at 92% avg confidence
+     Typical reasoning: "local dev container operation"
 
-3. If confirmed:
-   - Append rules to the appropriate files with a timestamp comment
-   - Format: `# Auto-promoted by dippy-auto (YYYY-MM-DD)` header
-   - Show confirmation of what was written
+  2. aws s3 cp * s3://dev-* — 15x allowed at 88% avg confidence
+     Typical reasoning: "non-production S3 operation"
 
-4. If not confirmed, discard and exit.
+  For each: type 'ok' to confirm it's safe, or 'restrict' to add ask rule
+```
 
-### Step 6: Cleanup Suggestion
+### Step 4: Analyze Dippy ASK Patterns
 
-After applying, optionally suggest:
-- "These patterns won't appear as ASK anymore. Old log entries will naturally age out."
-- "Run /dippy-auto again anytime to check for new patterns."
+Read Dippy's hook-approvals.log for ASK entries:
+- Group by command summary, count occurrences
+- Filter to 5+ occurrences
+- Determine scope: if command appears in entries from 3+ different cwd paths → global candidate, otherwise project candidate
+
+Present findings:
+
+```
+DIPPY ASK PATTERNS (Dippy keeps asking about):
+
+  GLOBAL (seen across projects):
+    4. git add         — 46x asked
+    5. git commit      — 37x asked
+    6. mkdir -p        — 38x asked
+
+  PROJECT (this project only):
+    7. docker compose  — 32x asked
+    8. go build        — 30x asked
+```
+
+### Step 5: Interactive Decision Loop
+
+For each finding (starting with false denies, then risky allows, then dippy patterns), ask:
+
+```
+[1/12] FALSE DENY: "curl https://staging*" (8x overridden)
+  a) allow     — add allow rule (to .dippy or .dippy-auto depending on scope)
+  b) deny      — keep blocking (add explicit deny rule)
+  c) ask       — always prompt (add ask rule to .dippy-auto)
+  d) llm       — keep LLM deciding (no rule change)
+  e) skip      — do nothing
+  q) quit      — apply changes made so far
+```
+
+For risky allows:
+```
+[5/12] RISKY ALLOW: "docker compose exec *" (23x auto-approved at 92%)
+  ok)       — confirmed safe, promote to allow rule
+  restrict) — add ask rule (require user confirmation)
+  skip)     — keep LLM deciding
+```
+
+Based on choice and scope:
+- **Global allow/deny** → append to `~/.dippy`
+- **Global ask/cmd/path** → append to `~/.dippy-auto`
+- **Project allow/deny** → append to `.dippy` in cwd
+- **Project ask/cmd/path** → append to `.dippy-auto` in cwd
+- **llm/skip** → no change
+
+### Step 6: Apply Changes
+
+Show summary:
+```
+Changes to apply:
+  ~/.dippy:
+    + allow git add
+    + allow git commit
+  .dippy-auto (project):
+    + allow-cmd curl https://staging*
+  ~/.dippy-auto:
+    + ask-cmd *aws s3 cp*
+```
+
+Ask: "Apply these changes? (yes/no)"
+
+If yes:
+- Append rules with header: `# Auto-promoted by dippy-auto (YYYY-MM-DD)`
+- Show confirmation
+
+### Step 7: Log Rotation
+
+After applying, offer to clean old entries:
+- Count entries in decisions.jsonl
+- If > 10,000 entries: "decisions.jsonl has X entries. Trim to last 10,000? (yes/no)"
+- If yes: keep last 10,000 lines, remove older ones
 
 ---
 
 ## NOTES
 
-- NEVER modify Dippy's source code or global config without user approval
-- NEVER auto-apply rules — always show and confirm first
-- The log file format is: `YYYY-MM-DD HH:MM:SS [LEVEL] DECISION: command_summary`
-- The log may not contain CWD/project info — if not available, treat all patterns as "project candidates" for the current directory
-- `.dippy` uses Dippy's native format: `allow <command>` or `deny <command> "reason"`
-- `.dippy-auto` uses dippy-auto's format: `allow-cmd <pattern>` or `deny-cmd <pattern>` or `ask-cmd <pattern>`
-- Rules with glob patterns should use `*` for wildcards
-- If a pattern like "parse error: Syntax error" appears, explain that this is Dippy failing to parse inline scripts and the LLM layer handles it — no rule needed
+- NEVER auto-modify configs without user confirmation
+- NEVER read tool response content from audit logs (privacy)
+- The `parse error: Syntax error` ASK pattern from Dippy = inline scripts the LLM now handles. Explain this to user — no rule needed
+- `.dippy` format: `allow <command>` or `deny <command> "reason"`
+- `.dippy-auto` format: `allow-cmd <pattern>`, `deny-cmd <pattern>`, `ask-cmd <pattern>`, `allow-path <pattern>`, etc.
+- If Dippy log doesn't contain CWD info, treat all as "project candidates" for current directory
+- For false deny correlation: match session_id between decisions.jsonl and audit PermissionRequest. If no session match within 5 seconds, consider unmatched.
