@@ -109,10 +109,20 @@ LLM_DECISION=$(echo "$LLM_RESULT" | python3 -c "import sys,json; r=json.load(sys
 LLM_CONFIDENCE=$(echo "$LLM_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('confidence',''))" 2>/dev/null)
 LLM_REASONING=$(echo "$LLM_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('reasoning',''))" 2>/dev/null)
 
-if [ "$LLM_DECISION" = "allow" ] || [ "$LLM_DECISION" = "deny" ]; then
-  log_decision "$SESSION_ID" "$COMMAND" "$CWD" "llm" "$LLM_DECISION" "confidence=$LLM_CONFIDENCE" "reasoning=$LLM_REASONING"
+if [ "$LLM_DECISION" = "allow" ]; then
+  log_decision "$SESSION_ID" "$COMMAND" "$CWD" "llm" "allow" "confidence=$LLM_CONFIDENCE" "reasoning=$LLM_REASONING"
   cat <<EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"$LLM_DECISION","permissionDecisionReason":"LLM: $LLM_REASONING"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"LLM: $LLM_REASONING"}}
+EOF
+  exit 0
+fi
+
+if [ "$LLM_DECISION" = "deny" ]; then
+  # Return "ask" instead of "deny" so user can override with "don't ask again"
+  # The LLM reasoning is shown so user understands the risk
+  log_decision "$SESSION_ID" "$COMMAND" "$CWD" "llm" "deny" "confidence=$LLM_CONFIDENCE" "reasoning=$LLM_REASONING" "returned_as=ask"
+  cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"LLM: $LLM_REASONING"}}
 EOF
   exit 0
 fi
