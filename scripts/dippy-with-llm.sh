@@ -16,8 +16,9 @@ LOG_FILE="$LOG_DIR/decisions.jsonl"
 # Ensure log dir exists
 mkdir -p "$LOG_DIR" 2>/dev/null
 
-# Helper: log a structured decision
+# Helper: log a structured decision (skip if no command)
 log_decision() {
+  [ -z "$2" ] && return
   python3 -c "
 import json, sys, os
 from datetime import datetime, timezone
