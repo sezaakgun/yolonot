@@ -1,17 +1,17 @@
 #!/bin/sh
-# Dippy + LLM wrapper hook for Bash PreToolUse
+# dippy-auto: LLM-powered Bash command analyzer for Claude Code
 #
 # Flow:
 # 1. Check session memory (exact match → instant allow)
 # 2. Check session similarity via LLM (similar to approved → allow)
-# 3. Call Dippy (instant)
-# 4. If Dippy allows/denies → use that
-# 5. If Dippy says "ask" → call LLM to analyze the command
-# 6. LLM deny → return "ask" + save to session if user approves later
+# 3. Call Dippy if installed (instant, optional)
+# 4. Check .dippy-auto rules + LLM to analyze the command
+# 5. LLM deny → return "ask" + save to session if user approves later
 #
-# Install: replace Dippy hook path in ~/.claude/settings.json with this script
+# Works with or without Dippy. Set DIPPY_HOOK env var to override path.
+# Install: add as hook in ~/.claude/settings.json
 
-DIPPY_HOOK="/Users/seza/Projects/Dippy/bin/dippy-hook"
+DIPPY_HOOK="${DIPPY_HOOK:-/Users/seza/Projects/Dippy/bin/dippy-hook}"
 LLM_ANALYZE="$(dirname "$0")/llm-analyze.py"
 SESSION_COMPARE="$(dirname "$0")/session-compare.py"
 LOG_DIR="$HOME/.dippy-auto"
@@ -89,18 +89,21 @@ EOF
   fi
 fi
 
-# Step 3: Call Dippy
-DIPPY_RESULT=$(echo "$INPUT" | "$DIPPY_HOOK" 2>/dev/null)
-DIPPY_EXIT=$?
+# Step 3: Call Dippy (if installed)
+DIPPY_DECISION=""
+DIPPY_REASON=""
+if [ -x "$DIPPY_HOOK" ]; then
+  DIPPY_RESULT=$(echo "$INPUT" | "$DIPPY_HOOK" 2>/dev/null)
+  DIPPY_EXIT=$?
 
-if [ $DIPPY_EXIT -eq 2 ]; then
-  DIPPY_REASON=$(echo "$DIPPY_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('hookSpecificOutput',{}).get('permissionDecisionReason',''))" 2>/dev/null)
-  log_decision "$SESSION_ID" "$COMMAND" "$CWD" "dippy" "deny" "reason=$DIPPY_REASON"
-  echo "$DIPPY_RESULT"
-  exit 2
-fi
+  if [ $DIPPY_EXIT -eq 2 ]; then
+    DIPPY_REASON=$(echo "$DIPPY_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('hookSpecificOutput',{}).get('permissionDecisionReason',''))" 2>/dev/null)
+    log_decision "$SESSION_ID" "$COMMAND" "$CWD" "dippy" "deny" "reason=$DIPPY_REASON"
+    echo "$DIPPY_RESULT"
+    exit 2
+  fi
 
-DIPPY_DECISION=$(echo "$DIPPY_RESULT" | python3 -c "
+  DIPPY_DECISION=$(echo "$DIPPY_RESULT" | python3 -c "
 import sys, json
 try:
     r = json.load(sys.stdin)
@@ -109,7 +112,7 @@ try:
 except: print('')
 " 2>/dev/null)
 
-DIPPY_REASON=$(echo "$DIPPY_RESULT" | python3 -c "
+  DIPPY_REASON=$(echo "$DIPPY_RESULT" | python3 -c "
 import sys, json
 try:
     r = json.load(sys.stdin)
@@ -118,10 +121,11 @@ try:
 except: print('')
 " 2>/dev/null)
 
-if [ "$DIPPY_DECISION" = "allow" ] || [ "$DIPPY_DECISION" = "deny" ]; then
-  log_decision "$SESSION_ID" "$COMMAND" "$CWD" "dippy" "$DIPPY_DECISION" "reason=$DIPPY_REASON"
-  echo "$DIPPY_RESULT"
-  exit 0
+  if [ "$DIPPY_DECISION" = "allow" ] || [ "$DIPPY_DECISION" = "deny" ]; then
+    log_decision "$SESSION_ID" "$COMMAND" "$CWD" "dippy" "$DIPPY_DECISION" "reason=$DIPPY_REASON"
+    echo "$DIPPY_RESULT"
+    exit 0
+  fi
 fi
 
 # Step 4: Dippy said "ask" — call LLM analyzer
