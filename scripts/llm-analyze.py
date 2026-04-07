@@ -10,6 +10,7 @@ Usage:
 Returns JSON: {"decision":"allow|deny|ask","confidence":0.9,"reasoning":"..."}
 """
 
+import hashlib
 import json
 import os
 import re
@@ -26,12 +27,16 @@ Output ONLY JSON: {"decision":"allow|deny|ask","confidence":0.0-1.0,"reasoning":
 
 STEP 1 — Is this a READ-ONLY operation? If yes → ALLOW regardless of target.
 Read-only means: get, describe, list, logs, status, cat, head, tail, grep, find, ls, tree, wc, history.
+Also read-only: piped commands where the output of one feeds into another for parsing/filtering.
+A command like "aws X | python3 -c 'import json; print(json.loads(...))')" is read-only — it reads data and formats it.
+Inline python/bash that ONLY reads stdin, parses JSON, filters, and prints is safe — even if it looks complex.
 Examples that are ALWAYS ALLOWED even on production:
   kubectl get pods --namespace production → ALLOW (read-only)
   helm list --namespace production → ALLOW (read-only)
   helm status my-release --namespace production → ALLOW (read-only)
   aws ec2 describe-instances --profile prod → ALLOW (read-only)
   aws s3 ls s3://prod-bucket → ALLOW (read-only)
+  aws lambda get-policy --function-name X | python3 -c "import json; ..." → ALLOW (read + parse)
   cat /etc/hosts → ALLOW (read-only)
 
 STEP 2 — Is this a MUTATION on PRODUCTION? If yes → DENY.
@@ -204,6 +209,59 @@ def parse_response(response):
     return None
 
 
+CACHE_DIR = os.path.expanduser("~/.dippy-auto/cache")
+
+
+def get_script_hash(command):
+    """If command references a script file, return hash of its contents + the command.
+    Returns (hash_key, script_path) or (None, None) if no script file."""
+    match = re.search(r'[\s]([^\s]+\.(py|sh|js|rb|ts))(\s|$)', " " + command)
+    if not match:
+        return None, None
+    path = match.group(1)
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        with open(path, "rb") as f:
+            content = f.read()
+        # Hash: script content + command (so different flags get different cache entries)
+        h = hashlib.sha256(content + command.encode()).hexdigest()[:16]
+        return h, path
+    except Exception:
+        return None, None
+
+
+def check_cache(command):
+    """Check if we have a cached LLM decision for this command's script."""
+    h, path = get_script_hash(command)
+    if not h:
+        return None
+    cache_file = os.path.join(CACHE_DIR, f"{h}.json")
+    if not os.path.isfile(cache_file):
+        return None
+    try:
+        with open(cache_file) as f:
+            cached = json.load(f)
+        cached["reasoning"] = f"(cached) {cached.get('reasoning', '')}"
+        return cached
+    except Exception:
+        return None
+
+
+def save_cache(command, decision):
+    """Cache an LLM decision keyed by script hash."""
+    h, path = get_script_hash(command)
+    if not h:
+        return
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_file = os.path.join(CACHE_DIR, f"{h}.json")
+    try:
+        with open(cache_file, "w") as f:
+            json.dump(decision, f)
+    except Exception:
+        pass
+
+
 def main():
     command = get_command()
     if not command:
@@ -222,7 +280,13 @@ def main():
         }))
         return
 
-    # No rule matched — call LLM
+    # Check script hash cache — if script file hasn't changed, reuse cached decision
+    cached = check_cache(command)
+    if cached:
+        print(json.dumps(cached))
+        return
+
+    # No rule matched, no cache — call LLM
     prompt = build_prompt(command)
 
     try:
@@ -242,6 +306,8 @@ def main():
         return
 
     if decision:
+        # Cache the decision if it involved a script file
+        save_cache(command, decision)
         print(json.dumps(decision))
     else:
         print('{"decision":"ask","reasoning":"no decision in LLM response"}')
