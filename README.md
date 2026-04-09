@@ -49,6 +49,19 @@ Every Bash command goes through this pipeline:
 
 When the LLM is unavailable, yolonot goes transparent — Claude Code's own permission system handles it. No "ask everything" when the LLM is down.
 
+### Hook Ordering
+
+yolonot installs two hooks in `~/.claude/settings.json`:
+
+- **PreToolUse** (matcher: `Bash`) — evaluates commands before execution
+- **PostToolUse** (matcher: `Bash`) — saves approved commands to session memory
+
+`yolonot setup` places the PreToolUse hook **before** any catch-all (`.*`) hooks. This ensures yolonot evaluates and can block a command before other hooks (like audit loggers) see it. If you have multiple Bash hooks, yolonot should be first in the PreToolUse list.
+
+If you reorder hooks manually in `settings.json`, keep yolonot's PreToolUse entry above other Bash hooks. PostToolUse order doesn't matter — it only records that the command ran.
+
+When yolonot returns `deny`, the command is blocked and no subsequent hooks run. When it returns `allow`, the command proceeds through remaining hooks normally.
+
 ## Commands
 
 ```
