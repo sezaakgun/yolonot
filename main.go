@@ -1,0 +1,148 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+)
+
+var Version = "dev"
+
+func main() {
+	if len(os.Args) < 2 {
+		cmdDefault()
+		return
+	}
+
+	switch os.Args[1] {
+	case "setup":
+		cmdSetup()
+	case "provider":
+		cmdProvider()
+	case "rules":
+		cmdRules()
+	case "status":
+		cmdStatus()
+	case "log":
+		n := 20
+		if len(os.Args) > 2 {
+			if os.Args[2] == "-n" && len(os.Args) > 3 {
+				if v, err := strconv.Atoi(os.Args[3]); err == nil {
+					n = v
+				}
+			}
+		}
+		cmdLog(n)
+	case "suggest":
+		cmdEvolve()
+	case "uninstall":
+		cmdUninstall()
+	case "version":
+		fmt.Printf("yolonot %s\n", Version)
+
+	// Hidden commands (still work, not shown in help)
+	case "hook":
+		cmdHook()
+	case "install":
+		cmdInstall()
+	case "init":
+		cmdInit()
+	case "eval":
+		opts := parseEvalArgs(os.Args[2:])
+		cmdEval(opts)
+	case "evolve":
+		cmdEvolve()
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
+		cmdDefault()
+		os.Exit(1)
+	}
+}
+
+func cmdDefault() {
+	installed := IsInstalled()
+	config := LoadConfig()
+	model := envOr("LLM_MODEL", config.Provider.Model)
+
+	// Status overview
+	fmt.Println("yolonot — smart auto-mode for Claude Code")
+	fmt.Println()
+
+	if !installed {
+		fmt.Println("  Status: not installed")
+		fmt.Println()
+		fmt.Println("  Get started:")
+		fmt.Println("    yolonot setup      First-run wizard (install + rules + provider)")
+		fmt.Println()
+		return
+	}
+
+	provider := model
+	if provider == "" {
+		provider = "not configured"
+	}
+
+	fmt.Printf("  Status:   installed\n")
+	fmt.Printf("  Provider: %s\n", provider)
+	fmt.Printf("  Data:     %s\n", YolonotDir())
+
+	// Session summary if available
+	sessionID := os.Getenv("CLAUDE_SESSION_ID")
+	if sessionID == "" {
+		sessionID = FindSessionID()
+	}
+	if sessionID != "" {
+		approved := ReadLines(sessionID, "approved")
+		asked := ReadLines(sessionID, "asked")
+		denied := ReadLines(sessionID, "denied")
+		if len(approved)+len(asked)+len(denied) > 0 {
+			fmt.Printf("  Session:  %d approved · %d asked · %d denied\n", len(approved), len(asked), len(denied))
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  setup       First-run wizard (install + rules + provider)")
+	fmt.Println("  provider    Change LLM provider")
+	fmt.Println("  rules       Show active rules + sensitive patterns")
+	fmt.Println("  status      Show session state (approved/asked/denied)")
+	fmt.Println("  log         Show recent decisions")
+	fmt.Println("  suggest     Analyze history, suggest permanent rules")
+	fmt.Println("  uninstall   Remove hooks from Claude Code")
+	fmt.Println("  version     Show version")
+}
+
+func cmdSetup() {
+	fmt.Println("yolonot setup")
+	fmt.Println()
+
+	// Step 1: Install hooks
+	if IsInstalled() {
+		fmt.Println("  [1/3] Hooks: already installed")
+	} else {
+		fmt.Println("  [1/3] Installing hooks...")
+		cmdInstall()
+	}
+
+	// Step 2: Init rules
+	fmt.Println()
+	fmt.Println("  [2/3] Creating rule files...")
+	cmdInit()
+
+	// Step 3: Provider
+	fmt.Println()
+	fmt.Println("  [3/3] Configure LLM provider")
+	fmt.Println()
+	cmdProvider()
+
+	fmt.Println()
+	fmt.Println("Setup complete. Restart Claude Code to activate.")
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}

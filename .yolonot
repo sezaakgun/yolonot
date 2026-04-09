@@ -1,0 +1,23 @@
+# .yolonot — project rules for yolonot
+# Format: <action>-<type> <pattern>
+# Global rules (curl, deny, ask) are in ~/.yolonot/rules
+
+# --- Project scripts ---
+allow-path scripts/*
+allow-path tests/*
+allow-path test_*
+
+# --- Deploy / infra ---
+ask-path deploy/*
+ask-path infra/*
+ask-path k8s/*
+
+# --- System paths ---
+deny-path /etc/*
+deny-path /usr/*
+deny-path /var/*
+
+# --- Go ---
+allow-cmd go test*
+allow-cmd go build*
+allow-cmd go run*
