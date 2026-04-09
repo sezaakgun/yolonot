@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -138,7 +139,12 @@ func needsNewTokenParam(model string) bool {
 }
 
 // CallLLM sends a chat completion request and returns the raw response text.
+// Routes to claude CLI when URL is "claude-cli".
 func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (string, error) {
+	if cfg.URL == "claude-cli" {
+		return callClaudeCLI(cfg, systemPrompt, userPrompt)
+	}
+
 	timeout := 10
 	if t := os.Getenv("LLM_TIMEOUT"); t != "" {
 		fmt.Sscanf(t, "%d", &timeout)
@@ -240,6 +246,32 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 		}
 	}
 	return "", fmt.Errorf("no content in response")
+}
+
+// callClaudeCLI uses `claude -p` to classify commands via the user's
+// Claude Code subscription. No API key needed, no sessions saved.
+func callClaudeCLI(cfg LLMConfig, systemPrompt, userPrompt string) (string, error) {
+	args := []string{
+		"-p",
+		"--no-session-persistence",
+		"--model", cfg.Model,
+		"--system-prompt", systemPrompt,
+	}
+
+	cmd := exec.Command("claude", args...)
+	cmd.Stdin = strings.NewReader(userPrompt)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		errMsg := strings.TrimSpace(stderr.String())
+		if errMsg == "" {
+			errMsg = err.Error()
+		}
+		return "", fmt.Errorf("claude -p: %s", errMsg)
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 var inlineScriptRe = regexp.MustCompile(`-c\s+["'](.+?)["']`)

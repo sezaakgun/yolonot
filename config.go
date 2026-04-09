@@ -439,10 +439,13 @@ func cmdProvider() {
 		EnvKey string
 	}
 	providers := []providerInfo{
+		{"Claude Code (subscription)", "claude-cli", []string{
+			"claude-haiku-4-5-20251001", "claude-sonnet-4-6-20250514",
+		}, ""},
 		{"OpenAI", "https://api.openai.com/v1/chat/completions", []string{
 			"gpt-5.4-mini", "gpt-5.4-nano", "gpt-4o-mini",
 		}, "OPENAI_API_KEY"},
-		{"Anthropic", "https://api.anthropic.com/v1/messages", []string{
+		{"Anthropic (API)", "https://api.anthropic.com/v1/messages", []string{
 			"claude-haiku", "claude-sonnet",
 		}, "ANTHROPIC_API_KEY"},
 		{"xAI", "https://api.x.ai/v1/chat/completions", []string{
@@ -457,11 +460,17 @@ func cmdProvider() {
 	for _, p := range providers {
 		icon := "✓"
 		status := "ready"
-		if p.EnvKey != "" && os.Getenv(p.EnvKey) == "" && config.Provider.APIKey == "" {
+		if p.URL == "claude-cli" {
+			if _, err := exec.LookPath("claude"); err != nil {
+				icon = "✗"
+				status = "claude not found"
+			} else {
+				status = "uses your subscription"
+			}
+		} else if p.EnvKey != "" && os.Getenv(p.EnvKey) == "" && config.Provider.APIKey == "" {
 			icon = "✗"
 			status = "key missing"
-		}
-		if strings.Contains(p.URL, "localhost") {
+		} else if strings.Contains(p.URL, "localhost") {
 			if checkOllama() {
 				status = "running"
 			} else {

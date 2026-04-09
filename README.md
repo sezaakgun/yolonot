@@ -126,8 +126,9 @@ Configure with `yolonot provider`:
 
 | Provider | Models | Notes |
 |----------|--------|-------|
-| OpenAI | gpt-5.4-mini, gpt-5.4-mini, gpt-4o-mini | Needs `OPENAI_API_KEY` |
-| Anthropic | claude-haiku, claude-sonnet | Needs `ANTHROPIC_API_KEY` |
+| Claude Code | claude-haiku, claude-sonnet | Uses your subscription, no API key |
+| OpenAI | gpt-5.4-mini, gpt-5.4-nano, gpt-4o-mini | Needs `OPENAI_API_KEY` |
+| Anthropic (API) | claude-haiku, claude-sonnet | Needs `ANTHROPIC_API_KEY` |
 | xAI | grok-4-1-fast-reasoning, grok-4-1-fast-non-reasoning | Needs `XAI_API_KEY` |
 | Ollama | any installed model | Local, no API key |
 | OpenRouter | any model | Needs `OPENROUTER_API_KEY` |

@@ -566,6 +566,10 @@ func resolveLLMConfig(modelSpec string) LLMConfig {
 	var cfg LLMConfig
 
 	switch {
+	// Claude CLI (subscription)
+	case strings.HasPrefix(modelSpec, "claude-cli/"):
+		cfg.Model = modelSpec[len("claude-cli/"):]
+		cfg.URL = "claude-cli"
 	// OpenAI models
 	case modelSpec == "gpt-4o-mini" || modelSpec == "gpt-4o" ||
 		modelSpec == "gpt-4.1-mini" || modelSpec == "gpt-4.1-nano" || modelSpec == "gpt-4.1" ||
