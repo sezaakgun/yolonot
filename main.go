@@ -46,6 +46,8 @@ func main() {
 		cmdEvolve()
 	case "uninstall":
 		cmdUninstall()
+	case "upgrade":
+		cmdUpgrade()
 	case "version":
 		fmt.Printf("yolonot %s\n", Version)
 
@@ -121,6 +123,7 @@ func cmdDefault() {
 	fmt.Println("  log         Show recent decisions")
 	fmt.Println("  suggest     Analyze history, suggest permanent rules")
 	fmt.Println("  uninstall   Remove hooks from Claude Code")
+	fmt.Println("  upgrade     Update to latest version")
 	fmt.Println("  version     Show version")
 }
 

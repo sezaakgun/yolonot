@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -43,7 +44,8 @@ func checkForUpdate() string {
 	cache := time.Now().UTC().Format(time.RFC3339) + "\n" + latest
 	os.WriteFile(cacheFile, []byte(cache), 0644)
 
-	if latest != "" && latest != Version && latest > Version {
+	clean := strings.Split(Version, "+")[0]
+	if latest != "" && latest != clean && latest > clean {
 		return latest
 	}
 	return ""
@@ -73,6 +75,39 @@ func fetchLatestVersion() string {
 func printUpdateHint() {
 	if newer := checkForUpdate(); newer != "" {
 		fmt.Printf("  Update:   %s available (current: %s)\n", newer, Version)
-		fmt.Printf("            go install github.com/sezaakgun/yolonot@latest\n")
+		fmt.Printf("            run: yolonot upgrade\n")
 	}
+}
+
+func cmdUpgrade() {
+	fmt.Printf("Current version: %s\n", Version)
+	fmt.Print("Checking for updates... ")
+
+	latest := fetchLatestVersion()
+	if latest == "" {
+		fmt.Println("failed to check")
+		return
+	}
+
+	cleanVersion := strings.Split(Version, "+")[0] // strip +dirty, +incompatible, etc.
+	if latest == cleanVersion || (cleanVersion != "dev" && latest <= cleanVersion) {
+		fmt.Printf("up to date (%s)\n", Version)
+		return
+	}
+
+	fmt.Printf("found %s\n\n", latest)
+	fmt.Printf("Upgrading to %s...\n", latest)
+
+	cmd := exec.Command("go", "install", "github.com/sezaakgun/yolonot@"+latest)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("Upgrade failed: %v\n", err)
+		return
+	}
+
+	fmt.Printf("\nUpgraded to %s. Run 'yolonot install' to update hooks.\n", latest)
+
+	// Clear cache so next run doesn't show update hint
+	os.Remove(filepath.Join(YolonotDir(), "update-check"))
 }
