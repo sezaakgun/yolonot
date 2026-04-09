@@ -224,6 +224,12 @@ func MatchRuleWith(command string, rules []Rule, sensitive []string) *RuleMatch 
 		scriptPath = m[1]
 	}
 
+	// Extract the first token (actual command being executed)
+	firstToken := command
+	if idx := strings.IndexByte(command, ' '); idx > 0 {
+		firstToken = command[:idx]
+	}
+
 	for _, r := range rules {
 		// Skip allow rules for chained/redirected/sensitive commands
 		if skipAllow && r.Action == "allow" {
@@ -231,7 +237,7 @@ func MatchRuleWith(command string, rules []Rule, sensitive []string) *RuleMatch 
 		}
 		switch r.Type {
 		case "cmd":
-			if globMatch(r.Pattern, command) {
+			if matchCmd(r.Pattern, command, firstToken) {
 				return &RuleMatch{Action: r.Action, Pattern: r.Pattern}
 			}
 		case "path":
@@ -241,6 +247,102 @@ func MatchRuleWith(command string, rules []Rule, sensitive []string) *RuleMatch 
 		}
 	}
 	return nil
+}
+
+// matchCmd matches a cmd rule pattern against a command.
+// Patterns starting with * (like *curl *) verify the command word appears
+// as an actual executable (first token or after sudo/env prefixes), not just
+// in arguments like echo "curl example.com".
+func matchCmd(pattern, fullCommand, firstToken string) bool {
+	if !globMatch(pattern, fullCommand) {
+		return false
+	}
+
+	// Pattern doesn't start with * — anchored to start, no false positives
+	if !strings.HasPrefix(pattern, "*") {
+		return true
+	}
+
+	// Pattern starts with * — verify the command word is an actual executable
+	cmdWord := extractCmdWord(pattern)
+	if cmdWord == "" {
+		return true
+	}
+
+	// Check executables in each segment (split by chain operators)
+	for _, seg := range splitSegments(fullCommand) {
+		for _, exe := range extractExecutables(seg) {
+			if exe == cmdWord {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// extractCmdWord gets the first literal word from a glob pattern.
+// "*curl *" → "curl", "*rm -rf /*" → "rm", "cat *" → "cat"
+func extractCmdWord(pattern string) string {
+	s := strings.TrimLeft(pattern, "*")
+	s = strings.TrimSpace(s)
+	if idx := strings.IndexAny(s, " *"); idx > 0 {
+		return s[:idx]
+	}
+	if s != "" {
+		return s
+	}
+	return ""
+}
+
+// splitSegments splits a command by chain operators (|, ;, &&, ||)
+// so each segment can be checked for its executable independently.
+func splitSegments(command string) []string {
+	// Simple split — replace chain operators with a separator then split
+	s := command
+	for _, op := range []string{"&&", "||"} {
+		s = strings.ReplaceAll(s, op, "\x00")
+	}
+	for _, ch := range []byte{';', '|'} {
+		s = strings.ReplaceAll(s, string(ch), "\x00")
+	}
+	var segments []string
+	for _, seg := range strings.Split(s, "\x00") {
+		seg = strings.TrimSpace(seg)
+		if seg != "" {
+			segments = append(segments, seg)
+		}
+	}
+	if len(segments) == 0 {
+		return []string{command}
+	}
+	return segments
+}
+
+// extractExecutables returns the command names from a command string,
+// handling prefixes like sudo, env, and paths.
+func extractExecutables(command string) []string {
+	var exes []string
+	prefixes := map[string]bool{"sudo": true, "env": true, "nice": true, "nohup": true, "time": true}
+
+	// Only look at the first few tokens — stop at arguments
+	tokens := strings.Fields(command)
+	for i, tok := range tokens {
+		// Stop at flags, quotes, or too many tokens
+		if i > 3 || strings.HasPrefix(tok, "-") || strings.HasPrefix(tok, "\"") || strings.HasPrefix(tok, "'") {
+			break
+		}
+		// Strip path
+		base := tok
+		if idx := strings.LastIndex(base, "/"); idx >= 0 {
+			base = base[idx+1:]
+		}
+		exes = append(exes, base)
+		// Stop after first non-prefix command
+		if !prefixes[base] {
+			break
+		}
+	}
+	return exes
 }
 
 // globMatch implements simple glob matching: * matches any characters.

@@ -33,6 +33,7 @@ type CaseResult struct {
 	Expected     string
 	Predictions  []string
 	RawResponses []string
+	DurationMs   int64
 }
 
 func (r *CaseResult) MajorityPrediction() string {
@@ -529,6 +530,7 @@ func runCase(c EvalCase, cfg LLMConfig, systemPrompt string, suiteType string, o
 			userPrompt = buildGreenfieldPrompt(c, opts.NoThink)
 		}
 
+		start := time.Now()
 		raw, err := CallLLM(cfg, systemPrompt, userPrompt, opts.MaxTokens)
 		if err != nil {
 			result.Predictions = append(result.Predictions, "error")
@@ -553,6 +555,8 @@ func runCase(c EvalCase, cfg LLMConfig, systemPrompt string, suiteType string, o
 				}
 			}
 		}
+
+		result.DurationMs += time.Since(start).Milliseconds()
 
 		if i < opts.Runs-1 && needsRateLimit(cfg.URL) {
 			time.Sleep(500 * time.Millisecond)
@@ -702,8 +706,8 @@ func cmdEval(opts EvalOptions) {
 						cmdShort = cmdShort[:80]
 					}
 					preds := strings.Join(result.Predictions, ",")
-					fmt.Printf("  [%d/%d] %s %s: expected=%s got=%s [%s]\n",
-						i+1, len(cases), status, result.CaseID, result.Expected, result.MajorityPrediction(), preds)
+					fmt.Printf("  [%d/%d] %s %s: expected=%s got=%s [%s] %dms\n",
+						i+1, len(cases), status, result.CaseID, result.Expected, result.MajorityPrediction(), preds, result.DurationMs)
 					if !result.Passed() {
 						fmt.Printf("           %s\n", cmdShort)
 					}
@@ -725,6 +729,16 @@ func cmdEval(opts EvalOptions) {
 			if !opts.Verbose {
 				fmt.Printf(" [%d/%d]\n", len(cases), len(cases))
 			}
+
+			var totalMs int64
+			for _, r := range results {
+				totalMs += r.DurationMs
+			}
+			avgMs := int64(0)
+			if len(results) > 0 {
+				avgMs = totalMs / int64(len(results))
+			}
+			fmt.Printf("  LLM time: %dms total, %dms avg/case\n", totalMs, avgMs)
 
 			metrics := computeMetrics(results, cases)
 			allMetrics[modelSpec] = metrics

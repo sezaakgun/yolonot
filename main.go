@@ -84,8 +84,10 @@ func cmdDefault() {
 	}
 
 	fmt.Printf("  Status:   installed\n")
+	fmt.Printf("  Version:  %s\n", Version)
 	fmt.Printf("  Provider: %s\n", provider)
 	fmt.Printf("  Data:     %s\n", YolonotDir())
+	printUpdateHint()
 
 	// Session summary if available
 	sessionID := os.Getenv("CLAUDE_SESSION_ID")

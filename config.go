@@ -13,11 +13,12 @@ import (
 )
 
 type ProviderConfig struct {
-	Name   string `json:"name,omitempty"`
-	URL    string `json:"url,omitempty"`
-	Model  string `json:"model,omitempty"`
-	EnvKey string `json:"env_key,omitempty"`
-	APIKey string `json:"api_key,omitempty"`
+	Name    string `json:"name,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Model   string `json:"model,omitempty"`
+	EnvKey  string `json:"env_key,omitempty"`
+	APIKey  string `json:"api_key,omitempty"`
+	Timeout int    `json:"timeout,omitempty"` // LLM call timeout in seconds
 }
 
 type Config struct {
@@ -96,8 +97,9 @@ func IsInstalled() bool {
 
 func cmdInstall() {
 	if IsInstalled() {
-		fmt.Println("yolonot is already installed.")
-		return
+		// Update: remove old hooks, reinstall with current settings
+		removeHooks()
+		fmt.Println("Updating yolonot hooks...")
 	}
 
 	s := loadSettings()
@@ -109,8 +111,8 @@ func cmdInstall() {
 
 	bp := binaryPath() + " hook"
 
-	preHook := map[string]interface{}{"type": "command", "command": bp, "timeout": 120.0}
-	postHook := map[string]interface{}{"type": "command", "command": bp, "timeout": 5.0}
+	preHook := map[string]interface{}{"type": "command", "command": bp, "timeout": 60.0}
+	postHook := map[string]interface{}{"type": "command", "command": bp, "timeout": 60.0}
 
 	// PreToolUse: add to existing Bash entry or create before catch-all
 	addHookToEvent(hooks, "PreToolUse", "Bash", preHook)
@@ -140,34 +142,8 @@ func installSkill() {
 	skillDir := filepath.Join(home, ".claude", "skills", "yolonot")
 	skillDst := filepath.Join(skillDir, "SKILL.md")
 
-	// Find SKILL.md relative to the binary
-	exe, _ := os.Executable()
-	exeDir := filepath.Dir(exe)
-	candidates := []string{
-		filepath.Join(exeDir, ".claude", "skills", "yolonot", "SKILL.md"),
-		filepath.Join(exeDir, "skills", "yolonot", "SKILL.md"),
-	}
-
-	var skillSrc string
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			skillSrc = c
-			break
-		}
-	}
-
-	if skillSrc == "" {
-		fmt.Println("  Skill: SKILL.md not found (install manually from repo)")
-		return
-	}
-
 	os.MkdirAll(skillDir, 0755)
-	data, err := os.ReadFile(skillSrc)
-	if err != nil {
-		fmt.Printf("  Skill: error reading %s: %v\n", skillSrc, err)
-		return
-	}
-	os.WriteFile(skillDst, data, 0644)
+	os.WriteFile(skillDst, embeddedSkillMD, 0644)
 	fmt.Printf("  Skill      → %s\n", skillDir)
 }
 
@@ -206,12 +182,8 @@ func addHookToEvent(hooks map[string]interface{}, event, matcher string, hook ma
 	hooks[event] = entries
 }
 
-func cmdUninstall() {
-	if !IsInstalled() {
-		fmt.Println("yolonot is not installed.")
-		return
-	}
-
+// removeHooks strips all yolonot hooks from settings.json, preserving other hooks.
+func removeHooks() {
 	s := loadSettings()
 	hooks, _ := s["hooks"].(map[string]interface{})
 
@@ -240,6 +212,15 @@ func cmdUninstall() {
 	}
 
 	saveSettings(s)
+}
+
+func cmdUninstall() {
+	if !IsInstalled() {
+		fmt.Println("yolonot is not installed.")
+		return
+	}
+
+	removeHooks()
 
 	// Remove skill
 	home, _ := os.UserHomeDir()
@@ -465,7 +446,8 @@ func cmdProvider() {
 				icon = "✗"
 				status = "claude not found"
 			} else {
-				status = "uses your subscription"
+				icon = "⚠"
+				status = "slow — not recommended"
 			}
 		} else if p.EnvKey != "" && os.Getenv(p.EnvKey) == "" && config.Provider.APIKey == "" {
 			icon = "✗"
@@ -508,6 +490,20 @@ func cmdProvider() {
 		var model string
 		var apiKey string
 
+		if p.URL == "claude-cli" {
+			fmt.Println()
+			fmt.Println("  Warning: Claude Code subscription is slow (~2-5s per command).")
+			fmt.Println("  Every command spawns a separate claude process.")
+			fmt.Println("  Recommended alternatives:")
+			fmt.Println("    - Ollama with gemma4:e4b (free, local, fast)")
+			fmt.Println("    - OpenAI gpt-5.4-nano (cheap, fast)")
+			fmt.Println()
+			if !tuiConfirm("Continue with Claude Code subscription?") {
+				fmt.Println("Cancelled.")
+				return
+			}
+		}
+
 		// Get API key first
 		if p.EnvKey != "" {
 			apiKey = os.Getenv(p.EnvKey)
@@ -536,11 +532,26 @@ func cmdProvider() {
 					model = models[modelIdx]
 				}
 			} else {
-				model = tuiInput("Model name", "e.g. llama3:8b", "")
+				fmt.Println("  No models installed. Recommended: gemma4:e4b")
+				fmt.Println("  Install with: ollama pull gemma4:e4b")
+				model = tuiInput("Model name", "gemma4:e4b", "gemma4:e4b")
 			}
 		} else {
-			if len(p.Models) > 0 {
-				choices := append([]string{}, p.Models...)
+			models := p.Models
+
+			// OpenRouter: fetch free models live
+			if strings.Contains(p.URL, "openrouter") && len(models) == 0 {
+				fmt.Print("Fetching free models... ")
+				models = fetchOpenRouterFreeModels()
+				if len(models) > 0 {
+					fmt.Printf("found %d\n", len(models))
+				} else {
+					fmt.Println("failed")
+				}
+			}
+
+			if len(models) > 0 {
+				choices := append([]string{}, models...)
 				choices = append(choices, "Other (type name)")
 				modelIdx := tuiSelect(fmt.Sprintf("Select %s model", p.Name), choices, 0)
 				if modelIdx < 0 {
@@ -562,7 +573,12 @@ func cmdProvider() {
 			return
 		}
 
-		selected = ProviderConfig{Name: p.Name, URL: p.URL, Model: model, EnvKey: p.EnvKey}
+		timeout := 10
+		if strings.Contains(p.URL, "localhost") || strings.Contains(p.URL, "openrouter") || p.URL == "claude-cli" {
+			timeout = 30
+		}
+
+		selected = ProviderConfig{Name: p.Name, URL: p.URL, Model: model, EnvKey: p.EnvKey, Timeout: timeout}
 		if apiKey != "" && os.Getenv(p.EnvKey) == "" {
 			selected.APIKey = apiKey
 		}
@@ -604,6 +620,34 @@ func cmdProvider() {
 	} else {
 		fmt.Println("unexpected response")
 	}
+}
+
+// fetchOpenRouterFreeModels fetches the list of free models from OpenRouter.
+func fetchOpenRouterFreeModels() []string {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("https://openrouter.ai/api/v1/models")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+
+	var models []string
+	for _, m := range result.Data {
+		if strings.HasSuffix(m.ID, ":free") {
+			models = append(models, m.ID)
+		}
+	}
+	return models
 }
 
 func checkOllama() bool {

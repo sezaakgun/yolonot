@@ -101,9 +101,10 @@ type Decision struct {
 
 // LLMConfig holds provider connection info.
 type LLMConfig struct {
-	URL    string
-	Model  string
-	APIKey string
+	URL     string
+	Model   string
+	APIKey  string
+	Timeout int // seconds, 0 = use default
 }
 
 // GetLLMConfig resolves provider config from env vars > config.json.
@@ -124,7 +125,7 @@ func GetLLMConfig() LLMConfig {
 		apiKey = p.APIKey
 	}
 
-	return LLMConfig{URL: url, Model: model, APIKey: apiKey}
+	return LLMConfig{URL: url, Model: model, APIKey: apiKey, Timeout: p.Timeout}
 }
 
 // needsNewTokenParam checks if the model requires max_completion_tokens.
@@ -145,7 +146,10 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 		return callClaudeCLI(cfg, systemPrompt, userPrompt)
 	}
 
-	timeout := 10
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = 10
+	}
 	if t := os.Getenv("LLM_TIMEOUT"); t != "" {
 		fmt.Sscanf(t, "%d", &timeout)
 	}

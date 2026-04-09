@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // HookPayload is the JSON sent by Claude Code to hooks.
@@ -79,9 +81,13 @@ func cmdHook() {
 	// Step 0: Deny rules — checked first, absolute, no override
 	rules := LoadRules()
 	sensitive := LoadSensitivePatterns()
+	firstToken := command
+	if idx := strings.IndexByte(command, ' '); idx > 0 {
+		firstToken = command[:idx]
+	}
 	for _, r := range rules {
 		if r.Action == "deny" {
-			if (r.Type == "cmd" && globMatch(r.Pattern, command)) ||
+			if (r.Type == "cmd" && matchCmd(r.Pattern, command, firstToken)) ||
 				(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && globMatch(r.Pattern, scriptPathRe.FindStringSubmatch(" "+command)[1])) {
 				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "deny", Reasoning: fmt.Sprintf("matched rule: deny-%s %s", r.Type, r.Pattern)})
 				fmt.Println(hookResponse("deny", fmt.Sprintf("yolonot: rule %s", r.Pattern)))
@@ -120,12 +126,14 @@ func cmdHook() {
 		if len(approved) > 0 {
 			cfg := GetLLMConfig()
 			userPrompt := BuildComparePrompt(command, approved)
+			start := time.Now()
 			text, err := CallLLM(cfg, ComparePrompt, userPrompt, 256)
+			ms := time.Since(start).Milliseconds()
 			if err == nil {
 				d := ParseDecision(text)
 				if d != nil && d.Decision == "allow" {
 					AppendLine(sessionID, "approved", command)
-					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "allow", Reasoning: d.Reasoning})
+					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "allow", Reasoning: d.Reasoning, DurationMs: ms})
 					fmt.Println(hookResponse("allow", "yolonot: similar to approved — "+d.Reasoning))
 					return
 				}
@@ -175,24 +183,26 @@ func cmdHook() {
 	// Step 5: LLM analysis
 	cfg := GetLLMConfig()
 	userPrompt := BuildAnalyzePrompt(command)
+	start := time.Now()
 	text, err := CallLLM(cfg, SystemPrompt, userPrompt, 4096)
+	ms := time.Since(start).Milliseconds()
 	if err != nil {
 		// LLM unavailable → go transparent, let Claude Code decide
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "LLM unavailable"})
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "LLM unavailable", DurationMs: ms})
 		return
 	}
 
 	d := ParseDecision(text)
 	if d == nil {
 		// Parse error → go transparent, let Claude Code decide
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "parse error"})
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "parse error", DurationMs: ms})
 		return
 	}
 
 	// Cache the decision if it involved a script file
 	saveCache(command, d)
 
-	LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: d.Decision, Confidence: d.Confidence, Reasoning: d.Reasoning})
+	LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: d.Decision, Confidence: d.Confidence, Reasoning: d.Reasoning, DurationMs: ms})
 
 	if d.Decision == "allow" {
 		if sessionID != "" {

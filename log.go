@@ -21,6 +21,7 @@ type DecisionEntry struct {
 	Reasoning  string  `json:"reasoning,omitempty"`
 	Source     string  `json:"source,omitempty"`
 	ReturnedAs string  `json:"returned_as,omitempty"`
+	DurationMs int64   `json:"duration_ms,omitempty"`
 }
 
 func decisionsPath() string {
@@ -124,11 +125,15 @@ func cmdLog(n int) {
 			}
 			extra = "  (" + r + ")"
 		}
+		dur := ""
+		if e.DurationMs > 0 {
+			dur = fmt.Sprintf("  %dms", e.DurationMs)
+		}
 		cmd := e.Command
 		if len(cmd) > 60 {
 			cmd = cmd[:57] + "..."
 		}
-		fmt.Printf("  %s  %-6s %-14s %s%s\n", ts, e.Decision, e.Layer, cmd, extra)
+		fmt.Printf("  %s  %-6s %-14s %s%s%s\n", ts, e.Decision, e.Layer, cmd, extra, dur)
 	}
 
 	// Total count
