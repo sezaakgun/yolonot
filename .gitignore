@@ -5,3 +5,4 @@ coverage.out
 .pytest_cache/
 .claude/
 .dippy
+force
