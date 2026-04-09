@@ -3,10 +3,19 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strconv"
 )
 
 var Version = "dev"
+
+func init() {
+	if Version == "dev" {
+		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			Version = info.Main.Version
+		}
+	}
+}
 
 func main() {
 	if len(os.Args) < 2 {
