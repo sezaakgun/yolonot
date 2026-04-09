@@ -76,6 +76,20 @@ func cmdHook() {
 		return
 	}
 
+	// Step 0: Deny rules — checked first, absolute, no override
+	rules := LoadRules()
+	sensitive := LoadSensitivePatterns()
+	for _, r := range rules {
+		if r.Action == "deny" {
+			if (r.Type == "cmd" && globMatch(r.Pattern, command)) ||
+				(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && globMatch(r.Pattern, scriptPathRe.FindStringSubmatch(" "+command)[1])) {
+				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "deny", Reasoning: fmt.Sprintf("matched rule: deny-%s %s", r.Type, r.Pattern)})
+				fmt.Println(hookResponse("deny", fmt.Sprintf("yolonot: rule %s", r.Pattern)))
+				return
+			}
+		}
+	}
+
 	// Step 1: Session exact match → allow
 	if sessionID != "" && ContainsLine(sessionID, "approved", command) {
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "exact_match"})
@@ -119,9 +133,7 @@ func cmdHook() {
 		}
 	}
 
-	// Step 3: Rule matching
-	rules := LoadRules()
-	sensitive := LoadSensitivePatterns()
+	// Step 3: Rule matching (allow/ask — deny already handled in step 0)
 	if match := MatchRuleWith(command, rules, sensitive); match != nil {
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: match.Action, Reasoning: fmt.Sprintf("matched rule: %s-%s", match.Action, match.Pattern)})
 		if match.Action == "allow" {

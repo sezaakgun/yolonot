@@ -1937,6 +1937,65 @@ func TestCmdHookRuleDeny(t *testing.T) {
 	}
 }
 
+func TestCmdHookDenyRuleBeatsSessionApproval(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("deny-cmd *rm -rf /*\n"), 0644)
+
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	sid := "deny-beats-session"
+	// Pre-approve the dangerous command in session memory
+	AppendLine(sid, "approved", "rm -rf /")
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"rm -rf /"}}`, sid, projectDir)
+	out := runHookWithPayload(t, payload)
+
+	// Deny rule must still block even though command is in session approved list
+	if !strings.Contains(out, `"permissionDecision":"deny"`) {
+		t.Errorf("deny rule must override session approval, got: %s", out)
+	}
+}
+
+func TestCmdHookDenyRuleBeatsLLMAllow(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// LLM that always says allow
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","confidence":1.0,"reasoning":"safe"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test"}})
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("deny-cmd *rm -rf /*\n"), 0644)
+
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"deny-beats-llm","cwd":"%s","tool_input":{"command":"rm -rf /"}}`, projectDir)
+	out := runHookWithPayload(t, payload)
+
+	// Deny rule must block even if LLM would allow
+	if !strings.Contains(out, `"permissionDecision":"deny"`) {
+		t.Errorf("deny rule must override LLM allow, got: %s", out)
+	}
+}
+
 func TestCmdHookRuleAsk(t *testing.T) {
 	dir, cleanup := withFakeHome(t)
 	defer cleanup()

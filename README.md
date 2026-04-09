@@ -34,14 +34,15 @@ yolonot setup
 
 Every Bash command goes through this pipeline:
 
-1. **Session memory** — exact match against previously approved commands → instant allow
-2. **Session deny** — previously rejected commands → instant block
-3. **Session similarity** — LLM compares against approved commands → allow if similar
-4. **Rules** — `.yolonot` file patterns (allow/deny/ask) → instant decision
-5. **Script cache** — SHA256 hash of script files → reuse cached decision
-6. **LLM analysis** — 2-class classifier (allow/ask) with severity in reasoning
+1. **Deny rules** — absolute block, no override, checked first
+2. **Session memory** — exact match against previously approved commands → instant allow
+3. **Session deny** — previously rejected commands → instant block
+4. **Session similarity** — LLM compares against approved commands → allow if similar
+5. **Allow/Ask rules** — `.yolonot` file patterns → instant decision
+6. **Script cache** — SHA256 hash of script files → reuse cached decision
+7. **LLM analysis** — 2-class classifier (allow/ask) with severity in reasoning
 
-When you approve a command, it's saved for the session. When you reject one, similar commands are auto-blocked. Rules let you permanently allow/deny patterns.
+`deny` rules are absolute — nothing can override them (not session memory, not LLM). `ask` rules prompt you once, then session memory takes over. `allow` rules are instant but skipped for chained commands, redirects, or sensitive files.
 
 ## Commands
 
