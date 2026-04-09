@@ -123,11 +123,12 @@ Use `yolonot rules` to see current status.
 
 Configure with `yolonot provider`:
 
-| Provider | Model | Notes |
-|----------|-------|-------|
-| OpenAI | gpt-5.4-nano | Default. Needs `OPENAI_API_KEY` |
+| Provider | Models | Notes |
+|----------|--------|-------|
+| OpenAI | gpt-5.4-mini, gpt-5.4-mini, gpt-4o-mini | Needs `OPENAI_API_KEY` |
 | Anthropic | claude-haiku, claude-sonnet | Needs `ANTHROPIC_API_KEY` |
-| Ollama | qwen3.5:9b, etc. | Local, no API key. Lists installed models |
+| xAI | grok-4-1-fast-reasoning, grok-4-1-fast-non-reasoning | Needs `XAI_API_KEY` |
+| Ollama | any installed model | Local, no API key |
 | OpenRouter | any model | Needs `OPENROUTER_API_KEY` |
 | Custom | any URL | Bring your own endpoint |
 
@@ -139,15 +140,15 @@ Test LLM reasoning across models:
 
 ```bash
 # Run all test suites
-./yolonot eval --all --model gpt-5.4-nano --runs 1 --verbose
+./yolonot eval --all --model gpt-5.4-mini --runs 1 --verbose
 
 # Compare models
 ./yolonot eval --suite evals/suites/greenfield.jsonl \
-  --model gpt-5.4-nano --model ollama/qwen3.5:9b
+  --model gpt-5.4-mini --model ollama/qwen3.5:9b
 
 # Filter by category
 ./yolonot eval --suite evals/suites/greenfield.jsonl \
-  --model gpt-5.4-nano --filter-expected ask --filter-category adversarial
+  --model gpt-5.4-mini --filter-expected ask --filter-category adversarial
 ```
 
 176 greenfield + 70 brownfield test cases covering read-only ops, production mutations, safe dev work, sensitive commands, exfiltration, redirects, adversarial attacks, and session similarity.

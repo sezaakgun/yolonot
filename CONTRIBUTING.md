@@ -42,7 +42,7 @@ evals/suites/   LLM eval test cases (JSONL)
 To test LLM prompt quality across models:
 
 ```bash
-./yolonot eval --all --model gpt-5.4-nano --runs 1 --verbose
+./yolonot eval --all --model gpt-5.4-mini --runs 1 --verbose
 ```
 
 ## Adding Eval Cases

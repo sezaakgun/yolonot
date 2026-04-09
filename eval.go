@@ -566,13 +566,15 @@ func resolveLLMConfig(modelSpec string) LLMConfig {
 	var cfg LLMConfig
 
 	switch {
+	// OpenAI models
 	case modelSpec == "gpt-4o-mini" || modelSpec == "gpt-4o" ||
 		modelSpec == "gpt-4.1-mini" || modelSpec == "gpt-4.1-nano" || modelSpec == "gpt-4.1" ||
-		modelSpec == "o4-mini" ||
+		modelSpec == "o4-mini" || modelSpec == "o3-mini" ||
 		strings.HasPrefix(modelSpec, "gpt-5"):
 		cfg.Model = modelSpec
 		cfg.URL = "https://api.openai.com/v1/chat/completions"
 		cfg.APIKey = os.Getenv("OPENAI_API_KEY")
+	// Anthropic models
 	case modelSpec == "claude-haiku":
 		cfg.Model = "claude-3-5-haiku-20241022"
 		cfg.URL = "https://api.anthropic.com/v1/messages"
@@ -585,9 +587,16 @@ func resolveLLMConfig(modelSpec string) LLMConfig {
 		cfg.Model = "claude-opus-4-0-20250514"
 		cfg.URL = "https://api.anthropic.com/v1/messages"
 		cfg.APIKey = os.Getenv("ANTHROPIC_API_KEY")
+	// xAI models
+	case strings.HasPrefix(modelSpec, "grok"):
+		cfg.Model = modelSpec
+		cfg.URL = "https://api.x.ai/v1/chat/completions"
+		cfg.APIKey = os.Getenv("XAI_API_KEY")
+	// Ollama (local)
 	case strings.HasPrefix(modelSpec, "ollama/"):
 		cfg.Model = modelSpec[len("ollama/"):]
 		cfg.URL = "http://localhost:11434/v1/chat/completions"
+	// OpenRouter
 	case strings.HasPrefix(modelSpec, "openrouter/"):
 		cfg.Model = modelSpec[len("openrouter/"):]
 		cfg.URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -620,7 +629,9 @@ func cmdEval(opts EvalOptions) {
 		fmt.Println("  --max-tokens <n>         Max output tokens (default: 4096)")
 		fmt.Println("  --no-think               Append /no_think to prompts")
 		fmt.Println()
-		fmt.Println("Models: gpt-4o-mini, gpt-4.1-nano, claude-haiku, claude-sonnet,")
+		fmt.Println("Models: gpt-5.4-mini, gpt-5.4-nano, gpt-4o-mini,")
+		fmt.Println("        claude-haiku, claude-sonnet,")
+		fmt.Println("        grok-4-1-fast-reasoning, grok-4-1-fast-non-reasoning,")
 		fmt.Println("        ollama/<model>, openrouter/<model>, or any OpenAI-compatible name")
 		return
 	}

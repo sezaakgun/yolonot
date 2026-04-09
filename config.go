@@ -435,14 +435,21 @@ func cmdProvider() {
 	type providerInfo struct {
 		Name   string
 		URL    string
-		Model  string
+		Models []string
 		EnvKey string
 	}
 	providers := []providerInfo{
-		{"OpenAI", "https://api.openai.com/v1/chat/completions", "gpt-4o-mini", "OPENAI_API_KEY"},
-		{"Anthropic", "https://api.anthropic.com/v1/messages", "claude-haiku", "ANTHROPIC_API_KEY"},
-		{"Ollama (local)", "http://localhost:11434/v1/chat/completions", "", ""},
-		{"OpenRouter", "https://openrouter.ai/api/v1/chat/completions", "", "OPENROUTER_API_KEY"},
+		{"OpenAI", "https://api.openai.com/v1/chat/completions", []string{
+			"gpt-5.4-mini", "gpt-5.4-nano", "gpt-4o-mini",
+		}, "OPENAI_API_KEY"},
+		{"Anthropic", "https://api.anthropic.com/v1/messages", []string{
+			"claude-haiku", "claude-sonnet",
+		}, "ANTHROPIC_API_KEY"},
+		{"xAI", "https://api.x.ai/v1/chat/completions", []string{
+			"grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning",
+		}, "XAI_API_KEY"},
+		{"Ollama (local)", "http://localhost:11434/v1/chat/completions", nil, ""},
+		{"OpenRouter", "https://openrouter.ai/api/v1/chat/completions", nil, "OPENROUTER_API_KEY"},
 	}
 
 	// Build menu items with status indicators
@@ -462,11 +469,13 @@ func cmdProvider() {
 				status = "not running"
 			}
 		}
-		modelStr := p.Model
-		if modelStr == "" {
-			modelStr = "(select model)"
+		modelHint := ""
+		if len(p.Models) > 0 {
+			modelHint = p.Models[0]
+		} else {
+			modelHint = "(select model)"
 		}
-		items = append(items, fmt.Sprintf("%s %s — %s [%s]", icon, p.Name, modelStr, status))
+		items = append(items, fmt.Sprintf("%s %s — %s [%s]", icon, p.Name, modelHint, status))
 	}
 	items = append(items, "Custom endpoint")
 
@@ -487,49 +496,66 @@ func cmdProvider() {
 	switch {
 	case idx < len(providers):
 		p := providers[idx]
-		model := p.Model
+		var model string
+		var apiKey string
+
+		// Get API key first
+		if p.EnvKey != "" {
+			apiKey = os.Getenv(p.EnvKey)
+			if apiKey == "" {
+				apiKey = tuiPassword(p.EnvKey)
+			}
+		}
 
 		if strings.Contains(p.URL, "localhost") {
-			// Ollama: list installed models with TUI
+			// Ollama: list installed models
 			if !checkOllama() {
 				tuiNote("Ollama not running", "Start it with: ollama serve")
 				return
 			}
 			models := listOllamaModels()
 			if len(models) > 0 {
+				models = append(models, "Other (type name)")
 				modelIdx := tuiSelect("Select Ollama model", models, 0)
 				if modelIdx < 0 {
 					fmt.Println("Cancelled.")
 					return
 				}
-				model = models[modelIdx]
+				if modelIdx == len(models)-1 {
+					model = tuiInput("Model name", "e.g. llama3:8b", "")
+				} else {
+					model = models[modelIdx]
+				}
 			} else {
 				model = tuiInput("Model name", "e.g. llama3:8b", "")
 			}
-			if model == "" {
-				fmt.Println("Cancelled.")
-				return
-			}
-		} else if model != "" {
-			custom := tuiInput("Model", "press enter for default", model)
-			if custom != "" {
-				model = custom
-			}
 		} else {
-			model = tuiInput("Model name", "e.g. gpt-4o-mini", "")
-			if model == "" {
-				fmt.Println("Cancelled.")
-				return
+			if len(p.Models) > 0 {
+				choices := append([]string{}, p.Models...)
+				choices = append(choices, "Other (type name)")
+				modelIdx := tuiSelect(fmt.Sprintf("Select %s model", p.Name), choices, 0)
+				if modelIdx < 0 {
+					fmt.Println("Cancelled.")
+					return
+				}
+				if modelIdx == len(choices)-1 {
+					model = tuiInput("Model name", "", "")
+				} else {
+					model = choices[modelIdx]
+				}
+			} else {
+				model = tuiInput("Model name", "", "")
 			}
 		}
 
-		selected = ProviderConfig{Name: p.Name, URL: p.URL, Model: model, EnvKey: p.EnvKey}
+		if model == "" {
+			fmt.Println("Cancelled.")
+			return
+		}
 
-		if p.EnvKey != "" && os.Getenv(p.EnvKey) == "" {
-			key := tuiPassword(p.EnvKey)
-			if key != "" {
-				selected.APIKey = key
-			}
+		selected = ProviderConfig{Name: p.Name, URL: p.URL, Model: model, EnvKey: p.EnvKey}
+		if apiKey != "" && os.Getenv(p.EnvKey) == "" {
+			selected.APIKey = apiKey
 		}
 
 	case idx == len(providers):
