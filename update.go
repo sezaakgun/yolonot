@@ -80,5 +80,22 @@ func cmdUpgrade() {
 		return
 	}
 
-	fmt.Printf("\nUpgraded to %s. Run 'yolonot install' to update hooks.\n", latest)
+	fmt.Printf("\nUpgraded to %s.\n", latest)
+
+	// Re-run install via the new binary to update hooks + skill
+	if IsInstalled() {
+		fmt.Println("Updating hooks...")
+		// Exec the new binary so it loads the new code (SKILL.md, hook config, etc.)
+		install := exec.Command("yolonot", "install")
+		install.Stdout = os.Stdout
+		install.Stderr = os.Stderr
+		if err := install.Run(); err != nil {
+			fmt.Printf("\nHook update failed: %v\n", err)
+			fmt.Println("Run 'yolonot install' manually.")
+			return
+		}
+		fmt.Println("\nRestart Claude Code to activate the new version.")
+	} else {
+		fmt.Println("Run 'yolonot setup' to install hooks.")
+	}
 }
