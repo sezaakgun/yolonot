@@ -1984,27 +1984,48 @@ func TestCmdPauseAndResume(t *testing.T) {
 	defer cleanup()
 
 	sid := "pause-test-session"
-	os.Setenv("CLAUDE_SESSION_ID", sid)
-	defer os.Unsetenv("CLAUDE_SESSION_ID")
-
-	// Create session file so FindSessionID would find it
-	AppendLine(sid, "approved", "ls")
 
 	// Not paused initially
 	if isPaused(sid) {
 		t.Error("should not be paused initially")
 	}
 
-	// Pause
-	captureStdout(cmdPause)
+	// Pause via --session-id flag
+	captureStdout(func() { cmdPause([]string{"--session-id", sid}) })
 	if !isPaused(sid) {
-		t.Error("should be paused after cmdPause")
+		t.Error("should be paused after cmdPause with --session-id flag")
 	}
 
-	// Resume
-	captureStdout(cmdResume)
+	// Resume via --session-id flag
+	captureStdout(func() { cmdResume([]string{"--session-id", sid}) })
 	if isPaused(sid) {
 		t.Error("should not be paused after cmdResume")
+	}
+
+	// Pause via env var
+	os.Setenv("CLAUDE_SESSION_ID", sid)
+	defer os.Unsetenv("CLAUDE_SESSION_ID")
+	captureStdout(func() { cmdPause(nil) })
+	if !isPaused(sid) {
+		t.Error("should be paused via env var")
+	}
+
+	// Resume via env var
+	captureStdout(func() { cmdResume(nil) })
+	if isPaused(sid) {
+		t.Error("should not be paused after resume")
+	}
+}
+
+func TestCmdPauseNoSessionID(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	os.Unsetenv("CLAUDE_SESSION_ID")
+
+	out := captureStdout(func() { cmdPause(nil) })
+	if !strings.Contains(out, "session ID not provided") {
+		t.Errorf("should error when no session ID, got: %s", out)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // pauseFile returns the path to the pause marker for a session.
@@ -20,18 +21,34 @@ func isPaused(sessionID string) bool {
 	return err == nil
 }
 
-func currentSessionID() string {
-	sid := os.Getenv("CLAUDE_SESSION_ID")
-	if sid == "" {
-		sid = FindSessionID()
+// resolveSessionID resolves the session ID from args (--session-id flag),
+// then CLAUDE_SESSION_ID env var. Returns empty if neither is set.
+func resolveSessionID(args []string) string {
+	for i, a := range args {
+		if a == "--session-id" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(a, "--session-id=") {
+			return strings.TrimPrefix(a, "--session-id=")
+		}
 	}
-	return sid
+	return os.Getenv("CLAUDE_SESSION_ID")
 }
 
-func cmdPause() {
-	sid := currentSessionID()
+func printSessionIDError(verb string) {
+	fmt.Println("Error: session ID not provided.")
+	fmt.Println()
+	fmt.Printf("Use --session-id flag or set CLAUDE_SESSION_ID env var:\n")
+	fmt.Printf("  yolonot %s --session-id <uuid>\n", verb)
+	fmt.Printf("  CLAUDE_SESSION_ID=<uuid> yolonot %s\n", verb)
+	fmt.Println()
+	fmt.Println("Inside Claude Code, use /yolonot", verb, "instead.")
+}
+
+func cmdPause(args []string) {
+	sid := resolveSessionID(args)
 	if sid == "" {
-		fmt.Println("No active session found.")
+		printSessionIDError("pause")
 		return
 	}
 
@@ -46,10 +63,10 @@ func cmdPause() {
 	fmt.Println("Run 'yolonot resume' to re-enable.")
 }
 
-func cmdResume() {
-	sid := currentSessionID()
+func cmdResume(args []string) {
+	sid := resolveSessionID(args)
 	if sid == "" {
-		fmt.Println("No active session found.")
+		printSessionIDError("resume")
 		return
 	}
 

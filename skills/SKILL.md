@@ -39,13 +39,15 @@ Commands:
 
 ### `/yolonot pause` — Disable for this session
 
-Run `yolonot pause`. This creates a marker file that makes the hook bypass
-yolonot entirely for the current session — no rules, no LLM, no session memory.
-Claude Code's native permissions handle commands as if yolonot weren't installed.
+Run `yolonot pause --session-id "$CLAUDE_SESSION_ID"`. This creates a marker
+file that makes the hook bypass yolonot entirely for the current session —
+no rules, no LLM, no session memory. Claude Code's native permissions handle
+commands as if yolonot weren't installed.
 
 ### `/yolonot resume` — Re-enable for this session
 
-Run `yolonot resume`. Removes the pause marker, yolonot takes effect again.
+Run `yolonot resume --session-id "$CLAUDE_SESSION_ID"`. Removes the pause
+marker, yolonot takes effect again.
 
 ### `/yolonot status` — Full session state
 

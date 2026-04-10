@@ -47,9 +47,9 @@ func main() {
 	case "uninstall":
 		cmdUninstall()
 	case "pause":
-		cmdPause()
+		cmdPause(os.Args[2:])
 	case "resume":
-		cmdResume()
+		cmdResume(os.Args[2:])
 	case "upgrade":
 		cmdUpgrade()
 	case "version":
