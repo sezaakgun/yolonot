@@ -72,9 +72,22 @@ yolonot rules        Show active rules + sensitive patterns
 yolonot status       Show session state (approved/asked/denied)
 yolonot log          Show recent decisions with LLM timing
 yolonot suggest      Analyze history, suggest permanent rules
+yolonot pause        Disable yolonot for current session (total bypass)
+yolonot resume       Re-enable yolonot for current session
 yolonot uninstall    Remove hooks from Claude Code
+yolonot upgrade      Update to latest version
 yolonot version      Show version
 ```
+
+### Pausing yolonot
+
+Sometimes you want to run commands without yolonot's interference — for a quick CI task, or when you know what you're doing. Two ways to disable:
+
+**Per-session (interactive)** — `yolonot pause` or `/yolonot pause` in Claude Code. Creates a pause marker for the current session. Run `yolonot resume` to re-enable. Marker auto-cleans after 24h.
+
+**Pre-launch (env var)** — `YOLONOT_DISABLED=1 claude`. Disables yolonot for the entire Claude Code session at launch. Useful for CI/automation.
+
+When paused, yolonot is **completely transparent** — no deny rules, no LLM, no session memory. Claude Code's native permissions handle everything as if yolonot weren't installed.
 
 ## Skill
 

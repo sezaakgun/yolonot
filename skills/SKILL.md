@@ -29,11 +29,23 @@ Commands:
   /yolonot approve <cmd>   — move command to approved
   /yolonot deny <cmd>      — move command to denied
   /yolonot reset           — clear session state
+  /yolonot pause           — disable yolonot for this session (total bypass)
+  /yolonot resume          — re-enable yolonot for this session
   /yolonot log             — recent decisions
   /yolonot rules           — show active rules
   /yolonot suggest          — learn from history, update rules
   /yolonot init            — create rule files for this project
 ```
+
+### `/yolonot pause` — Disable for this session
+
+Run `yolonot pause`. This creates a marker file that makes the hook bypass
+yolonot entirely for the current session — no rules, no LLM, no session memory.
+Claude Code's native permissions handle commands as if yolonot weren't installed.
+
+### `/yolonot resume` — Re-enable for this session
+
+Run `yolonot resume`. Removes the pause marker, yolonot takes effect again.
 
 ### `/yolonot status` — Full session state
 

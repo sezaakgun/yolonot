@@ -78,6 +78,18 @@ func cmdHook() {
 		return
 	}
 
+	// Disabled via env var — total bypass
+	if os.Getenv("YOLONOT_DISABLED") == "1" {
+		return
+	}
+
+	// Paused for this session — total bypass
+	if sessionID != "" {
+		if _, err := os.Stat(filepath.Join(YolonotDir(), "sessions", sessionID+".paused")); err == nil {
+			return
+		}
+	}
+
 	// Step 0: Deny rules — checked first, absolute, no override
 	rules := LoadRules()
 	sensitive := LoadSensitivePatterns()

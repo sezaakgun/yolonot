@@ -1933,6 +1933,81 @@ func TestCmdHookSessionAllow(t *testing.T) {
 	}
 }
 
+func TestCmdHookPausedSessionBypasses(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Create pause marker for session
+	sid := "paused-session"
+	os.MkdirAll(filepath.Join(dir, ".yolonot", "sessions"), 0755)
+	os.WriteFile(filepath.Join(dir, ".yolonot", "sessions", sid+".paused"), []byte{}, 0644)
+
+	// Create a project with a deny rule that would normally block rm -rf /
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("deny-cmd *rm -rf /*\n"), 0644)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	// Even the deny rule should be bypassed when paused
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"rm -rf /"}}`, sid, projectDir)
+	out := strings.TrimSpace(runHookWithPayload(t, payload))
+	if out != "" {
+		t.Errorf("paused session should produce no output (total bypass), got: %s", out)
+	}
+}
+
+func TestCmdHookDisabledEnvVarBypasses(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	os.Setenv("YOLONOT_DISABLED", "1")
+	defer os.Unsetenv("YOLONOT_DISABLED")
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("deny-cmd *rm -rf /*\n"), 0644)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"env-disabled","cwd":"%s","tool_input":{"command":"rm -rf /"}}`, projectDir)
+	out := strings.TrimSpace(runHookWithPayload(t, payload))
+	if out != "" {
+		t.Errorf("YOLONOT_DISABLED=1 should produce no output, got: %s", out)
+	}
+}
+
+func TestCmdPauseAndResume(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	sid := "pause-test-session"
+	os.Setenv("CLAUDE_SESSION_ID", sid)
+	defer os.Unsetenv("CLAUDE_SESSION_ID")
+
+	// Create session file so FindSessionID would find it
+	AppendLine(sid, "approved", "ls")
+
+	// Not paused initially
+	if isPaused(sid) {
+		t.Error("should not be paused initially")
+	}
+
+	// Pause
+	captureStdout(cmdPause)
+	if !isPaused(sid) {
+		t.Error("should be paused after cmdPause")
+	}
+
+	// Resume
+	captureStdout(cmdResume)
+	if isPaused(sid) {
+		t.Error("should not be paused after cmdResume")
+	}
+}
+
 func TestCmdHookSessionDeny(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()

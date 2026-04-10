@@ -46,6 +46,10 @@ func main() {
 		cmdEvolve()
 	case "uninstall":
 		cmdUninstall()
+	case "pause":
+		cmdPause()
+	case "resume":
+		cmdResume()
 	case "upgrade":
 		cmdUpgrade()
 	case "version":
@@ -106,12 +110,20 @@ func cmdDefault() {
 		sessionID = FindSessionID()
 	}
 	if sessionID != "" {
-		approved := ReadLines(sessionID, "approved")
-		asked := ReadLines(sessionID, "asked")
-		denied := ReadLines(sessionID, "denied")
-		if len(approved)+len(asked)+len(denied) > 0 {
-			fmt.Printf("  Session:  %d approved · %d asked · %d denied\n", len(approved), len(asked), len(denied))
+		if isPaused(sessionID) {
+			fmt.Printf("  Session:  PAUSED (run: yolonot resume)\n")
+		} else {
+			approved := ReadLines(sessionID, "approved")
+			asked := ReadLines(sessionID, "asked")
+			denied := ReadLines(sessionID, "denied")
+			if len(approved)+len(asked)+len(denied) > 0 {
+				fmt.Printf("  Session:  %d approved · %d asked · %d denied\n", len(approved), len(asked), len(denied))
+			}
 		}
+	}
+
+	if os.Getenv("YOLONOT_DISABLED") == "1" {
+		fmt.Println("  ⚠ Disabled via YOLONOT_DISABLED=1 env var")
 	}
 
 	fmt.Println()
@@ -122,6 +134,8 @@ func cmdDefault() {
 	fmt.Println("  status      Show session state (approved/asked/denied)")
 	fmt.Println("  log         Show recent decisions")
 	fmt.Println("  suggest     Analyze history, suggest permanent rules")
+	fmt.Println("  pause       Disable yolonot for current session (total bypass)")
+	fmt.Println("  resume      Re-enable yolonot for current session")
 	fmt.Println("  uninstall   Remove hooks from Claude Code")
 	fmt.Println("  upgrade     Update to latest version")
 	fmt.Println("  version     Show version")
