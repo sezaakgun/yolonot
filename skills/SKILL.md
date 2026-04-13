@@ -39,14 +39,14 @@ Commands:
 
 ### `/yolonot pause` — Disable for this session
 
-Run `yolonot pause --session-id "$CLAUDE_SESSION_ID"`. This creates a marker
+Run `yolonot pause --current`. This creates a marker
 file that makes the hook bypass yolonot entirely for the current session —
 no rules, no LLM, no session memory. Claude Code's native permissions handle
 commands as if yolonot weren't installed.
 
 ### `/yolonot resume` — Re-enable for this session
 
-Run `yolonot resume --session-id "$CLAUDE_SESSION_ID"`. Removes the pause
+Run `yolonot resume --current`. Removes the pause
 marker, yolonot takes effect again.
 
 ### `/yolonot status` — Full session state
@@ -259,8 +259,8 @@ Set up yolonot for the current project and globally.
 
 ## NOTES
 
-- Use `$CLAUDE_SESSION_ID` environment variable when available for current session
-- If not set, use the most recently modified `.approved` or `.asked` file
+- Use `yolonot <cmd> --current` for pause/resume (resolves via most recent session file)
+- For reading session state directly, use `$CLAUDE_SESSION_ID` if set, otherwise the most recently modified `.approved` or `.asked` file
 - For partial match in approve/deny: match if stored command contains user's input as substring
 - All session files live in `~/.yolonot/sessions/`
 - Display commands truncated to 80 chars with `...` if longer
