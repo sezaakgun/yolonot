@@ -512,7 +512,7 @@ func TestIsDir(t *testing.T) {
 // --- hookResponse ---
 
 func TestHookResponse(t *testing.T) {
-	got := hookResponse("allow", "yolonot: safe")
+	got := hookResponse("allow", "yolonot: safe", "git status")
 	var r HookResponse
 	if err := json.Unmarshal([]byte(got), &r); err != nil {
 		t.Fatal(err)
@@ -525,6 +525,9 @@ func TestHookResponse(t *testing.T) {
 	}
 	if r.HookSpecificOutput.HookEventName != "PreToolUse" {
 		t.Errorf("event = %s, want PreToolUse", r.HookSpecificOutput.HookEventName)
+	}
+	if r.SystemMessage != "yolonot: safe — `git status`" {
+		t.Errorf("systemMessage = %s, want yolonot: safe — `git status`", r.SystemMessage)
 	}
 }
 
@@ -1755,7 +1758,7 @@ func TestHookResponseFormats(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.decision, func(t *testing.T) {
-			out := hookResponse(tt.decision, tt.reason)
+			out := hookResponse(tt.decision, tt.reason, "echo test")
 			var r HookResponse
 			if err := json.Unmarshal([]byte(out), &r); err != nil {
 				t.Fatalf("invalid JSON: %v", err)
@@ -1767,6 +1770,68 @@ func TestHookResponseFormats(t *testing.T) {
 				t.Errorf("reason = %s, want %s", r.HookSpecificOutput.PermissionDecisionReason, tt.reason)
 			}
 		})
+	}
+}
+
+// --- systemMessage with command visibility ---
+
+func TestHookResponseSystemMessageIncludesCommand(t *testing.T) {
+	out := hookResponse("allow", "yolonot: rule git*", "git diff --stat")
+	var r HookResponse
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	want := "yolonot: rule git* — `git diff --stat`"
+	if r.SystemMessage != want {
+		t.Errorf("systemMessage = %q, want %q", r.SystemMessage, want)
+	}
+}
+
+func TestHookResponseSystemMessageOmittedForDeny(t *testing.T) {
+	out := hookResponse("deny", "yolonot: rule *rm*", "rm -rf /")
+	var r HookResponse
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.SystemMessage != "" {
+		t.Errorf("deny should not set systemMessage, got %q", r.SystemMessage)
+	}
+}
+
+func TestHookResponseSystemMessageOmittedForAsk(t *testing.T) {
+	out := hookResponse("ask", "yolonot: needs review", "curl example.com")
+	var r HookResponse
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.SystemMessage != "" {
+		t.Errorf("ask should not set systemMessage, got %q", r.SystemMessage)
+	}
+}
+
+func TestHookResponseSystemMessageTruncatesLongCommand(t *testing.T) {
+	longCmd := strings.Repeat("a", 100)
+	out := hookResponse("allow", "yolonot: safe", longCmd)
+	var r HookResponse
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	truncated := longCmd[:77] + "..."
+	want := "yolonot: safe — `" + truncated + "`"
+	if r.SystemMessage != want {
+		t.Errorf("systemMessage = %q, want %q", r.SystemMessage, want)
+	}
+}
+
+func TestHookResponseSystemMessageEmptyCommand(t *testing.T) {
+	out := hookResponse("allow", "yolonot: safe", "")
+	var r HookResponse
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	// Empty command falls back to reason-only
+	if r.SystemMessage != "yolonot: safe" {
+		t.Errorf("systemMessage = %q, want %q", r.SystemMessage, "yolonot: safe")
 	}
 }
 
@@ -2014,6 +2079,57 @@ func TestCmdPauseAndResume(t *testing.T) {
 	captureStdout(func() { cmdResume(nil) })
 	if isPaused(sid) {
 		t.Error("should not be paused after resume")
+	}
+}
+
+func TestCmdPauseAndResumeCurrentFlag(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	os.Unsetenv("CLAUDE_SESSION_ID")
+
+	sid := "current-flag-session"
+
+	// Create a session file so FindSessionID() returns this session
+	AppendLine(sid, "approved", "echo hello")
+
+	// Pause via --current
+	captureStdout(func() { cmdPause([]string{"--current"}) })
+	if !isPaused(sid) {
+		t.Error("--current should pause the most recent session")
+	}
+
+	// Resume via --current
+	captureStdout(func() { cmdResume([]string{"--current"}) })
+	if isPaused(sid) {
+		t.Error("--current should resume the most recent session")
+	}
+}
+
+func TestResolveSessionIDCurrentNoSessions(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	os.Unsetenv("CLAUDE_SESSION_ID")
+
+	// --current with no session files returns empty
+	got := resolveSessionID([]string{"--current"})
+	if got != "" {
+		t.Errorf("--current with no sessions should return empty, got %q", got)
+	}
+}
+
+func TestResolveSessionIDPrecedence(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Create a session so --current would find something
+	AppendLine("latest-session", "approved", "ls")
+
+	// --session-id should take precedence over --current
+	got := resolveSessionID([]string{"--session-id", "explicit-id", "--current"})
+	if got != "explicit-id" {
+		t.Errorf("--session-id should take precedence, got %q", got)
 	}
 }
 

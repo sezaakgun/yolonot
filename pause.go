@@ -22,7 +22,8 @@ func isPaused(sessionID string) bool {
 }
 
 // resolveSessionID resolves the session ID from args (--session-id flag),
-// then CLAUDE_SESSION_ID env var. Returns empty if neither is set.
+// --current flag (most recent session), then CLAUDE_SESSION_ID env var.
+// Returns empty if none is set.
 func resolveSessionID(args []string) string {
 	for i, a := range args {
 		if a == "--session-id" && i+1 < len(args) {
@@ -31,6 +32,9 @@ func resolveSessionID(args []string) string {
 		if strings.HasPrefix(a, "--session-id=") {
 			return strings.TrimPrefix(a, "--session-id=")
 		}
+		if a == "--current" {
+			return FindSessionID()
+		}
 	}
 	return os.Getenv("CLAUDE_SESSION_ID")
 }
@@ -38,7 +42,8 @@ func resolveSessionID(args []string) string {
 func printSessionIDError(verb string) {
 	fmt.Println("Error: session ID not provided.")
 	fmt.Println()
-	fmt.Printf("Use --session-id flag or set CLAUDE_SESSION_ID env var:\n")
+	fmt.Printf("Use --current (most recent session), --session-id, or CLAUDE_SESSION_ID:\n")
+	fmt.Printf("  yolonot %s --current\n", verb)
 	fmt.Printf("  yolonot %s --session-id <uuid>\n", verb)
 	fmt.Printf("  CLAUDE_SESSION_ID=<uuid> yolonot %s\n", verb)
 	fmt.Println()

@@ -23,17 +23,31 @@ type HookPayload struct {
 // HookResponse is the JSON returned to Claude Code.
 type HookResponse struct {
 	HookSpecificOutput struct {
-		HookEventName          string `json:"hookEventName"`
-		PermissionDecision     string `json:"permissionDecision"`
+		HookEventName            string `json:"hookEventName"`
+		PermissionDecision       string `json:"permissionDecision"`
 		PermissionDecisionReason string `json:"permissionDecisionReason"`
 	} `json:"hookSpecificOutput"`
+	SystemMessage string `json:"systemMessage,omitempty"`
 }
 
-func hookResponse(decision, reason string) string {
+func hookResponse(decision, reason, command string) string {
 	r := HookResponse{}
 	r.HookSpecificOutput.HookEventName = "PreToolUse"
 	r.HookSpecificOutput.PermissionDecision = decision
 	r.HookSpecificOutput.PermissionDecisionReason = reason
+	// For auto-approvals (allow), mirror the reason + command into systemMessage
+	// so the user sees WHAT was approved and WHY in the terminal — otherwise
+	// allow decisions go completely silent and the user has no visibility into
+	// which layer (session/rule/cache/LLM) approved what.
+	if decision == "allow" && command != "" {
+		cmd := command
+		if len(cmd) > 80 {
+			cmd = cmd[:77] + "..."
+		}
+		r.SystemMessage = fmt.Sprintf("%s — `%s`", reason, cmd)
+	} else if decision == "allow" {
+		r.SystemMessage = reason
+	}
 	data, _ := json.Marshal(r)
 	return string(data)
 }
@@ -102,7 +116,7 @@ func cmdHook() {
 			if (r.Type == "cmd" && matchCmd(r.Pattern, command, firstToken)) ||
 				(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && globMatch(r.Pattern, scriptPathRe.FindStringSubmatch(" "+command)[1])) {
 				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "deny", Reasoning: fmt.Sprintf("matched rule: deny-%s %s", r.Type, r.Pattern)})
-				fmt.Println(hookResponse("deny", fmt.Sprintf("yolonot: rule %s", r.Pattern)))
+				fmt.Println(hookResponse("deny", fmt.Sprintf("yolonot: rule %s", r.Pattern), command))
 				return
 			}
 		}
@@ -111,7 +125,7 @@ func cmdHook() {
 	// Step 1: Session exact match → allow
 	if sessionID != "" && ContainsLine(sessionID, "approved", command) {
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "exact_match"})
-		fmt.Println(hookResponse("allow", "yolonot: previously approved this session"))
+		fmt.Println(hookResponse("allow", "yolonot: previously approved this session", command))
 		return
 	}
 
@@ -120,14 +134,14 @@ func cmdHook() {
 		// Check explicit deny list
 		if ContainsLine(sessionID, "denied", command) {
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "ask", Source: "previously_rejected"})
-			fmt.Println(hookResponse("deny", "yolonot: previously rejected this session"))
+			fmt.Println(hookResponse("deny", "yolonot: previously rejected this session", command))
 			return
 		}
 		// Check asked-but-not-approved
 		if ContainsLine(sessionID, "asked", command) && !ContainsLine(sessionID, "approved", command) {
 			AppendLine(sessionID, "denied", command)
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "ask", Source: "asked_not_approved"})
-			fmt.Println(hookResponse("deny", "yolonot: previously rejected this session"))
+			fmt.Println(hookResponse("deny", "yolonot: previously rejected this session", command))
 			return
 		}
 	}
@@ -146,7 +160,7 @@ func cmdHook() {
 				if d != nil && d.Decision == "allow" {
 					AppendLine(sessionID, "approved", command)
 					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "allow", Reasoning: d.Reasoning, DurationMs: ms})
-					fmt.Println(hookResponse("allow", "yolonot: similar to approved — "+d.Reasoning))
+					fmt.Println(hookResponse("allow", "yolonot: similar to approved — "+d.Reasoning, command))
 					return
 				}
 			}
@@ -160,17 +174,17 @@ func cmdHook() {
 			if sessionID != "" {
 				AppendLine(sessionID, "approved", command)
 			}
-			fmt.Println(hookResponse("allow", fmt.Sprintf("yolonot: rule %s", match.Pattern)))
+			fmt.Println(hookResponse("allow", fmt.Sprintf("yolonot: rule %s", match.Pattern), command))
 			return
 		} else if match.Action == "deny" {
-			fmt.Println(hookResponse("deny", fmt.Sprintf("yolonot: rule %s", match.Pattern)))
+			fmt.Println(hookResponse("deny", fmt.Sprintf("yolonot: rule %s", match.Pattern), command))
 			return
 		} else {
 			// ask rule
 			if sessionID != "" {
 				AppendLine(sessionID, "asked", command)
 			}
-			fmt.Println(hookResponse("ask", fmt.Sprintf("yolonot: rule %s", match.Pattern)))
+			fmt.Println(hookResponse("ask", fmt.Sprintf("yolonot: rule %s", match.Pattern), command))
 			return
 		}
 	}
@@ -182,12 +196,12 @@ func cmdHook() {
 			if sessionID != "" {
 				AppendLine(sessionID, "approved", command)
 			}
-			fmt.Println(hookResponse("allow", "yolonot: "+cached.Reasoning))
+			fmt.Println(hookResponse("allow", "yolonot: "+cached.Reasoning, command))
 		} else {
 			if sessionID != "" {
 				AppendLine(sessionID, "asked", command)
 			}
-			fmt.Println(hookResponse("ask", "yolonot: "+cached.Reasoning))
+			fmt.Println(hookResponse("ask", "yolonot: "+cached.Reasoning, command))
 		}
 		return
 	}
@@ -220,12 +234,12 @@ func cmdHook() {
 		if sessionID != "" {
 			AppendLine(sessionID, "approved", command)
 		}
-		fmt.Println(hookResponse("allow", "yolonot: "+d.Reasoning))
+		fmt.Println(hookResponse("allow", "yolonot: "+d.Reasoning, command))
 	} else {
 		if sessionID != "" {
 			AppendLine(sessionID, "asked", command)
 		}
-		fmt.Println(hookResponse("ask", "yolonot: "+d.Reasoning))
+		fmt.Println(hookResponse("ask", "yolonot: "+d.Reasoning, command))
 	}
 }
 
