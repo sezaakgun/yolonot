@@ -25,16 +25,23 @@ Requires Go 1.25+.
 ## Project Structure
 
 ```
-main.go         CLI entry point
-hook.go         Hook handler pipeline
-llm.go          LLM client + prompts + response parsing
-rules.go        Rule loading + glob matching + chain detection
-session.go      Session files (approved/asked/denied)
-config.go       Config + settings.json + install/uninstall
-eval.go         LLM evaluation runner
-log.go          Decision logging (JSONL)
-main_test.go    Unit tests
-evals/suites/   LLM eval test cases (JSONL)
+main.go                   CLI entry point
+hook.go                   Hook handler pipeline
+llm.go                    LLM client + prompts + response parsing
+rules.go                  Rule loading + glob matching + chain detection
+session.go                Session files (approved/asked/denied, project-scoped)
+config.go                 Config + settings.json + install/uninstall + suggest
+check.go                  Dry-run command pipeline checker
+stats.go                  Decision analytics
+similarity.go             Session similarity pre-filtering
+tui.go                    Interactive TUI (charmbracelet/huh)
+log.go                    Decision logging (JSONL)
+eval.go                   LLM evaluation runner
+embed.go                  Embedded SKILL.md
+update.go                 GitHub release update checker
+main_test.go              Unit tests
+hook_integration_test.go  End-to-end hook pipeline tests
+evals/suites/             LLM eval test cases (JSONL)
 ```
 
 ## Running Evals

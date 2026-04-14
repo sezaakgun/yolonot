@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime/debug"
 	"strconv"
+	"strings"
 )
 
 var Version = "dev"
@@ -50,6 +51,16 @@ func main() {
 		cmdPause(os.Args[2:])
 	case "resume":
 		cmdResume(os.Args[2:])
+	case "stats":
+		cmdStats()
+	case "threshold":
+		cmdThreshold(os.Args[2:])
+	case "check":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: yolonot check <command>")
+			os.Exit(1)
+		}
+		cmdCheck(strings.Join(os.Args[2:], " "))
 	case "upgrade":
 		cmdUpgrade()
 	case "version":
@@ -133,7 +144,10 @@ func cmdDefault() {
 	fmt.Println("  rules       Show active rules + sensitive patterns")
 	fmt.Println("  status      Show session state (approved/asked/denied)")
 	fmt.Println("  log         Show recent decisions")
+	fmt.Println("  stats       Show analytics from decision history")
+	fmt.Println("  check       Dry-run: test what the pipeline would decide for a command")
 	fmt.Println("  suggest     Analyze history, suggest permanent rules")
+	fmt.Println("  threshold   Set confidence threshold for auto-allow")
 	fmt.Println("  pause       Disable yolonot for current session (total bypass)")
 	fmt.Println("  resume      Re-enable yolonot for current session")
 	fmt.Println("  uninstall   Remove hooks from Claude Code")

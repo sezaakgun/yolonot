@@ -43,7 +43,7 @@ func LogDecision(entry DecisionEntry) {
 	dir := YolonotDir()
 	os.MkdirAll(dir, 0755)
 
-	f, err := os.OpenFile(decisionsPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(decisionsPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return
 	}

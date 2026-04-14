@@ -75,13 +75,16 @@ func cmdHook() {
 	sessionID := payload.SessionID
 	cwd := payload.Cwd
 
+	// Scope session to project
+	projSessionID := ProjectSessionID(sessionID, cwd)
+
 	// Clean old sessions (background, non-blocking)
 	go CleanOldSessions()
 
 	// PostToolUse: command ran → user approved → save to .approved
 	if payload.HookEventName == "PostToolUse" {
 		if sessionID != "" && command != "" {
-			AppendLine(sessionID, "approved", command)
+			AppendLine(projSessionID, "approved", command)
 		}
 		return
 	}
@@ -123,7 +126,7 @@ func cmdHook() {
 	}
 
 	// Step 1: Session exact match → allow
-	if sessionID != "" && ContainsLine(sessionID, "approved", command) {
+	if sessionID != "" && ContainsLine(projSessionID, "approved", command) {
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "exact_match"})
 		fmt.Println(hookResponse("allow", "yolonot: previously approved this session", command))
 		return
@@ -132,33 +135,45 @@ func cmdHook() {
 	// Step 1.5: Session deny
 	if sessionID != "" {
 		// Check explicit deny list
-		if ContainsLine(sessionID, "denied", command) {
+		if ContainsLine(projSessionID, "denied", command) {
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "ask", Source: "previously_rejected"})
 			fmt.Println(hookResponse("deny", "yolonot: previously rejected this session", command))
 			return
 		}
 		// Check asked-but-not-approved
-		if ContainsLine(sessionID, "asked", command) && !ContainsLine(sessionID, "approved", command) {
-			AppendLine(sessionID, "denied", command)
+		if ContainsLine(projSessionID, "asked", command) && !ContainsLine(projSessionID, "approved", command) {
+			AppendLine(projSessionID, "denied", command)
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "ask", Source: "asked_not_approved"})
 			fmt.Println(hookResponse("deny", "yolonot: previously rejected this session", command))
 			return
 		}
 	}
 
+	// Load config for threshold checks
+	config := LoadConfig()
+
 	// Step 2: Session similarity (LLM compare)
 	if sessionID != "" {
-		approved := ReadLines(sessionID, "approved")
-		if len(approved) > 0 {
+		approved := ReadLines(projSessionID, "approved")
+		candidates := filterByPrefix(command, approved)
+		if len(candidates) > 0 {
 			cfg := GetLLMConfig()
-			userPrompt := BuildComparePrompt(command, approved)
+			userPrompt := BuildComparePrompt(command, candidates)
 			start := time.Now()
 			text, err := CallLLM(cfg, ComparePrompt, userPrompt, 256)
 			ms := time.Since(start).Milliseconds()
 			if err == nil {
 				d := ParseDecision(text)
 				if d != nil && d.Decision == "allow" {
-					AppendLine(sessionID, "approved", command)
+					// Check confidence threshold
+					if config.ConfidenceThreshold > 0 && d.Confidence < config.ConfidenceThreshold {
+						reason := fmt.Sprintf("confidence %.0f%% below threshold %.0f%%: %s", d.Confidence*100, config.ConfidenceThreshold*100, d.Reasoning)
+						AppendLine(projSessionID, "asked", command)
+						LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "ask", Confidence: d.Confidence, Reasoning: reason, DurationMs: ms})
+						fmt.Println(hookResponse("ask", "yolonot: "+reason, command))
+						return
+					}
+					AppendLine(projSessionID, "approved", command)
 					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "allow", Reasoning: d.Reasoning, DurationMs: ms})
 					fmt.Println(hookResponse("allow", "yolonot: similar to approved — "+d.Reasoning, command))
 					return
@@ -172,7 +187,7 @@ func cmdHook() {
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: match.Action, Reasoning: fmt.Sprintf("matched rule: %s-%s", match.Action, match.Pattern)})
 		if match.Action == "allow" {
 			if sessionID != "" {
-				AppendLine(sessionID, "approved", command)
+				AppendLine(projSessionID, "approved", command)
 			}
 			fmt.Println(hookResponse("allow", fmt.Sprintf("yolonot: rule %s", match.Pattern), command))
 			return
@@ -182,7 +197,7 @@ func cmdHook() {
 		} else {
 			// ask rule
 			if sessionID != "" {
-				AppendLine(sessionID, "asked", command)
+				AppendLine(projSessionID, "asked", command)
 			}
 			fmt.Println(hookResponse("ask", fmt.Sprintf("yolonot: rule %s", match.Pattern), command))
 			return
@@ -191,15 +206,25 @@ func cmdHook() {
 
 	// Step 4: Script cache check
 	if cached := checkCache(command); cached != nil {
+		// Apply confidence threshold to cached allow — same as LLM path
+		if cached.Decision == "allow" && config.ConfidenceThreshold > 0 && cached.Confidence < config.ConfidenceThreshold {
+			reason := fmt.Sprintf("confidence %.0f%% below threshold %.0f%%: %s", cached.Confidence*100, config.ConfidenceThreshold*100, cached.Reasoning)
+			if projSessionID != "" {
+				AppendLine(projSessionID, "asked", command)
+			}
+			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "cache", Decision: "ask", Confidence: cached.Confidence, Reasoning: "(cached) " + reason})
+			fmt.Println(hookResponse("ask", "yolonot: "+reason, command))
+			return
+		}
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "cache", Decision: cached.Decision, Confidence: cached.Confidence, Reasoning: "(cached) " + cached.Reasoning})
 		if cached.Decision == "allow" {
 			if sessionID != "" {
-				AppendLine(sessionID, "approved", command)
+				AppendLine(projSessionID, "approved", command)
 			}
 			fmt.Println(hookResponse("allow", "yolonot: "+cached.Reasoning, command))
 		} else {
 			if sessionID != "" {
-				AppendLine(sessionID, "asked", command)
+				AppendLine(projSessionID, "asked", command)
 			}
 			fmt.Println(hookResponse("ask", "yolonot: "+cached.Reasoning, command))
 		}
@@ -214,7 +239,11 @@ func cmdHook() {
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
 		// LLM unavailable → go transparent, let Claude Code decide
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "LLM unavailable", DurationMs: ms})
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "LLM unavailable: " + err.Error(), DurationMs: ms})
+		r := HookResponse{}
+		r.SystemMessage = "yolonot: LLM unreachable, falling back to Claude Code permissions"
+		data, _ := json.Marshal(r)
+		fmt.Println(string(data))
 		return
 	}
 
@@ -222,22 +251,37 @@ func cmdHook() {
 	if d == nil {
 		// Parse error → go transparent, let Claude Code decide
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "parse error", DurationMs: ms})
+		r := HookResponse{}
+		r.SystemMessage = "yolonot: LLM response parse error, falling back to Claude Code permissions"
+		data, _ := json.Marshal(r)
+		fmt.Println(string(data))
 		return
 	}
 
 	// Cache the decision if it involved a script file
 	saveCache(command, d)
 
+	// Check confidence threshold — downgrade allow to ask if below threshold
+	if d.Decision == "allow" && config.ConfidenceThreshold > 0 && d.Confidence < config.ConfidenceThreshold {
+		reason := fmt.Sprintf("confidence %.0f%% below threshold %.0f%%: %s", d.Confidence*100, config.ConfidenceThreshold*100, d.Reasoning)
+		if sessionID != "" {
+			AppendLine(projSessionID, "asked", command)
+		}
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "ask", Confidence: d.Confidence, Reasoning: reason, DurationMs: ms})
+		fmt.Println(hookResponse("ask", "yolonot: "+reason, command))
+		return
+	}
+
 	LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: d.Decision, Confidence: d.Confidence, Reasoning: d.Reasoning, DurationMs: ms})
 
 	if d.Decision == "allow" {
 		if sessionID != "" {
-			AppendLine(sessionID, "approved", command)
+			AppendLine(projSessionID, "approved", command)
 		}
 		fmt.Println(hookResponse("allow", "yolonot: "+d.Reasoning, command))
 	} else {
 		if sessionID != "" {
-			AppendLine(sessionID, "asked", command)
+			AppendLine(projSessionID, "asked", command)
 		}
 		fmt.Println(hookResponse("ask", "yolonot: "+d.Reasoning, command))
 	}
@@ -291,5 +335,5 @@ func saveCache(command string, d *Decision) {
 	if err != nil {
 		return
 	}
-	os.WriteFile(filepath.Join(dir, hash+".json"), data, 0644)
+	os.WriteFile(filepath.Join(dir, hash+".json"), data, 0600)
 }

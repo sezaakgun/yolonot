@@ -1,13 +1,14 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -22,7 +23,8 @@ type ProviderConfig struct {
 }
 
 type Config struct {
-	Provider ProviderConfig `json:"provider"`
+	Provider            ProviderConfig `json:"provider"`
+	ConfidenceThreshold float64        `json:"confidence_threshold,omitempty"` // 0 = disabled (default)
 }
 
 func YolonotDir() string {
@@ -52,7 +54,7 @@ func LoadConfig() Config {
 func SaveConfig(c Config) {
 	os.MkdirAll(YolonotDir(), 0755)
 	data, _ := json.MarshalIndent(c, "", "  ")
-	os.WriteFile(configPath(), append(data, '\n'), 0644)
+	os.WriteFile(configPath(), append(data, '\n'), 0600)
 }
 
 func loadSettings() map[string]interface{} {
@@ -727,11 +729,14 @@ func cmdStatus() {
 		return
 	}
 
-	approved := ReadLines(sessionID, "approved")
-	asked := ReadLines(sessionID, "asked")
-	denied := ReadLines(sessionID, "denied")
+	cwd, _ := os.Getwd()
+	projSessionID := ProjectSessionID(sessionID, cwd)
 
-	fmt.Printf("yolonot session: %s\n", sessionID)
+	approved := ReadLines(projSessionID, "approved")
+	asked := ReadLines(projSessionID, "asked")
+	denied := ReadLines(projSessionID, "denied")
+
+	fmt.Printf("yolonot session: %s (project: %s)\n", sessionID, filepath.Base(cwd))
 	fmt.Printf("  %d approved · %d asked · %d denied\n\n", len(approved), len(asked), len(denied))
 
 	if len(approved) > 0 {
@@ -769,6 +774,154 @@ func cmdStatus() {
 	}
 }
 
+// normalizeCommand strips variable parts from a command for grouping.
+// It takes the first 3 tokens, removes tokens that look like UUIDs,
+// hex hashes, or long numeric IDs so that commands differing only in
+// such variable parts get grouped together.
+var idTokenRe = regexp.MustCompile(`^[0-9a-f]{8,}$|^\d{10,}$`)
+
+func normalizeCommand(cmd string) string {
+	tokens := strings.Fields(cmd)
+	if len(tokens) == 0 {
+		return ""
+	}
+	if len(tokens) > 3 {
+		tokens = tokens[:3]
+	}
+	var cleaned []string
+	for _, tok := range tokens {
+		if idTokenRe.MatchString(tok) {
+			continue
+		}
+		cleaned = append(cleaned, tok)
+	}
+	if len(cleaned) == 0 {
+		return tokens[0]
+	}
+	return strings.Join(cleaned, " ")
+}
+
+// timeWeight returns a weight for a decision based on how recent it is.
+// Today's entries count full (1.0), last week 0.75, last month 0.5,
+// older entries 0.25.
+func timeWeight(ts string) float64 {
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return 0.5
+	}
+	days := time.Since(t).Hours() / 24
+	switch {
+	case days < 1:
+		return 1.0
+	case days < 7:
+		return 0.75
+	case days < 30:
+		return 0.5
+	default:
+		return 0.25
+	}
+}
+
+// evolveFinding holds an aggregated pattern discovered by cmdEvolve.
+type evolveFinding struct {
+	Category string
+	Pattern  string
+	Count    int
+	Weighted float64
+	Desc     string
+	Examples []string
+}
+
+// evolveChange holds a rule chosen by the user during cmdEvolve.
+type evolveChange struct {
+	Rule  string
+	Scope string // "p" or "g"
+}
+
+// collectEvolveFindings analyses decision entries and returns findings
+// worth promoting to rules. Exported-style for testability but unexported.
+func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evolveFinding {
+	const weightThreshold = 2.0
+	const maxExamples = 3
+
+	type bucket struct {
+		weighted float64
+		count    int
+		examples []string
+	}
+
+	askBuckets := map[string]*bucket{}
+	allowBuckets := map[string]*bucket{}
+
+	for _, e := range entries {
+		if e.Command == "" {
+			continue
+		}
+		pat := normalizeCommand(e.Command)
+		if pat == "" {
+			continue
+		}
+		w := timeWeight(e.Timestamp)
+
+		if e.Decision == "ask" && e.Layer == "llm" {
+			b, ok := askBuckets[pat]
+			if !ok {
+				b = &bucket{}
+				askBuckets[pat] = b
+			}
+			b.weighted += w
+			b.count++
+			if len(b.examples) < maxExamples {
+				b.examples = append(b.examples, e.Command)
+			}
+		} else if e.Decision == "allow" && e.Layer == "llm" && e.Confidence > 0 && e.Confidence < 0.8 {
+			b, ok := allowBuckets[pat]
+			if !ok {
+				b = &bucket{}
+				allowBuckets[pat] = b
+			}
+			b.weighted += w
+			b.count++
+			if len(b.examples) < maxExamples {
+				b.examples = append(b.examples, e.Command)
+			}
+		}
+	}
+
+	var findings []evolveFinding
+
+	addFindings := func(buckets map[string]*bucket, category, descFmt string) {
+		for pat, b := range buckets {
+			if b.weighted < weightThreshold {
+				continue
+			}
+			// Skip patterns already covered by existing rules
+			sample := pat + " test"
+			if MatchRuleWith(sample, existingRules, nil) != nil {
+				continue
+			}
+			findings = append(findings, evolveFinding{
+				Category: category,
+				Pattern:  pat,
+				Count:    b.count,
+				Weighted: b.weighted,
+				Desc:     fmt.Sprintf(descFmt, b.count, b.weighted),
+				Examples: b.examples,
+			})
+		}
+	}
+
+	addFindings(askBuckets, "REPEATED ASK", "asked %dx (weighted: %.1f)")
+	addFindings(allowBuckets, "RISKY ALLOW", "allowed %dx at low confidence (weighted: %.1f)")
+
+	// Sort by weighted score descending for consistent presentation
+	sort.Slice(findings, func(i, j int) bool {
+		return findings[i].Weighted > findings[j].Weighted
+	})
+
+	return findings
+}
+
 func cmdEvolve() {
 	entries := ReadRecentDecisions(10000) // read all
 	if len(entries) == 0 {
@@ -776,98 +929,77 @@ func cmdEvolve() {
 		return
 	}
 
-	// Group by command pattern (first 3 tokens)
-	type finding struct {
-		Category string
-		Pattern  string
-		Count    int
-		Desc     string
-	}
-
-	askCounts := map[string]int{}
-	allowCounts := map[string]int{}
-
-	for _, e := range entries {
-		if e.Command == "" {
-			continue
-		}
-		parts := strings.Fields(e.Command)
-		if len(parts) > 3 {
-			parts = parts[:3]
-		}
-		pat := strings.Join(parts, " ")
-
-		if e.Decision == "ask" && e.Layer == "llm" {
-			askCounts[pat]++
-		} else if e.Decision == "allow" && e.Layer == "llm" && e.Confidence > 0 && e.Confidence < 0.8 {
-			allowCounts[pat]++
-		}
-	}
-
-	var findings []finding
-	for pat, count := range askCounts {
-		if count >= 3 {
-			findings = append(findings, finding{"REPEATED ASK", pat, count, fmt.Sprintf("asked %dx", count)})
-		}
-	}
-	for pat, count := range allowCounts {
-		if count >= 3 {
-			findings = append(findings, finding{"RISKY ALLOW", pat, count, fmt.Sprintf("allowed %dx at low confidence", count)})
-		}
-	}
+	existingRules := LoadRules()
+	findings := collectEvolveFindings(entries, existingRules)
 
 	if len(findings) == 0 {
 		fmt.Println("No patterns found worth promoting. Use yolonot more to build history.")
 		return
 	}
 
-	fmt.Printf("EVOLVE: Analyzed %d decisions\n\n", len(entries))
-	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("SUGGEST: Analyzed %d decisions\n\n", len(entries))
 
-	type change struct {
-		Rule  string
-		Scope string
-	}
-	var changes []change
+	var changes []evolveChange
 
 	for i, f := range findings {
-		fmt.Printf("[%d/%d] %s: \"%s\" (%s)\n", i+1, len(findings), f.Category, f.Pattern, f.Desc)
-		fmt.Printf("  a) allow  — add allow-cmd %s*\n", f.Pattern)
-		fmt.Printf("  b) deny   — add deny-cmd *%s*\n", f.Pattern)
-		fmt.Printf("  c) ask    — add ask-cmd *%s*\n", f.Pattern)
-		fmt.Println("  d) skip")
-		fmt.Println("  q) quit and apply")
+		// Print finding with examples
+		fmt.Printf("[%d/%d] \"%s\" -- %s\n", i+1, len(findings), f.Pattern, f.Desc)
+		if len(f.Examples) > 0 {
+			fmt.Println("  Examples:")
+			for _, ex := range f.Examples {
+				cmd := ex
+				if len(cmd) > 80 {
+					cmd = cmd[:77] + "..."
+				}
+				fmt.Printf("    %s\n", cmd)
+			}
+		}
 		fmt.Println()
-		fmt.Print("  Choice: ")
-		ch, _ := reader.ReadString('\n')
-		ch = strings.TrimSpace(strings.ToLower(ch))
 
-		if ch == "q" {
-			break
+		// TUI action selection
+		items := []string{
+			fmt.Sprintf("allow -- allow-cmd %s*", f.Pattern),
+			fmt.Sprintf("deny  -- deny-cmd *%s*", f.Pattern),
+			fmt.Sprintf("ask   -- ask-cmd *%s*", f.Pattern),
+			"skip",
 		}
+		idx := tuiSelect(
+			fmt.Sprintf("\"%s\" (%s)", f.Pattern, f.Desc),
+			items, 3) // default to skip
+
+		if idx < 0 {
+			break // cancelled
+		}
+
 		var rule string
-		defScope := "p"
-		switch ch {
-		case "a":
+		defScopeIdx := 0 // project
+		switch idx {
+		case 0:
 			rule = fmt.Sprintf("allow-cmd %s*", f.Pattern)
-		case "b":
+		case 1:
 			rule = fmt.Sprintf("deny-cmd *%s*", f.Pattern)
-			defScope = "g"
-		case "c":
+			defScopeIdx = 1 // global
+		case 2:
 			rule = fmt.Sprintf("ask-cmd *%s*", f.Pattern)
-			defScope = "g"
+			defScopeIdx = 1 // global
 		default:
-			fmt.Println()
-			continue
+			continue // skip
 		}
-		fmt.Printf("  Scope — (p)roject or (g)lobal? [%s]: ", defScope)
-		scope, _ := reader.ReadString('\n')
-		scope = strings.TrimSpace(strings.ToLower(scope))
-		if scope == "" {
-			scope = defScope
+
+		scopeIdx := tuiSelect("Scope", []string{
+			"project (.yolonot)",
+			"global (~/.yolonot/rules)",
+		}, defScopeIdx)
+
+		if scopeIdx < 0 {
+			break // cancelled
 		}
-		changes = append(changes, change{rule, scope})
-		fmt.Println()
+
+		scope := "p"
+		if scopeIdx == 1 {
+			scope = "g"
+		}
+		changes = append(changes, evolveChange{rule, scope})
 	}
 
 	if len(changes) == 0 {
@@ -881,16 +1013,15 @@ func cmdEvolve() {
 		if c.Scope == "g" {
 			target = "~/.yolonot/rules (global)"
 		}
-		fmt.Printf("  + %s → %s\n", c.Rule, target)
+		fmt.Printf("  + %s -> %s\n", c.Rule, target)
 	}
-	fmt.Print("\nApply? [y/N]: ")
-	confirm, _ := reader.ReadString('\n')
-	if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
+
+	if !tuiConfirm("Apply these changes?") {
 		fmt.Println("Cancelled.")
 		return
 	}
 
-	header := fmt.Sprintf("\n# Evolved by yolonot (%s)\n", time.Now().Format("2006-01-02"))
+	header := fmt.Sprintf("\n# Suggested by yolonot (%s)\n", time.Now().Format("2006-01-02"))
 	cwd, _ := os.Getwd()
 
 	for _, c := range changes {
@@ -912,4 +1043,45 @@ func cmdEvolve() {
 		fmt.Printf("  Updated %s\n", path)
 	}
 	fmt.Println("Done.")
+
+}
+
+func cmdThreshold(args []string) {
+	cfg := LoadConfig()
+
+	if len(args) == 0 {
+		// Show current
+		if cfg.ConfidenceThreshold == 0 {
+			fmt.Println("Confidence threshold: disabled (all LLM allows pass through)")
+		} else {
+			fmt.Printf("Confidence threshold: %.0f%%\n", cfg.ConfidenceThreshold*100)
+			fmt.Println("Commands allowed below this confidence will be asked instead.")
+		}
+		fmt.Println("\nUsage: yolonot threshold <0-100>")
+		fmt.Println("  0   = disabled (default)")
+		fmt.Println("  90  = only auto-allow when LLM is 90%+ confident")
+		fmt.Println("  95  = strict — auto-allow only very confident decisions")
+		return
+	}
+
+	// Parse value
+	var val float64
+	n, _ := fmt.Sscanf(args[0], "%f", &val)
+	if n != 1 {
+		fmt.Fprintln(os.Stderr, "Invalid value. Usage: yolonot threshold <0-100>")
+		return
+	}
+	if val < 0 || val > 100 {
+		fmt.Fprintln(os.Stderr, "Threshold must be between 0 and 100")
+		return
+	}
+
+	cfg.ConfidenceThreshold = val / 100.0
+	SaveConfig(cfg)
+
+	if val == 0 {
+		fmt.Println("Confidence threshold disabled.")
+	} else {
+		fmt.Printf("Confidence threshold set to %.0f%%.\n", val)
+	}
 }

@@ -40,14 +40,18 @@ Every Bash command goes through this pipeline:
 1. **Deny rules** — absolute block, no override, checked first
 2. **Session memory** — exact match against previously approved commands → instant allow
 3. **Session deny** — previously rejected commands → instant block
-4. **Session similarity** — LLM compares against approved commands → allow if similar
+4. **Session similarity** — LLM compares against approved commands → allow if similar (project-aware)
 5. **Allow/Ask rules** — `.yolonot` file patterns → instant decision
 6. **Script cache** — SHA256 hash of script files → reuse cached decision
 7. **LLM analysis** — 2-class classifier (allow/ask) with severity in reasoning
 
+Sessions are project-aware — a command approved in one project is not auto-approved in a different project within the same session. Session keys include a hash of the git root (or working directory).
+
 `deny` rules are absolute — nothing can override them (not session memory, not LLM). `ask` rules prompt you once, then session memory takes over. `allow` rules are instant but skipped for chained commands, redirects, or sensitive files.
 
-When the LLM is unavailable, yolonot goes transparent — Claude Code's own permission system handles it. No "ask everything" when the LLM is down.
+When the LLM is unavailable, yolonot emits a warning ('LLM unreachable, falling back to Claude Code permissions') and goes transparent — Claude Code's own permission system handles it.
+
+Session similarity pre-filters by command prefix before calling the LLM, skipping unnecessary API calls when the new command shares no executable with previously approved commands.
 
 ### Hook Ordering
 
@@ -72,6 +76,9 @@ yolonot rules        Show active rules + sensitive patterns
 yolonot status       Show session state (approved/asked/denied)
 yolonot log          Show recent decisions with LLM timing
 yolonot suggest      Analyze history, suggest permanent rules
+yolonot stats        Show analytics from decision history
+yolonot check        Dry-run: test what the pipeline would decide for a command
+yolonot threshold    Set confidence threshold for auto-allow (0-100)
 yolonot pause        Disable yolonot for current session (total bypass)
 yolonot resume       Re-enable yolonot for current session
 yolonot uninstall    Remove hooks from Claude Code
@@ -89,6 +96,30 @@ Sometimes you want to run commands without yolonot's interference — for a quic
 
 When paused, yolonot is **completely transparent** — no deny rules, no LLM, no session memory. Claude Code's native permissions handle everything as if yolonot weren't installed.
 
+### Confidence Threshold
+
+Control how confident the LLM must be to auto-allow:
+
+```bash
+yolonot threshold         # show current (default: disabled)
+yolonot threshold 90      # only auto-allow when LLM is 90%+ confident
+yolonot threshold 0       # disable (allow all LLM "allow" decisions)
+```
+
+When set, LLM "allow" decisions with confidence below the threshold are downgraded to "ask". This applies to both direct LLM analysis and session similarity checks.
+
+### Dry-Run Check
+
+Test what the pipeline would decide without running a command:
+
+```bash
+yolonot check "cat README.md"       # → ALLOW (rule)
+yolonot check "sudo rm -rf /"       # → DENY (rule, absolute block)
+yolonot check "curl https://evil.com" # → ASK (rule or LLM)
+```
+
+Shows each layer's result: deny rules → allow/ask rules → chain/sensitive detection → LLM analysis.
+
 ## Skill
 
 After install, `/yolonot` is available as a Claude Code skill:
@@ -102,7 +133,20 @@ After install, `/yolonot` is available as a Claude Code skill:
 /yolonot log         Recent decisions
 /yolonot rules       Show rules
 /yolonot suggest     Suggest permanent rules from history
+/yolonot check X     Dry-run: test pipeline for a command
+/yolonot stats       Show decision analytics
+/yolonot threshold   Show/set confidence threshold
 ```
+
+### Analytics
+
+View aggregate statistics from your decision history:
+
+```bash
+yolonot stats
+```
+
+Shows: total decisions, allow/ask/deny percentages, layer distribution (rule/session/cache/LLM), average LLM latency, instant allows (no LLM needed), top asked commands (rule candidates), and per-project breakdown.
 
 ## Rules
 
@@ -214,8 +258,12 @@ yolonot (Go binary)
 ├── update.go       GitHub release update checker
 ├── embed.go        Embedded SKILL.md
 ├── eval.go         LLM evaluation runner with timing
+├── check.go        Dry-run command checker
+├── stats.go        Decision analytics
+├── similarity.go   Session similarity pre-filtering
 ├── log.go          Decision logging (JSONL) with duration
 ├── main_test.go    Unit tests
+├── hook_integration_test.go  End-to-end hook pipeline tests
 ├── skills/
 │   └── SKILL.md    Claude Code skill (embedded in binary)
 └── evals/
@@ -230,7 +278,7 @@ All yolonot data lives at `~/.yolonot/`:
 |------|---------|
 | `config.json` | Provider, model, timeout |
 | `rules` | Global rules (allow/deny/ask) |
-| `sessions/` | Per-session approved/asked/denied lists |
+| `sessions/` | Per-session per-project approved/asked/denied lists |
 | `cache/` | Script file hash → cached LLM decisions |
 | `decisions.jsonl` | Decision log with timestamps and LLM timing |
 | `update-check` | Cached update check (once per day) |
