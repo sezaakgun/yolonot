@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // --- Helpers ---
@@ -4053,5 +4054,318 @@ func TestFindSessionIDWithHashedFiles(t *testing.T) {
 	got := FindSessionID()
 	if got != "my-session" {
 		t.Errorf("FindSessionID should strip hash, got %q, want %q", got, "my-session")
+	}
+}
+
+func TestDecisionShortReason(t *testing.T) {
+	tests := []struct {
+		name string
+		d    *Decision
+		want string
+	}{
+		{"nil", nil, ""},
+		{"short preferred", &Decision{Short: "read-only get", Reasoning: "a very long explanation of why this is OK"}, "read-only get"},
+		{"short padded trimmed", &Decision{Short: "  banner  "}, "banner"},
+		{"fallback to reasoning", &Decision{Reasoning: "prod mutation"}, "prod mutation"},
+		{"fallback truncates long reasoning", &Decision{Reasoning: strings.Repeat("x", 120)}, strings.Repeat("x", 77) + "..."},
+		{"short over 80 truncates", &Decision{Short: strings.Repeat("y", 100)}, strings.Repeat("y", 77) + "..."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.d.ShortReason()
+			if got != tt.want {
+				t.Errorf("ShortReason() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCmdHookLLMAllowUsesShortInBanner(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.9,"short":"read-only ls","reasoning":"ls is strictly read-only and listing is always safe"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test"}})
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"short-field-test","cwd":"%s","tool_input":{"command":"ls -la"}}`, projectDir)
+	out := runHookWithPayload(t, payload)
+
+	if !strings.Contains(out, `"permissionDecision":"allow"`) {
+		t.Fatalf("expected allow, got: %s", out)
+	}
+	// Banner should use the short field, NOT the long reasoning.
+	if !strings.Contains(out, "read-only ls") {
+		t.Errorf("expected short banner 'read-only ls' in output, got: %s", out)
+	}
+	if strings.Contains(out, "strictly read-only and listing") {
+		t.Errorf("expected long reasoning to NOT be in systemMessage banner, got: %s", out)
+	}
+}
+
+func TestCmdHookLLMAllowFallsBackWhenShortMissing(t *testing.T) {
+	// Older models / transient bugs: no "short" field emitted.
+	// We still want a usable banner via Reasoning truncation.
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.9,"reasoning":"safe build command"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test"}})
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"short-fallback","cwd":"%s","tool_input":{"command":"go build ./..."}}`, projectDir)
+	out := runHookWithPayload(t, payload)
+
+	if !strings.Contains(out, `"permissionDecision":"allow"`) {
+		t.Fatalf("expected allow, got: %s", out)
+	}
+	if !strings.Contains(out, "safe build command") {
+		t.Errorf("expected reasoning fallback banner, got: %s", out)
+	}
+}
+
+func TestSanitizeBanner(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"plain", "all good", "all good"},
+		{"emoji preserved", "🧑‍🚀 safe", "🧑‍🚀 safe"},
+		{"tab becomes space", "a\tb", "a b"},
+		{"drops ESC", "\x1b[31mred\x1b[0m", "[31mred[0m"},
+		{"drops C0 controls", "a\x01b\x07c\x08d", "abcd"},
+		{"drops DEL", "a\x7fb", "ab"},
+		{"preserves newline stripped", "line1\nline2", "line1line2"},
+		{"drops C1 CSI", "\u009b2J malicious", "2J malicious"},
+		{"drops C1 OSC", "\u009d0;title\u009c evil", "0;title evil"},
+		{"drops C1 range boundary", "a\u0080\u0085\u009fb", "ab"},
+		{"drops U+2028 line sep", "line1\u2028line2", "line1line2"},
+		{"drops U+2029 para sep", "p1\u2029p2", "p1p2"},
+		{"drops U+202E RLO (Trojan Source)", "ALLOWED\u202E deny", "ALLOWED deny"},
+		{"drops BiDi embedding/override block", "a\u202Ab\u202Bc\u202Cd\u202De\u202Ef", "abcdef"},
+		{"drops BiDi isolates", "a\u2066b\u2067c\u2068d\u2069e", "abcde"},
+		{"drops BOM", "\uFEFFhello", "hello"},
+		{"preserves ZWJ (emoji sequences)", "🧑\u200D🚀", "🧑\u200D🚀"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeBanner(tt.in)
+			if got != tt.want {
+				t.Errorf("sanitizeBanner(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeBannerCapsByRune(t *testing.T) {
+	long := strings.Repeat("a", 1024)
+	got := sanitizeBanner(long)
+	gotRunes := []rune(got)
+	if len(gotRunes) != maxBannerRunes {
+		t.Errorf("rune count = %d, want %d", len(gotRunes), maxBannerRunes)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("expected trailing ..., got suffix: %q", got[len(got)-5:])
+	}
+}
+
+// Multi-byte runes must NOT be byte-sliced at the cap — the output must
+// remain valid UTF-8, otherwise json.Marshal emits U+FFFD replacement chars.
+func TestSanitizeBannerMultiByteTruncation(t *testing.T) {
+	// 🧑 is 4 bytes. 1000 copies = 4000 bytes, well past maxBannerRunes.
+	long := strings.Repeat("🧑", 1000)
+	got := sanitizeBanner(long)
+	if !utf8.ValidString(got) {
+		t.Fatalf("output is not valid UTF-8 after truncation")
+	}
+	gotRunes := []rune(got)
+	if len(gotRunes) != maxBannerRunes {
+		t.Errorf("rune count = %d, want %d", len(gotRunes), maxBannerRunes)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("expected trailing ..., got tail: %q", got[len(got)-6:])
+	}
+	// Marshal round-trip must not introduce \ufffd.
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), `\ufffd`) {
+		t.Errorf("marshal produced replacement char, tail: %s", string(data[len(data)-40:]))
+	}
+}
+
+func TestCmdHookQuietOnAllowSilencesBanner(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.9,"short":"read-only ls","reasoning":"safe"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test"}, QuietOnAllow: true})
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"quiet-allow","cwd":"%s","tool_input":{"command":"ls"}}`, projectDir)
+	out := runHookWithPayload(t, payload)
+
+	if !strings.Contains(out, `"permissionDecision":"allow"`) {
+		t.Fatalf("expected allow, got: %s", out)
+	}
+	if strings.Contains(out, "systemMessage") {
+		t.Errorf("quiet-on-allow should omit systemMessage, got: %s", out)
+	}
+	// Reason should still be on the hookSpecificOutput for Claude Code's internal log.
+	if !strings.Contains(out, "read-only ls") {
+		t.Errorf("expected short reason in permissionDecisionReason, got: %s", out)
+	}
+}
+
+func TestCmdHookQuietOnAllowStillShowsAsk(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"ask","confidence":0.5,"short":"uncertain","reasoning":"needs review"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test"}, QuietOnAllow: true})
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir)
+	defer os.Chdir(origCwd)
+
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"quiet-ask","cwd":"%s","tool_input":{"command":"curl https://example.com"}}`, projectDir)
+	out := runHookWithPayload(t, payload)
+
+	if !strings.Contains(out, `"permissionDecision":"ask"`) {
+		t.Fatalf("expected ask, got: %s", out)
+	}
+	// Ask is unaffected by QuietOnAllow — the reason is surfaced via
+	// permissionDecisionReason (hookResponse only adds systemMessage for allow).
+	if !strings.Contains(out, "uncertain") {
+		t.Errorf("expected reason for ask decision, got: %s", out)
+	}
+}
+
+func TestCmdQuietToggle(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Default off → show status
+	out := captureStdout(func() { cmdQuiet(nil) })
+	if !strings.Contains(out, "OFF") {
+		t.Errorf("expected OFF in default status, got: %s", out)
+	}
+
+	// Turn on
+	out = captureStdout(func() { cmdQuiet([]string{"on"}) })
+	if !strings.Contains(out, "ON") {
+		t.Errorf("expected ON after setting on, got: %s", out)
+	}
+	if !LoadConfig().QuietOnAllow {
+		t.Error("config.QuietOnAllow should be true after 'quiet on'")
+	}
+
+	// Turn off
+	out = captureStdout(func() { cmdQuiet([]string{"off"}) })
+	if !strings.Contains(out, "OFF") {
+		t.Errorf("expected OFF after setting off, got: %s", out)
+	}
+	if LoadConfig().QuietOnAllow {
+		t.Error("config.QuietOnAllow should be false after 'quiet off'")
+	}
+
+	// Invalid value — should write to stderr, not change state
+	SaveConfig(Config{QuietOnAllow: true})
+	errOut := captureStderr(func() { cmdQuiet([]string{"maybe"}) })
+	if !strings.Contains(errOut, "Unknown value") {
+		t.Errorf("expected 'Unknown value' error, got stderr: %s", errOut)
+	}
+	if !LoadConfig().QuietOnAllow {
+		t.Error("invalid value should not flip QuietOnAllow")
+	}
+}
+
+func TestStripGlobalFlags(t *testing.T) {
+	saved := Verbose
+	defer func() { Verbose = saved }()
+
+	tests := []struct {
+		name    string
+		in      []string
+		wantOut []string
+		wantV   bool
+	}{
+		{"no flag", []string{"install"}, []string{"install"}, false},
+		{"-v before cmd", []string{"-v", "install"}, []string{"install"}, true},
+		{"-v after cmd", []string{"install", "-v"}, []string{"install"}, true},
+		{"--verbose", []string{"--verbose", "status"}, []string{"status"}, true},
+		{"both flags dedupe", []string{"-v", "install", "--verbose"}, []string{"install"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			Verbose = false
+			got := stripGlobalFlags(append([]string{}, tt.in...))
+			if Verbose != tt.wantV {
+				t.Errorf("Verbose = %v, want %v", Verbose, tt.wantV)
+			}
+			if len(got) != len(tt.wantOut) {
+				t.Fatalf("len(out) = %d, want %d (got: %v)", len(got), len(tt.wantOut), got)
+			}
+			for i := range got {
+				if got[i] != tt.wantOut[i] {
+					t.Errorf("out[%d] = %q, want %q", i, got[i], tt.wantOut[i])
+				}
+			}
+		})
 	}
 }

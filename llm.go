@@ -15,7 +15,8 @@ import (
 
 // SystemPrompt is the 2-class command safety classifier prompt.
 const SystemPrompt = `You are a command safety classifier. Evaluate in this EXACT order:
-Output ONLY JSON: {"decision":"allow|ask","confidence":0.0-1.0,"reasoning":"one line"}
+Output ONLY JSON: {"decision":"allow|ask","confidence":0.0-1.0,"short":"6 words or fewer","reasoning":"one line"}
+The "short" field is a human-readable label shown in the user's terminal banner (e.g. "read-only kubectl get", "destructive prod mutation"). Keep it under 60 chars, no punctuation at the end. The "reasoning" field is the full explanation for logs.
 
 STEP 1 — Is this a READ-ONLY operation? If yes → ALLOW regardless of target.
 Default to ALLOW for read-only commands. Reading is never dangerous — only writing/mutating is.
@@ -74,7 +75,8 @@ When in doubt, ask. False allow is worse than false ask.`
 
 // ComparePrompt is used for session similarity checking.
 const ComparePrompt = `You compare a new command against previously approved commands.
-Output ONLY JSON: {"decision":"allow|ask","reasoning":"one line","compared_to":"the approved command it's similar to, or empty"}
+Output ONLY JSON: {"decision":"allow|ask","short":"6 words or fewer","reasoning":"one line","compared_to":"the approved command it's similar to, or empty"}
+The "short" field is a human-readable banner label (e.g. "same kubectl delete pattern"). Keep under 60 chars. The "reasoning" field is the full explanation for logs.
 
 Rules:
 - allow: The new command has the SAME intent, risk level, and target as an approved command. Only superficial differences (IDs, timestamps, filenames of same type).
@@ -95,8 +97,29 @@ Be strict. When in doubt, ask.`
 type Decision struct {
 	Decision   string  `json:"decision"`
 	Confidence float64 `json:"confidence"`
+	Short      string  `json:"short,omitempty"` // <=60 char banner label; falls back to truncated Reasoning
 	Reasoning  string  `json:"reasoning"`
 	ComparedTo string  `json:"compared_to,omitempty"`
+}
+
+// ShortReason returns a compact banner-friendly reason: prefers d.Short,
+// falls back to d.Reasoning truncated to 80 chars. Older models that don't
+// emit "short" still produce usable banners.
+func (d *Decision) ShortReason() string {
+	if d == nil {
+		return ""
+	}
+	if s := strings.TrimSpace(d.Short); s != "" {
+		if len(s) > 80 {
+			s = s[:77] + "..."
+		}
+		return s
+	}
+	r := strings.TrimSpace(d.Reasoning)
+	if len(r) > 80 {
+		r = r[:77] + "..."
+	}
+	return r
 }
 
 // LLMConfig holds provider connection info.

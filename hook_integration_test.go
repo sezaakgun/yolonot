@@ -426,6 +426,238 @@ func TestIntegration_DenyRuleBeatsSession(t *testing.T) {
 	}
 }
 
+// writePreCheckScript creates an executable sh script that prints the given
+// response to stdout. Returns the path.
+func writePreCheckScript(t *testing.T, dir, name, response string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	script := "#!/bin/sh\ncat <<'EOF'\n" + response + "\nEOF\n"
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatalf("write pre-check script: %v", err)
+	}
+	return path
+}
+
+func TestIntegration_PreCheck_AllowShortCircuits(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Pre-check returns allow with its own systemMessage
+	script := writePreCheckScript(t, home, "pre-allow.sh",
+		`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"dippy: read-only"},"systemMessage":"🐤 ls"}`)
+
+	cfg := Config{PreCheck: PreCheckList{script}}
+	SaveConfig(cfg)
+
+	sid := "int-precheck-allow"
+	payload := makePrePayload(sid, "ls -la", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Errorf("expected allow from pre-check, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "dippy") {
+		t.Errorf("reason should include pre-check reason, got %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+
+	// systemMessage should be branded with "yolonot (via <hook>):" prefix
+	// so the user sees yolonot ran and which hook short-circuited it.
+	if !strings.HasPrefix(resp.SystemMessage, "yolonot (via ") {
+		t.Errorf("systemMessage should be branded with yolonot prefix, got %q", resp.SystemMessage)
+	}
+	if !strings.Contains(resp.SystemMessage, "pre-allow.sh") {
+		t.Errorf("systemMessage should include hook short name, got %q", resp.SystemMessage)
+	}
+	if !strings.Contains(resp.SystemMessage, "🐤 ls") {
+		t.Errorf("systemMessage should preserve pre-check body, got %q", resp.SystemMessage)
+	}
+
+	// Should be saved to session approved
+	projSID := ProjectSessionID(sid, "/tmp")
+	if !ContainsLine(projSID, "approved", "ls -la") {
+		t.Error("pre-check allow should save to .approved session file")
+	}
+}
+
+func TestIntegration_PreCheck_AllowWithoutSystemMessageFallsBackToReason(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Pre-check allow but no systemMessage — yolonot should fall back
+	// to the permissionDecisionReason when branding the banner.
+	script := writePreCheckScript(t, home, "pre-allow-nomsg.sh",
+		`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"dippy: read-only"}}`)
+
+	SaveConfig(Config{PreCheck: PreCheckList{script}})
+
+	payload := makePrePayload("int-precheck-nomsg", "ls", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if !strings.HasPrefix(resp.SystemMessage, "yolonot (via ") {
+		t.Errorf("expected yolonot-branded banner, got %q", resp.SystemMessage)
+	}
+	if !strings.Contains(resp.SystemMessage, "dippy: read-only") {
+		t.Errorf("expected reason fallback in banner, got %q", resp.SystemMessage)
+	}
+}
+
+func TestPreCheckShortName(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"/usr/local/bin/dippy-hook", "dippy-hook"},
+		{"./dippy", "dippy"},
+		{"/path/to/hook.sh --flag --other", "hook.sh"},
+		{"", "pre-check"},
+	}
+	for _, tt := range tests {
+		if got := preCheckShortName(tt.in); got != tt.want {
+			t.Errorf("preCheckShortName(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestIntegration_PreCheck_DenyFallsThrough(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Pre-check returns deny — yolonot should ignore and continue
+	script := writePreCheckScript(t, home, "pre-deny.sh",
+		`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"dippy says no"}}`)
+
+	// yolonot has an allow rule that should take effect
+	writeGlobalRules(t, home, "allow-cmd cat *\n")
+	cfg := Config{PreCheck: PreCheckList{script}}
+	SaveConfig(cfg)
+
+	payload := makePrePayload("int-precheck-deny", "cat /etc/hosts", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Errorf("pre-check deny should fall through; expected yolonot allow rule, got %q",
+			resp.HookSpecificOutput.PermissionDecision)
+	}
+}
+
+func TestIntegration_PreCheck_EmptyFallsThrough(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Pre-check returns empty (dippy defers)
+	script := writePreCheckScript(t, home, "pre-empty.sh", `{}`)
+
+	writeGlobalRules(t, home, "allow-cmd cat *\n")
+	cfg := Config{PreCheck: PreCheckList{script}}
+	SaveConfig(cfg)
+
+	payload := makePrePayload("int-precheck-empty", "cat /etc/hosts", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Errorf("pre-check empty should fall through; expected yolonot allow rule, got %q",
+			resp.HookSpecificOutput.PermissionDecision)
+	}
+}
+
+func TestIntegration_PreCheck_MultipleHooks_SecondAllows(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// First hook defers (empty output), second allows
+	first := writePreCheckScript(t, home, "pre-first.sh", `{}`)
+	second := writePreCheckScript(t, home, "pre-second.sh",
+		`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"corp-gate: approved"}}`)
+
+	cfg := Config{PreCheck: PreCheckList{first, second}}
+	SaveConfig(cfg)
+
+	payload := makePrePayload("int-precheck-multi", "ls -la", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Errorf("expected allow from second hook after first defers, got %q",
+			resp.HookSpecificOutput.PermissionDecision)
+	}
+	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "corp-gate") {
+		t.Errorf("reason should come from the second hook, got %q",
+			resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+func TestIntegration_PreCheck_MultipleHooks_FirstWinsShortCircuits(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// First hook allows; second would also allow but different reason.
+	// Verify the first one wins (second never runs).
+	first := writePreCheckScript(t, home, "pre-first.sh",
+		`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"dippy: safe"}}`)
+	second := writePreCheckScript(t, home, "pre-second.sh",
+		`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"other: also safe"}}`)
+
+	cfg := Config{PreCheck: PreCheckList{first, second}}
+	SaveConfig(cfg)
+
+	payload := makePrePayload("int-precheck-first-wins", "ls -la", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "dippy") {
+		t.Errorf("first hook should win, got reason %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+func TestIntegration_PreCheck_LegacyStringConfigStillParses(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Write config.json by hand with the old single-string format
+	script := writePreCheckScript(t, home, "pre-legacy.sh",
+		`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"legacy"}}`)
+	configJSON := fmt.Sprintf(`{"provider":{},"pre_check":%q}`, script)
+	os.MkdirAll(filepath.Join(home, ".yolonot"), 0755)
+	os.WriteFile(filepath.Join(home, ".yolonot", "config.json"), []byte(configJSON), 0600)
+
+	cfg := LoadConfig()
+	if len(cfg.PreCheck) != 1 || cfg.PreCheck[0] != script {
+		t.Fatalf("legacy string config should parse into one-element list, got %v", cfg.PreCheck)
+	}
+
+	payload := makePrePayload("int-precheck-legacy", "ls -la", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Errorf("expected allow from legacy-format config, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+}
+
+func TestIntegration_PreCheck_DenyRuleBeatsPreCheck(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Pre-check would allow, but deny rule runs first (step 0 before step 0.5)
+	script := writePreCheckScript(t, home, "pre-allow-dangerous.sh",
+		`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"fine by me"}}`)
+
+	writeGlobalRules(t, home, "deny-cmd *sudo *\n")
+	cfg := Config{PreCheck: PreCheckList{script}}
+	SaveConfig(cfg)
+
+	payload := makePrePayload("int-precheck-deny-first", "sudo reboot", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Errorf("deny rule should beat pre-check allow, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+}
+
 func TestIntegration_AskRule_SavesAsked(t *testing.T) {
 	home, cleanup := withFakeHome(t)
 	defer cleanup()

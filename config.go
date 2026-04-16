@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,6 +27,36 @@ type ProviderConfig struct {
 type Config struct {
 	Provider            ProviderConfig `json:"provider"`
 	ConfidenceThreshold float64        `json:"confidence_threshold,omitempty"` // 0 = disabled (default)
+	PreCheck            PreCheckList   `json:"pre_check,omitempty"`            // optional external hooks (e.g. dippy-hook) run before yolonot's pipeline; first "allow" wins
+	QuietOnAllow        bool           `json:"quiet_on_allow,omitempty"`       // when true, allow decisions emit no systemMessage — only ask/deny show a banner
+}
+
+// PreCheckList is a list of external hook commands. It accepts either a
+// single string or an array of strings in JSON so older single-hook configs
+// keep working (and so users can write the simple case with less ceremony).
+type PreCheckList []string
+
+func (p *PreCheckList) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	if data[0] == '[' {
+		var arr []string
+		if err := json.Unmarshal(data, &arr); err != nil {
+			return err
+		}
+		*p = PreCheckList(arr)
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("pre_check: expected string or array of strings")
+	}
+	if s != "" {
+		*p = PreCheckList{s}
+	}
+	return nil
 }
 
 func YolonotDir() string {
@@ -55,6 +87,7 @@ func SaveConfig(c Config) {
 	os.MkdirAll(YolonotDir(), 0755)
 	data, _ := json.MarshalIndent(c, "", "  ")
 	os.WriteFile(configPath(), append(data, '\n'), 0600)
+	Verbosef("wrote %s (%d bytes)", configPath(), len(data)+1)
 }
 
 func loadSettings() map[string]interface{} {
@@ -100,6 +133,7 @@ func IsInstalled() bool {
 func cmdInstall() {
 	if IsInstalled() {
 		// Update: remove old hooks, reinstall with current settings
+		Verbosef("existing install detected — removing old hooks from %s", settingsPath())
 		removeHooks()
 		fmt.Println("Updating yolonot hooks...")
 	}
@@ -122,10 +156,14 @@ func cmdInstall() {
 	addHookToEvent(hooks, "PostToolUse", "Bash", postHook)
 
 	saveSettings(s)
+	Verbosef("wrote %s (Bash matcher for PreToolUse + PostToolUse, timeout 60s)", settingsPath())
 
 	// Create data directories
 	os.MkdirAll(filepath.Join(YolonotDir(), "sessions"), 0755)
 	os.MkdirAll(filepath.Join(YolonotDir(), "cache"), 0755)
+	Verbosef("ensured %s and %s",
+		filepath.Join(YolonotDir(), "sessions"),
+		filepath.Join(YolonotDir(), "cache"))
 
 	// Install skill
 	installSkill()
@@ -146,6 +184,7 @@ func installSkill() {
 
 	os.MkdirAll(skillDir, 0755)
 	os.WriteFile(skillDst, embeddedSkillMD, 0644)
+	Verbosef("wrote SKILL.md to %s (%d bytes)", skillDst, len(embeddedSkillMD))
 	fmt.Printf("  Skill      → %s\n", skillDir)
 }
 
@@ -222,11 +261,13 @@ func cmdUninstall() {
 		return
 	}
 
+	Verbosef("stripping yolonot hooks from %s", settingsPath())
 	removeHooks()
 
 	// Remove skill
 	home, _ := os.UserHomeDir()
 	skillDir := filepath.Join(home, ".claude", "skills", "yolonot")
+	Verbosef("removing skill dir %s", skillDir)
 	os.RemoveAll(skillDir)
 
 	fmt.Println("yolonot uninstalled. Restart Claude Code to deactivate.")
@@ -1044,6 +1085,130 @@ func cmdEvolve() {
 	}
 	fmt.Println("Done.")
 
+}
+
+func cmdPreCheck(args []string) {
+	cfg := LoadConfig()
+
+	printHelp := func() {
+		fmt.Println("Usage:")
+		fmt.Println("  yolonot pre-check                  List configured hooks")
+		fmt.Println("  yolonot pre-check add <cmd>        Append a hook")
+		fmt.Println("  yolonot pre-check remove <n|path>  Remove by index (1-based) or exact path")
+		fmt.Println("  yolonot pre-check clear            Remove all hooks")
+		fmt.Println()
+		fmt.Println("Pre-check hooks run after deny rules, before yolonot's own pipeline,")
+		fmt.Println("in the order listed. Each receives the standard Claude Code PreToolUse")
+		fmt.Println("hook JSON on stdin. The first hook that returns permissionDecision=\"allow\"")
+		fmt.Println("wins. Any other outcome (ask/deny/empty/error/timeout) falls through to")
+		fmt.Println("the next hook and eventually to yolonot's own rules + LLM.")
+		fmt.Println()
+		fmt.Println("⚠ Security: pre-check commands run with YOUR user privileges on every")
+		fmt.Println("  Bash tool invocation. Only add commands you trust — a malicious or")
+		fmt.Println("  compromised hook can bypass yolonot by returning \"allow\" for anything.")
+	}
+
+	if len(args) == 0 {
+		if len(cfg.PreCheck) == 0 {
+			fmt.Println("Pre-check hooks: none configured")
+		} else {
+			fmt.Println("Pre-check hooks (run in order; first allow wins):")
+			for i, p := range cfg.PreCheck {
+				fmt.Printf("  [%d] %s\n", i+1, p)
+			}
+		}
+		fmt.Println()
+		printHelp()
+		return
+	}
+
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: yolonot pre-check add <cmd>")
+			return
+		}
+		entry := strings.Join(args[1:], " ")
+		for _, existing := range cfg.PreCheck {
+			if existing == entry {
+				fmt.Printf("Already configured: %s\n", entry)
+				return
+			}
+		}
+		cfg.PreCheck = append(cfg.PreCheck, entry)
+		SaveConfig(cfg)
+		fmt.Printf("Added pre-check hook: %s\n", entry)
+		fmt.Printf("  (now %d hook(s) configured)\n", len(cfg.PreCheck))
+
+	case "remove", "rm":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: yolonot pre-check remove <n|path>")
+			return
+		}
+		target := strings.Join(args[1:], " ")
+		if n, err := strconv.Atoi(target); err == nil && n >= 1 && n <= len(cfg.PreCheck) {
+			removed := cfg.PreCheck[n-1]
+			cfg.PreCheck = append(cfg.PreCheck[:n-1], cfg.PreCheck[n:]...)
+			SaveConfig(cfg)
+			fmt.Printf("Removed [%d]: %s\n", n, removed)
+			return
+		}
+		for i, p := range cfg.PreCheck {
+			if p == target {
+				cfg.PreCheck = append(cfg.PreCheck[:i], cfg.PreCheck[i+1:]...)
+				SaveConfig(cfg)
+				fmt.Printf("Removed: %s\n", p)
+				return
+			}
+		}
+		fmt.Fprintf(os.Stderr, "Not found: %s\n", target)
+
+	case "clear", "off", "none":
+		if len(cfg.PreCheck) == 0 {
+			fmt.Println("Pre-check hooks: already empty")
+			return
+		}
+		cfg.PreCheck = nil
+		SaveConfig(cfg)
+		fmt.Println("Pre-check hooks cleared.")
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n\n", args[0])
+		printHelp()
+	}
+}
+
+func cmdQuiet(args []string) {
+	cfg := LoadConfig()
+
+	if len(args) == 0 {
+		if cfg.QuietOnAllow {
+			fmt.Println("Quiet on approve: ON")
+			fmt.Println("  Banners shown only for ask/deny. Allow decisions are silent.")
+		} else {
+			fmt.Println("Quiet on approve: OFF")
+			fmt.Println("  Banners shown for every decision (allow / ask / deny).")
+		}
+		fmt.Println()
+		fmt.Println("Usage: yolonot quiet [on|off]")
+		return
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "on", "true", "1", "yes", "y":
+		cfg.QuietOnAllow = true
+	case "off", "false", "0", "no", "n":
+		cfg.QuietOnAllow = false
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown value: %s (expected on|off)\n", args[0])
+		return
+	}
+	SaveConfig(cfg)
+	if cfg.QuietOnAllow {
+		fmt.Println("Quiet on approve: ON — allow decisions will be silent.")
+	} else {
+		fmt.Println("Quiet on approve: OFF — banners shown for every decision.")
+	}
 }
 
 func cmdThreshold(args []string) {

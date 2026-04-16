@@ -35,6 +35,21 @@ func cmdCheck(command string) {
 	fmt.Printf("  [%d] Deny rules:      no match\n", step)
 	step++
 
+	// Step: External pre-check hooks (same as hook.go step 0.5)
+	// NOTE: we do NOT actually invoke pre-check binaries during `yolonot check`
+	// — they may have side effects (network calls, file writes, spawning
+	// subprocesses). Just list them so the user knows they'd run first.
+	if preChecks := LoadConfig().PreCheck; len(preChecks) > 0 {
+		fmt.Printf("  [%d] Pre-check hooks: %d configured (skipped in dry-run)\n", step, len(preChecks))
+		for _, pc := range preChecks {
+			if pc == "" {
+				continue
+			}
+			fmt.Printf("      · %s (would run first — could short-circuit)\n", pc)
+		}
+		step++
+	}
+
 	// Step: Allow/Ask rules (same as hook.go step 3 via MatchRuleWith)
 	chains := hasChainOperator(command)
 	sensitiveFile := hasSensitivePathWith(command, sensitive)

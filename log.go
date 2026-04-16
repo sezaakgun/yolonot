@@ -18,6 +18,7 @@ type DecisionEntry struct {
 	Layer      string  `json:"layer"`
 	Decision   string  `json:"decision"`
 	Confidence float64 `json:"confidence,omitempty"`
+	Short      string  `json:"short,omitempty"` // compact banner label (from LLM)
 	Reasoning  string  `json:"reasoning,omitempty"`
 	Source     string  `json:"source,omitempty"`
 	ReturnedAs string  `json:"returned_as,omitempty"`

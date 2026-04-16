@@ -37,6 +37,8 @@ Commands:
   /yolonot check <cmd>     — dry-run pipeline test
   /yolonot stats           — show decision analytics
   /yolonot threshold [0-100] — set/show confidence threshold
+  /yolonot pre-check       — manage external pre-check hooks (e.g. dippy)
+  /yolonot quiet [on|off]  — silence banners for allow decisions
   /yolonot init            — create rule files for this project
 ```
 
@@ -199,6 +201,29 @@ Run:
 - `yolonot threshold` — show current threshold
 - `yolonot threshold 90` — set threshold to 90
 
+### `/yolonot pre-check [add|remove|clear] [...]` — Manage external pre-check hooks
+
+Chain external hook binaries (e.g. dippy) so fast deterministic checkers run before yolonot's LLM. First `allow` wins; anything else falls through to yolonot.
+
+Run:
+- `yolonot pre-check` — list configured hooks (in execution order)
+- `yolonot pre-check add <cmd>` — append a hook
+- `yolonot pre-check remove <n|path>` — remove by 1-based index or exact path
+- `yolonot pre-check clear` — disable all
+
+Each hook receives the standard Claude Code PreToolUse JSON on stdin and must return a standard hook response JSON on stdout. Only `permissionDecision: "allow"` short-circuits; `ask`/`deny`/empty/timeout/error all fall through. Pre-check runs after yolonot's deny rules but before session memory and the LLM — a yolonot deny rule always beats a pre-check allow.
+
+### `/yolonot quiet [on|off]` — Silence allow banners
+
+Toggle whether yolonot emits a `systemMessage` banner for allow decisions. When `on`, only ask/deny decisions show a banner — allows pass through silently. When `off` (default), every decision shows `yolonot: 🧑‍🚀 <reason>`.
+
+Run:
+- `yolonot quiet` — show current state
+- `yolonot quiet on` — silence allow banners
+- `yolonot quiet off` — restore default
+
+Only affects the user-facing banner. `permissionDecision` + `permissionDecisionReason` + the decision log are unchanged.
+
 ### `/yolonot init` — Create rule files
 
 Set up yolonot for the current project and globally.
@@ -288,3 +313,8 @@ Set up yolonot for the current project and globally.
 - NEVER read tool_response content from audit logs (privacy)
 - `.yolonot` rule format: `allow-cmd <pattern>`, `deny-cmd <pattern>`, `ask-cmd <pattern>`, `allow-path <pattern>`, `deny-path <pattern>`, `ask-path <pattern>`
 - For suggest cross-reference: match session_id between decisions.jsonl and audit PermissionRequest events
+- LLM response schema (returned by the configured provider, consumed by the hook):
+  ```json
+  {"decision":"allow|ask","confidence":0.0-1.0,"short":"≤6-word banner","reasoning":"one sentence","compared_to":"optional"}
+  ```
+  `decision` is a 2-class label (no `deny` from the LLM — that's rule-only). `short` drives the user-facing banner; `reasoning` goes to the decision log. Unparseable output falls through to Claude Code's native permission prompt.

@@ -10,6 +10,21 @@ import (
 
 var Version = "dev"
 
+// Verbose is a package-level flag set by the global -v/--verbose flag.
+// Commands that write files, edit config, or otherwise take action should
+// print extra detail via Verbosef when this is true.
+var Verbose bool
+
+// Verbosef prints to stderr only when Verbose is set. Stderr is used so
+// that `yolonot hook`'s stdout JSON stays untouched — verbose on the hook
+// path shouldn't corrupt Claude Code's protocol.
+func Verbosef(format string, args ...interface{}) {
+	if !Verbose {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[v] "+format+"\n", args...)
+}
+
 func init() {
 	if Version == "dev" {
 		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
@@ -18,7 +33,27 @@ func init() {
 	}
 }
 
+// stripGlobalFlags pulls -v/--verbose out of args (at any position) and
+// sets Verbose. Returns args with the flag removed so the rest of main's
+// switch works unchanged.
+func stripGlobalFlags(args []string) []string {
+	out := args[:0:len(args)]
+	for _, a := range args {
+		if a == "-v" || a == "--verbose" {
+			Verbose = true
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 func main() {
+	// Strip global flags from all positions so `-v` can appear before or
+	// after the subcommand: `yolonot -v install` and `yolonot install -v`
+	// both work.
+	os.Args = append([]string{os.Args[0]}, stripGlobalFlags(os.Args[1:])...)
+
 	if len(os.Args) < 2 {
 		cmdDefault()
 		return
@@ -55,6 +90,10 @@ func main() {
 		cmdStats()
 	case "threshold":
 		cmdThreshold(os.Args[2:])
+	case "pre-check", "precheck":
+		cmdPreCheck(os.Args[2:])
+	case "quiet":
+		cmdQuiet(os.Args[2:])
 	case "check":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: yolonot check <command>")
@@ -75,6 +114,9 @@ func main() {
 		cmdInit()
 	case "eval":
 		opts := parseEvalArgs(os.Args[2:])
+		if Verbose {
+			opts.Verbose = true
+		}
 		cmdEval(opts)
 	case "evolve":
 		cmdEvolve()
@@ -113,6 +155,13 @@ func cmdDefault() {
 	fmt.Printf("  Version:  %s\n", Version)
 	fmt.Printf("  Provider: %s\n", provider)
 	fmt.Printf("  Data:     %s\n", YolonotDir())
+	if n := len(config.PreCheck); n > 0 {
+		if n == 1 {
+			fmt.Printf("  PreCheck: %s\n", config.PreCheck[0])
+		} else {
+			fmt.Printf("  PreCheck: %d hooks (run: yolonot pre-check)\n", n)
+		}
+	}
 	printUpdateHint()
 
 	// Session summary if available
@@ -148,6 +197,8 @@ func cmdDefault() {
 	fmt.Println("  check       Dry-run: test what the pipeline would decide for a command")
 	fmt.Println("  suggest     Analyze history, suggest permanent rules")
 	fmt.Println("  threshold   Set confidence threshold for auto-allow")
+	fmt.Println("  pre-check   Set an external pre-check hook (e.g. dippy-hook)")
+	fmt.Println("  quiet       Silence banners for allow decisions (only show ask/deny)")
 	fmt.Println("  pause       Disable yolonot for current session (total bypass)")
 	fmt.Println("  resume      Re-enable yolonot for current session")
 	fmt.Println("  uninstall   Remove hooks from Claude Code")

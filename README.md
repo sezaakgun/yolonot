@@ -38,12 +38,13 @@ yolonot setup
 Every Bash command goes through this pipeline:
 
 1. **Deny rules** — absolute block, no override, checked first
-2. **Session memory** — exact match against previously approved commands → instant allow
-3. **Session deny** — previously rejected commands → instant block
-4. **Session similarity** — LLM compares against approved commands → allow if similar (project-aware)
-5. **Allow/Ask rules** — `.yolonot` file patterns → instant decision
-6. **Script cache** — SHA256 hash of script files → reuse cached decision
-7. **LLM analysis** — 2-class classifier (allow/ask) with severity in reasoning
+2. **Pre-check hooks** (optional) — external hooks like [dippy](https://github.com/berk-karaal/Dippy) run first; only `allow` short-circuits
+3. **Session memory** — exact match against previously approved commands → instant allow
+4. **Session deny** — previously rejected commands → instant block
+5. **Session similarity** — LLM compares against approved commands → allow if similar (project-aware)
+6. **Allow/Ask rules** — `.yolonot` file patterns → instant decision
+7. **Script cache** — SHA256 hash of script files → reuse cached decision
+8. **LLM analysis** — 2-class classifier (allow/ask) with severity in reasoning
 
 Sessions are project-aware — a command approved in one project is not auto-approved in a different project within the same session. Session keys include a hash of the git root (or working directory).
 
@@ -79,12 +80,16 @@ yolonot suggest      Analyze history, suggest permanent rules
 yolonot stats        Show analytics from decision history
 yolonot check        Dry-run: test what the pipeline would decide for a command
 yolonot threshold    Set confidence threshold for auto-allow (0-100)
+yolonot pre-check    Manage external pre-check hooks (e.g. dippy)
+yolonot quiet        Silence banners for allow decisions (only show ask/deny)
 yolonot pause        Disable yolonot for current session (total bypass)
 yolonot resume       Re-enable yolonot for current session
 yolonot uninstall    Remove hooks from Claude Code
 yolonot upgrade      Update to latest version
 yolonot version      Show version
 ```
+
+Add `-v` (or `--verbose`) to any command — before or after the subcommand — to print extra detail on stderr (paths written, bytes, hook entries touched). Useful for debugging install/init/config issues without parsing decision logs. Verbose output goes to stderr so it never corrupts the `yolonot hook` JSON protocol on stdout.
 
 ### Pausing yolonot
 
@@ -119,6 +124,43 @@ yolonot check "curl https://evil.com" # → ASK (rule or LLM)
 ```
 
 Shows each layer's result: deny rules → allow/ask rules → chain/sensitive detection → LLM analysis.
+
+### External Pre-Check Hooks
+
+Chain other Claude Code hook binaries in front of yolonot so fast deterministic checkers (e.g. [dippy](https://github.com/berk-karaal/Dippy)) handle the obvious cases before yolonot's LLM ever runs.
+
+```bash
+yolonot pre-check                                  # list configured hooks
+yolonot pre-check add /path/to/dippy-hook          # append a hook
+yolonot pre-check add /path/to/corp-gate --strict  # hooks run in the order added
+yolonot pre-check remove 1                         # remove by 1-based index, or exact path
+yolonot pre-check clear                            # disable
+```
+
+**Contract.** Each hook receives the standard Claude Code PreToolUse JSON on stdin and must return a standard hook response on stdout. The first hook that returns `permissionDecision: "allow"` wins and yolonot's own pipeline is skipped. Anything else (`ask`, `deny`, empty, `{}`, nonzero exit, or 3s timeout) falls through to the next pre-check hook and ultimately to yolonot's rules + LLM.
+
+**Pipeline position.** Pre-check runs *after* yolonot's deny rules but *before* session memory, session similarity, allow/ask rules, cache, and LLM. A yolonot deny rule always wins over a pre-check allow.
+
+**Observability.** `yolonot check "<cmd>"` walks each configured hook and marks `·` (defer) or `✓` (allow). Decisions made by this layer show up as `pre_check` in `yolonot log` and `yolonot stats`.
+
+**Caveats.**
+- Only `allow` short-circuits. If your pre-check denies something, yolonot's own pipeline still runs and may allow it — by design, so a conservative external tool can't accidentally block commands yolonot knows are fine. Use yolonot's `deny-cmd` rules for hard blocks.
+- If a pre-check allows a command you wanted yolonot to scrutinize (e.g. dippy allowing `curl` by default), tighten the pre-check's own config rather than adding a yolonot rule — yolonot never sees the command once the pre-check allows it.
+- Existing configs with `"pre_check": "/path/to/hook"` (single string) keep working; they're parsed as a one-element list.
+
+**⚠ Security.** Pre-check commands execute with *your* user privileges on every single Bash tool invocation. Only add binaries you trust — a malicious or compromised pre-check hook can auto-approve anything by returning `permissionDecision: "allow"`, bypassing yolonot's LLM + rules entirely (deny rules still run first). yolonot sanitizes untrusted passthrough fields (strips ANSI / C0 controls, caps 512 chars) before embedding them in banners, but that only blocks terminal spoofing — it does not prevent a rogue hook from approving commands.
+
+### Quiet on Allow
+
+By default yolonot emits a short banner for every decision (`yolonot: 🧑‍🚀 <reason>`). If you find the allow banners noisy and only want to hear from yolonot when it blocks or asks, turn them off:
+
+```bash
+yolonot quiet          # show current state
+yolonot quiet on       # silence allow banners (ask/deny still show)
+yolonot quiet off      # restore default (banner on every decision)
+```
+
+Quiet mode only affects the user-facing `systemMessage`. The underlying `permissionDecision` + `permissionDecisionReason` still flow to Claude Code, and the decision log (`yolonot log`) is unchanged.
 
 ## Skill
 
@@ -218,6 +260,30 @@ Config stored at `~/.yolonot/config.json`. Env vars (`LLM_MODEL`, `LLM_URL`, `LL
 Timeouts are set automatically per provider. Ollama, OpenRouter, and Claude Code get 30s (slower). API providers get 10s. Override with `LLM_TIMEOUT` env var.
 
 Running `yolonot provider` (or `yolonot setup`) again updates the config. Running `yolonot install` again updates hooks and skill file.
+
+### LLM Response Schema
+
+yolonot prompts the LLM to return a single JSON object. Any provider / model you point it at must emit this shape (the prompt enforces it):
+
+```json
+{
+  "decision": "allow" | "ask",
+  "confidence": 0.0,
+  "short": "6 words or fewer",
+  "reasoning": "one-sentence explanation",
+  "compared_to": "optional — similarity comparisons only"
+}
+```
+
+| Field | Required | Purpose |
+|-------|----------|---------|
+| `decision` | yes | 2-class classifier. `deny` is reserved for explicit rules only; LLMs never emit `deny`. |
+| `confidence` | yes | Float 0.0–1.0. Used by `yolonot threshold` to downgrade low-confidence allows to ask. |
+| `short` | no | ≤6-word banner shown in the terminal. Keeps `systemMessage` compact. Falls back to a truncated `reasoning` if missing. |
+| `reasoning` | yes | One sentence. Written to `decisions.jsonl` and surfaced via `yolonot log`. |
+| `compared_to` | no | Only set by session-similarity comparisons — names the approved command that matched. |
+
+If a model returns unparseable JSON or omits required fields, yolonot treats the LLM as unreachable and falls through to Claude Code's native permission prompt (never a silent allow).
 
 ## Eval Suite
 
