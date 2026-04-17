@@ -123,8 +123,8 @@ func TestIntegration_AllowRule_SimpleCommand(t *testing.T) {
 	if resp.HookSpecificOutput.PermissionDecision != "allow" {
 		t.Errorf("expected allow, got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
-	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "rule") {
-		t.Errorf("reason should mention rule, got %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	if !strings.Contains(resp.SystemMessage, "rule") {
+		t.Errorf("systemMessage should mention rule layer, got %q", resp.SystemMessage)
 	}
 }
 
@@ -149,7 +149,8 @@ func TestIntegration_AllowRule_SkippedForChain(t *testing.T) {
 	resp := parseResponse(t, out)
 	// It should NOT be an "allow" from the rule layer for "cat"
 	if resp.HookSpecificOutput.PermissionDecision == "allow" &&
-		strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "rule cat") {
+		strings.Contains(resp.SystemMessage, "rule") &&
+		strings.Contains(resp.SystemMessage, "cat") {
 		t.Error("allow-cmd rule should be skipped for chained commands")
 	}
 }
@@ -169,8 +170,8 @@ func TestIntegration_SessionExactMatch(t *testing.T) {
 	if resp.HookSpecificOutput.PermissionDecision != "allow" {
 		t.Errorf("expected allow, got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
-	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "previously approved") {
-		t.Errorf("reason should say previously approved, got %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	if !strings.Contains(resp.SystemMessage, "session") {
+		t.Errorf("systemMessage should mention session layer, got %q", resp.SystemMessage)
 	}
 }
 
@@ -263,8 +264,8 @@ func TestIntegration_LLM_Allow(t *testing.T) {
 	if resp.HookSpecificOutput.PermissionDecision != "allow" {
 		t.Errorf("expected allow from LLM, got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
-	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "read-only command") {
-		t.Errorf("reason should contain LLM reasoning, got %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	if !strings.Contains(resp.SystemMessage, "llm") {
+		t.Errorf("systemMessage should mention llm layer, got %q", resp.SystemMessage)
 	}
 
 	// Should also save to session approved (under project-scoped session ID)
@@ -457,20 +458,19 @@ func TestIntegration_PreCheck_AllowShortCircuits(t *testing.T) {
 	if resp.HookSpecificOutput.PermissionDecision != "allow" {
 		t.Errorf("expected allow from pre-check, got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
-	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "dippy") {
-		t.Errorf("reason should include pre-check reason, got %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	// Allow banner lives in systemMessage; reason is empty to suppress
+	// Claude Code's "PreToolUse:Bash says:" prefix.
+	if resp.HookSpecificOutput.PermissionDecisionReason != "" {
+		t.Errorf("allow should leave reason empty, got %q", resp.HookSpecificOutput.PermissionDecisionReason)
 	}
-
-	// systemMessage should be branded with "yolonot (via <hook>):" prefix
-	// so the user sees yolonot ran and which hook short-circuited it.
-	if !strings.HasPrefix(resp.SystemMessage, "yolonot (via ") {
-		t.Errorf("systemMessage should be branded with yolonot prefix, got %q", resp.SystemMessage)
+	if !strings.HasPrefix(resp.SystemMessage, "🧑\u200d🚀 pre_check (") {
+		t.Errorf("systemMessage should start with pre_check layer banner, got %q", resp.SystemMessage)
 	}
 	if !strings.Contains(resp.SystemMessage, "pre-allow.sh") {
 		t.Errorf("systemMessage should include hook short name, got %q", resp.SystemMessage)
 	}
-	if !strings.Contains(resp.SystemMessage, "🐤 ls") {
-		t.Errorf("systemMessage should preserve pre-check body, got %q", resp.SystemMessage)
+	if !strings.Contains(resp.SystemMessage, "ls -la") {
+		t.Errorf("systemMessage should include the command, got %q", resp.SystemMessage)
 	}
 
 	// Should be saved to session approved
@@ -480,12 +480,13 @@ func TestIntegration_PreCheck_AllowShortCircuits(t *testing.T) {
 	}
 }
 
-func TestIntegration_PreCheck_AllowWithoutSystemMessageFallsBackToReason(t *testing.T) {
+func TestIntegration_PreCheck_AllowBannerIncludesHookName(t *testing.T) {
 	home, cleanup := withFakeHome(t)
 	defer cleanup()
 
-	// Pre-check allow but no systemMessage — yolonot should fall back
-	// to the permissionDecisionReason when branding the banner.
+	// Pre-check allow with no systemMessage — the new banner format is
+	// self-contained (🧑‍🚀 pre_check (<hook>) -> <command>), so there is
+	// no per-hook body to forward.
 	script := writePreCheckScript(t, home, "pre-allow-nomsg.sh",
 		`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"dippy: read-only"}}`)
 
@@ -495,11 +496,11 @@ func TestIntegration_PreCheck_AllowWithoutSystemMessageFallsBackToReason(t *test
 	out := runHookWithStruct(t, payload)
 
 	resp := parseResponse(t, out)
-	if !strings.HasPrefix(resp.SystemMessage, "yolonot (via ") {
-		t.Errorf("expected yolonot-branded banner, got %q", resp.SystemMessage)
+	if !strings.Contains(resp.SystemMessage, "pre_check (pre-allow-nomsg.sh)") {
+		t.Errorf("systemMessage should include pre_check layer with hook name, got %q", resp.SystemMessage)
 	}
-	if !strings.Contains(resp.SystemMessage, "dippy: read-only") {
-		t.Errorf("expected reason fallback in banner, got %q", resp.SystemMessage)
+	if !strings.Contains(resp.SystemMessage, "-> ls") {
+		t.Errorf("systemMessage should include the command, got %q", resp.SystemMessage)
 	}
 }
 
@@ -583,9 +584,8 @@ func TestIntegration_PreCheck_MultipleHooks_SecondAllows(t *testing.T) {
 		t.Errorf("expected allow from second hook after first defers, got %q",
 			resp.HookSpecificOutput.PermissionDecision)
 	}
-	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "corp-gate") {
-		t.Errorf("reason should come from the second hook, got %q",
-			resp.HookSpecificOutput.PermissionDecisionReason)
+	if !strings.Contains(resp.SystemMessage, "pre-second.sh") {
+		t.Errorf("banner should come from the second hook, got %q", resp.SystemMessage)
 	}
 }
 
@@ -607,8 +607,8 @@ func TestIntegration_PreCheck_MultipleHooks_FirstWinsShortCircuits(t *testing.T)
 	out := runHookWithStruct(t, payload)
 
 	resp := parseResponse(t, out)
-	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "dippy") {
-		t.Errorf("first hook should win, got reason %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	if !strings.Contains(resp.SystemMessage, "pre-first.sh") {
+		t.Errorf("first hook should win, got banner %q", resp.SystemMessage)
 	}
 }
 
@@ -696,8 +696,8 @@ func TestIntegration_FastAllow_AllowsSafeCommand(t *testing.T) {
 	if resp.HookSpecificOutput.PermissionDecision != "allow" {
 		t.Errorf("expected allow, got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
-	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "built-in allow") {
-		t.Errorf("reason should mention built-in allow, got %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	if !strings.Contains(resp.SystemMessage, "fast_allow") {
+		t.Errorf("systemMessage should mention fast_allow layer, got %q", resp.SystemMessage)
 	}
 
 	// Session memory should be updated.
@@ -727,9 +727,9 @@ func TestIntegration_FastAllow_FallsThroughOnUnsafe(t *testing.T) {
 	}
 	resp := parseResponse(t, out)
 	// Whatever the final layer, it must not be the fast_allow fast path.
-	if strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "built-in allow") {
-		t.Errorf("command with $(...) should NOT hit fast_allow, got reason %q",
-			resp.HookSpecificOutput.PermissionDecisionReason)
+	if strings.Contains(resp.SystemMessage, "fast_allow") {
+		t.Errorf("command with $(...) should NOT hit fast_allow, got systemMessage %q",
+			resp.SystemMessage)
 	}
 }
 
@@ -749,8 +749,8 @@ func TestIntegration_FastAllow_OffMeansNoShortCircuit(t *testing.T) {
 		return
 	}
 	resp := parseResponse(t, out)
-	if strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "built-in allow") {
-		t.Errorf("fast-allow was off but still fired: %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	if strings.Contains(resp.SystemMessage, "fast_allow") {
+		t.Errorf("fast-allow was off but still fired: %q", resp.SystemMessage)
 	}
 }
 
@@ -771,6 +771,262 @@ func TestIntegration_FastAllow_DenyRuleStillWins(t *testing.T) {
 		t.Errorf("expected deny from rule, got %q with reason %q",
 			resp.HookSpecificOutput.PermissionDecision,
 			resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+// fast_allow must defer to user `ask-cmd` rules, not only hard deny rules.
+// curl looks read-only to IsLocallySafe (GET semantics) so without this
+// deference an `ask-cmd *curl *` gets silently auto-approved.
+func TestIntegration_FastAllow_AskRuleStillWins(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+	writeGlobalRules(t, home, "ask-cmd *curl *\n")
+
+	payload := makePrePayload("int-fast-allow-ask", "curl https://example.com", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "ask" {
+		t.Errorf("expected ask from rule, got %q (systemMessage=%q, reason=%q)",
+			resp.HookSpecificOutput.PermissionDecision,
+			resp.SystemMessage,
+			resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+	// Attribution: banner must credit the rule layer, not fast_allow.
+	if strings.Contains(resp.SystemMessage, "fast_allow") ||
+		strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "fast_allow") {
+		t.Errorf("banner should credit rule layer, not fast_allow; got systemMessage=%q reason=%q",
+			resp.SystemMessage, resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+// When a user allow-cmd matches, fast_allow should still defer so the rule
+// layer (not fast_allow) gets attribution — the decision is the same either
+// way, but the banner should reflect the user's intent.
+func TestIntegration_FastAllow_AllowRuleGetsAttribution(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+	writeGlobalRules(t, home, "allow-cmd ls*\n")
+
+	payload := makePrePayload("int-fast-allow-allow-rule", "ls -la", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Fatalf("expected allow, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+	if !strings.Contains(resp.SystemMessage, "rule") {
+		t.Errorf("banner should credit rule layer, got %q", resp.SystemMessage)
+	}
+	if strings.Contains(resp.SystemMessage, "fast_allow") {
+		t.Errorf("banner should not credit fast_allow when a rule matches, got %q", resp.SystemMessage)
+	}
+}
+
+// A session exact-match (prior approval) must bypass a newly-added ask-cmd,
+// otherwise users get re-prompted every turn for commands they already said
+// yes to. This reproduces the user's bug: `ask-cmd *curl *` + approve once +
+// run again → expected allow via session, not ask again.
+func TestIntegration_AskRule_SessionExactMatchBypasses(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+	_ = home
+
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+	writeGlobalRules(t, home, "ask-cmd *curl *\n")
+
+	sid := "int-ask-session-bypass"
+	cmd := "curl example.com"
+
+	// First run: ask rule fires.
+	out := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "ask" {
+		t.Fatalf("first call: expected ask, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+
+	// Simulate the user approving and the tool running: Claude Code fires a
+	// PostToolUse, which yolonot uses to record the approval. Cwd must match
+	// the Pre payload so the project-scoped session ID resolves to the same file.
+	post := makePostPayloadStruct(sid, cmd)
+	post.Cwd = "/tmp"
+	runHookWithStruct(t, post)
+
+	// Second run: session exact-match must bypass the ask rule.
+	out2 := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
+	resp2 := parseResponse(t, out2)
+	if resp2.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Fatalf("second call: expected allow via session, got %q (reason=%q)",
+			resp2.HookSpecificOutput.PermissionDecision,
+			resp2.HookSpecificOutput.PermissionDecisionReason)
+	}
+	if !strings.Contains(resp2.SystemMessage, "session") {
+		t.Errorf("second call: banner should credit session layer, got %q", resp2.SystemMessage)
+	}
+}
+
+// Mirror of the ask-rule bypass test: a prior session rejection must bypass a
+// later ask-cmd rule. Without this, the ask rule re-prompts forever even
+// after the user has already said no to the exact command.
+func TestIntegration_AskRule_SessionDenyBypasses(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+	writeGlobalRules(t, home, "ask-cmd *curl *\n")
+
+	sid := "int-ask-session-deny-bypass"
+	cmd := "curl example.com"
+
+	// First run: ask rule fires, command goes onto the `asked` list.
+	out := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "ask" {
+		t.Fatalf("first call: expected ask, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+
+	// User rejects: no PostToolUse fires. Next Pre call should recognize
+	// asked-but-not-approved and emit deny (session_deny layer), not re-ask.
+	out2 := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
+	resp2 := parseResponse(t, out2)
+	if resp2.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("second call: expected deny via session_deny, got %q (reason=%q)",
+			resp2.HookSpecificOutput.PermissionDecision,
+			resp2.HookSpecificOutput.PermissionDecisionReason)
+	}
+	if !strings.Contains(resp2.HookSpecificOutput.PermissionDecisionReason, "session_deny") {
+		t.Errorf("second call: banner should credit session_deny layer, got %q",
+			resp2.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+// Symmetry fix: a newly-added allow-cmd must clear a prior session_deny,
+// the same way a newly-added deny-cmd clears a prior session_approved.
+// Without this, once the user rejects a command they can never unblock it
+// without wiping the session file — even if they explicitly add an allow rule.
+func TestIntegration_AllowRule_ClearsSessionDeny(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+
+	sid := "int-allow-clears-deny"
+	cmd := "curl example.com"
+	projSID := ProjectSessionID(sid, "/tmp")
+
+	// Seed the session to look like "the user was asked once and rejected".
+	AppendLine(projSID, "asked", cmd)
+	AppendLine(projSID, "denied", cmd)
+
+	// Without an allow rule, a replay should be denied (session_deny).
+	out := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("sanity: expected session_deny, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+
+	// User adds an explicit allow rule → that must now override the
+	// stale session_deny.
+	writeGlobalRules(t, home, "allow-cmd *curl *\n")
+
+	out2 := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
+	resp2 := parseResponse(t, out2)
+	if resp2.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Fatalf("expected allow-rule to override session_deny, got %q (reason=%q)",
+			resp2.HookSpecificOutput.PermissionDecision,
+			resp2.HookSpecificOutput.PermissionDecisionReason)
+	}
+	if !strings.Contains(resp2.SystemMessage, "rule") {
+		t.Errorf("banner should credit rule layer, got %q", resp2.SystemMessage)
+	}
+}
+
+// When paused, PostToolUse must NOT silently write to the session's approved
+// list. Otherwise unpausing reveals a pile of pre-approvals for commands
+// yolonot never actually vetted.
+func TestIntegration_Paused_PostToolUseDoesNotRecordApproval(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+
+	sid := "int-paused-post-noop"
+	cmd := "curl example.com"
+
+	// Mark the session paused.
+	sessionsDir := filepath.Join(YolonotDir(), "sessions")
+	os.MkdirAll(sessionsDir, 0755)
+	pausedFile := filepath.Join(sessionsDir, sid+".paused")
+	if err := os.WriteFile(pausedFile, []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// PostToolUse during pause — must be a no-op.
+	post := makePostPayloadStruct(sid, cmd)
+	post.Cwd = "/tmp"
+	runHookWithStruct(t, post)
+
+	// Unpause.
+	os.Remove(pausedFile)
+
+	// The approved list must be empty — the paused PostToolUse didn't leak in.
+	projSID := ProjectSessionID(sid, "/tmp")
+	if ContainsLine(projSID, "approved", cmd) {
+		t.Errorf("command %q should NOT be on approved list after paused PostToolUse", cmd)
+	}
+}
+
+// Same guarantee for YOLONOT_DISABLED=1: disabled mode is a total bypass,
+// PostToolUse included. Otherwise disabling yolonot still quietly mutates
+// session state.
+func TestIntegration_Disabled_PostToolUseDoesNotRecordApproval(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+
+	sid := "int-disabled-post-noop"
+	cmd := "curl example.com"
+
+	t.Setenv("YOLONOT_DISABLED", "1")
+
+	post := makePostPayloadStruct(sid, cmd)
+	post.Cwd = "/tmp"
+	runHookWithStruct(t, post)
+
+	projSID := ProjectSessionID(sid, "/tmp")
+	if ContainsLine(projSID, "approved", cmd) {
+		t.Errorf("command %q should NOT be on approved list when YOLONOT_DISABLED=1", cmd)
+	}
+}
+
+// Deny rules are the hard gate — a prior session approval must NOT bypass a
+// later deny-cmd. (Contrast with ask: ask defers to prior approval.)
+func TestIntegration_DenyRule_BeatsSessionApproved(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+
+	sid := "int-deny-beats-session"
+	cmd := "curl example.com"
+
+	// Seed the session as if the command was previously approved (e.g. before
+	// the deny rule was added).
+	projSID := ProjectSessionID(sid, "/tmp")
+	AppendLine(projSID, "approved", cmd)
+
+	// Now add a deny rule.
+	writeGlobalRules(t, home, "deny-cmd *curl *\n")
+
+	out := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("expected deny (rule beats session), got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
 }
 
@@ -846,9 +1102,8 @@ func TestIntegration_AllowRedirect_WiredIntoHook(t *testing.T) {
 			resp.HookSpecificOutput.PermissionDecision,
 			resp.HookSpecificOutput.PermissionDecisionReason)
 	}
-	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "built-in allow") {
-		t.Errorf("expected fast_allow reason, got %q",
-			resp.HookSpecificOutput.PermissionDecisionReason)
+	if !strings.Contains(resp.SystemMessage, "fast_allow") {
+		t.Errorf("expected fast_allow banner, got %q", resp.SystemMessage)
 	}
 }
 

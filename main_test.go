@@ -612,7 +612,7 @@ func TestIsDir(t *testing.T) {
 // --- hookResponse ---
 
 func TestHookResponse(t *testing.T) {
-	got := hookResponse("allow", "yolonot: safe", "git status")
+	got := hookResponse("allow", "rule", "safe", "git status")
 	var r HookResponse
 	if err := json.Unmarshal([]byte(got), &r); err != nil {
 		t.Fatal(err)
@@ -620,14 +620,16 @@ func TestHookResponse(t *testing.T) {
 	if r.HookSpecificOutput.PermissionDecision != "allow" {
 		t.Errorf("decision = %s, want allow", r.HookSpecificOutput.PermissionDecision)
 	}
-	if r.HookSpecificOutput.PermissionDecisionReason != "yolonot: safe" {
-		t.Errorf("reason = %s", r.HookSpecificOutput.PermissionDecisionReason)
+	// allow leaves reason empty to suppress Claude Code's "PreToolUse:Bash says:" prefix.
+	if r.HookSpecificOutput.PermissionDecisionReason != "" {
+		t.Errorf("reason should be empty for allow, got %q", r.HookSpecificOutput.PermissionDecisionReason)
 	}
 	if r.HookSpecificOutput.HookEventName != "PreToolUse" {
 		t.Errorf("event = %s, want PreToolUse", r.HookSpecificOutput.HookEventName)
 	}
-	if r.SystemMessage != "yolonot: safe — `git status`" {
-		t.Errorf("systemMessage = %s, want yolonot: safe — `git status`", r.SystemMessage)
+	want := "🧑‍🚀 rule -> git status"
+	if r.SystemMessage != want {
+		t.Errorf("systemMessage = %q, want %q", r.SystemMessage, want)
 	}
 }
 
@@ -1768,6 +1770,99 @@ func TestMatchRuleOrderingPriority(t *testing.T) {
 	}
 }
 
+// MatchRuleByPriority ignores file order and picks by action priority:
+// deny > ask > allow. This is what the hook pipeline (step 0) uses so that
+// a user's intent is honored regardless of how their rules file is sorted.
+func TestMatchRuleByPriority(t *testing.T) {
+	t.Run("deny beats allow even when allow is first", func(t *testing.T) {
+		rules := []Rule{
+			{Action: "allow", Type: "cmd", Pattern: "rm *"},
+			{Action: "deny", Type: "cmd", Pattern: "rm -rf*"},
+		}
+		m := MatchRuleByPriority("rm -rf /tmp/x", rules, nil)
+		if m == nil || m.Action != "deny" {
+			t.Fatalf("expected deny to win, got %+v", m)
+		}
+	})
+
+	t.Run("ask beats allow even when allow is first", func(t *testing.T) {
+		rules := []Rule{
+			{Action: "allow", Type: "cmd", Pattern: "curl localhost*"},
+			{Action: "ask", Type: "cmd", Pattern: "*curl *"},
+		}
+		m := MatchRuleByPriority("curl localhost:8080", rules, nil)
+		if m == nil || m.Action != "ask" {
+			t.Fatalf("expected ask to win, got %+v", m)
+		}
+	})
+
+	t.Run("deny beats ask and allow together", func(t *testing.T) {
+		rules := []Rule{
+			{Action: "allow", Type: "cmd", Pattern: "curl *"},
+			{Action: "ask", Type: "cmd", Pattern: "*curl *"},
+			{Action: "deny", Type: "cmd", Pattern: "curl http://evil*"},
+		}
+		m := MatchRuleByPriority("curl http://evil.example.com", rules, nil)
+		if m == nil || m.Action != "deny" {
+			t.Fatalf("expected deny to win, got %+v", m)
+		}
+	})
+
+	t.Run("allow wins when nothing else matches", func(t *testing.T) {
+		rules := []Rule{
+			{Action: "deny", Type: "cmd", Pattern: "rm -rf*"},
+			{Action: "ask", Type: "cmd", Pattern: "sudo *"},
+			{Action: "allow", Type: "cmd", Pattern: "ls*"},
+		}
+		m := MatchRuleByPriority("ls -la", rules, nil)
+		if m == nil || m.Action != "allow" {
+			t.Fatalf("expected allow, got %+v", m)
+		}
+	})
+
+	t.Run("no match returns nil", func(t *testing.T) {
+		rules := []Rule{
+			{Action: "allow", Type: "cmd", Pattern: "ls*"},
+		}
+		if m := MatchRuleByPriority("curl example.com", rules, nil); m != nil {
+			t.Fatalf("expected nil, got %+v", m)
+		}
+	})
+
+	t.Run("allow skipped for chained command, ask still wins", func(t *testing.T) {
+		// hasChainOperator disables allow; an ask rule that matches the raw
+		// command should still fire.
+		rules := []Rule{
+			{Action: "allow", Type: "cmd", Pattern: "echo *"},
+			{Action: "ask", Type: "cmd", Pattern: "*echo *"},
+		}
+		m := MatchRuleByPriority("echo hi && echo bye", rules, nil)
+		if m == nil || m.Action != "ask" {
+			t.Fatalf("expected ask (allow suppressed by chain), got %+v", m)
+		}
+	})
+
+	t.Run("allow skipped for chained command, no ask → nil", func(t *testing.T) {
+		rules := []Rule{
+			{Action: "allow", Type: "cmd", Pattern: "echo *"},
+		}
+		if m := MatchRuleByPriority("echo hi && echo bye", rules, nil); m != nil {
+			t.Fatalf("expected nil (allow suppressed, no ask/deny), got %+v", m)
+		}
+	})
+
+	t.Run("message is preserved on priority match", func(t *testing.T) {
+		rules := []Rule{
+			{Action: "allow", Type: "cmd", Pattern: "curl *"},
+			{Action: "deny", Type: "cmd", Pattern: "curl *", Message: "no outbound curl"},
+		}
+		m := MatchRuleByPriority("curl example.com", rules, nil)
+		if m == nil || m.Action != "deny" || m.Message != "no outbound curl" {
+			t.Fatalf("expected deny with message, got %+v", m)
+		}
+	})
+}
+
 func TestDefaultGlobalRulesWithRuleEngine(t *testing.T) {
 	// Verify that the default rules from cmdInit work correctly
 	// with the rule engine's chain/sensitive detection
@@ -1849,19 +1944,20 @@ func TestDefaultGlobalRulesWithRuleEngine(t *testing.T) {
 
 func TestHookResponseFormats(t *testing.T) {
 	tests := []struct {
-		decision, reason string
+		decision, layer, reason string
+		wantReasonContains      string
 	}{
-		{"allow", "yolonot: previously approved this session"},
-		{"deny", "yolonot: previously rejected this session"},
-		{"ask", "yolonot: DANGEROUS: mutation on production"},
-		{"allow", "yolonot: similar to approved — same pattern"},
-		{"deny", "yolonot: rule *rm -rf /*"},
-		{"ask", "yolonot: SENSITIVE: network request to external URL"},
+		{"allow", "session", "previously approved this session", ""},
+		{"deny", "session_deny", "previously rejected this session", "previously rejected this session"},
+		{"ask", "llm", "DANGEROUS: mutation on production", "DANGEROUS: mutation on production"},
+		{"allow", "session_llm", "similar to approved — same pattern", ""},
+		{"deny", "rule", "*rm -rf /*", "*rm -rf /*"},
+		{"ask", "llm", "SENSITIVE: network request to external URL", "SENSITIVE: network request to external URL"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.decision, func(t *testing.T) {
-			out := hookResponse(tt.decision, tt.reason, "echo test")
+		t.Run(tt.decision+"/"+tt.layer, func(t *testing.T) {
+			out := hookResponse(tt.decision, tt.layer, tt.reason, "echo test")
 			var r HookResponse
 			if err := json.Unmarshal([]byte(out), &r); err != nil {
 				t.Fatalf("invalid JSON: %v", err)
@@ -1869,72 +1965,118 @@ func TestHookResponseFormats(t *testing.T) {
 			if r.HookSpecificOutput.PermissionDecision != tt.decision {
 				t.Errorf("decision = %s, want %s", r.HookSpecificOutput.PermissionDecision, tt.decision)
 			}
-			if r.HookSpecificOutput.PermissionDecisionReason != tt.reason {
-				t.Errorf("reason = %s, want %s", r.HookSpecificOutput.PermissionDecisionReason, tt.reason)
+			if tt.decision == "allow" {
+				// allow keeps reason empty and banner in systemMessage.
+				if r.HookSpecificOutput.PermissionDecisionReason != "" {
+					t.Errorf("allow should not set reason, got %q", r.HookSpecificOutput.PermissionDecisionReason)
+				}
+				wantPrefix := "🧑‍🚀 " + tt.layer + " -> "
+				if !strings.HasPrefix(r.SystemMessage, wantPrefix) {
+					t.Errorf("systemMessage = %q, want prefix %q", r.SystemMessage, wantPrefix)
+				}
+			} else {
+				// ask/deny: banner in reason, no systemMessage.
+				if r.SystemMessage != "" {
+					t.Errorf("%s should not set systemMessage, got %q", tt.decision, r.SystemMessage)
+				}
+				if !strings.Contains(r.HookSpecificOutput.PermissionDecisionReason, tt.wantReasonContains) {
+					t.Errorf("reason = %q, want substring %q",
+						r.HookSpecificOutput.PermissionDecisionReason, tt.wantReasonContains)
+				}
 			}
 		})
 	}
 }
 
-// --- systemMessage with command visibility ---
-
-func TestHookResponseSystemMessageIncludesCommand(t *testing.T) {
-	out := hookResponse("allow", "yolonot: rule git*", "git diff --stat")
+func TestHookResponseAllowBannerHasLayerAndCommand(t *testing.T) {
+	out := hookResponse("allow", "rule", "rule git*", "git diff --stat")
 	var r HookResponse
 	if err := json.Unmarshal([]byte(out), &r); err != nil {
 		t.Fatal(err)
 	}
-	want := "yolonot: rule git* — `git diff --stat`"
+	want := "🧑‍🚀 rule -> git diff --stat"
 	if r.SystemMessage != want {
 		t.Errorf("systemMessage = %q, want %q", r.SystemMessage, want)
 	}
+	if r.HookSpecificOutput.PermissionDecisionReason != "" {
+		t.Errorf("allow should leave reason empty, got %q", r.HookSpecificOutput.PermissionDecisionReason)
+	}
 }
 
-func TestHookResponseSystemMessageOmittedForDeny(t *testing.T) {
-	out := hookResponse("deny", "yolonot: rule *rm*", "rm -rf /")
+func TestHookResponseDenyPutsReasonInPermissionField(t *testing.T) {
+	out := hookResponse("deny", "rule", "rule *rm*", "rm -rf /")
 	var r HookResponse
 	if err := json.Unmarshal([]byte(out), &r); err != nil {
 		t.Fatal(err)
+	}
+	want := "🧑‍🚀 rule -> rm -rf /\nrule *rm*"
+	if r.HookSpecificOutput.PermissionDecisionReason != want {
+		t.Errorf("reason = %q, want %q", r.HookSpecificOutput.PermissionDecisionReason, want)
 	}
 	if r.SystemMessage != "" {
 		t.Errorf("deny should not set systemMessage, got %q", r.SystemMessage)
 	}
 }
 
-func TestHookResponseSystemMessageOmittedForAsk(t *testing.T) {
-	out := hookResponse("ask", "yolonot: needs review", "curl example.com")
+func TestHookResponseAskPutsReasonInPermissionField(t *testing.T) {
+	// Ask banner shows only the reason, not the command — Claude Code already
+	// displays the command in its permission prompt, so duplicating it is noise.
+	out := hookResponse("ask", "llm", "needs review", "curl example.com")
 	var r HookResponse
 	if err := json.Unmarshal([]byte(out), &r); err != nil {
 		t.Fatal(err)
+	}
+	want := "🧑‍🚀 llm -> needs review"
+	if r.HookSpecificOutput.PermissionDecisionReason != want {
+		t.Errorf("reason = %q, want %q", r.HookSpecificOutput.PermissionDecisionReason, want)
+	}
+	if strings.Contains(r.HookSpecificOutput.PermissionDecisionReason, "curl example.com") {
+		t.Errorf("ask banner should not include the command, got %q",
+			r.HookSpecificOutput.PermissionDecisionReason)
 	}
 	if r.SystemMessage != "" {
 		t.Errorf("ask should not set systemMessage, got %q", r.SystemMessage)
 	}
 }
 
-func TestHookResponseSystemMessageTruncatesLongCommand(t *testing.T) {
-	longCmd := strings.Repeat("a", 100)
-	out := hookResponse("allow", "yolonot: safe", longCmd)
+func TestHookResponseAskFallsBackToCommandWhenNoReason(t *testing.T) {
+	// Defensive: if we somehow reach ask with an empty reason, the banner
+	// still needs content. Fall back to the command so users aren't left
+	// staring at "🧑‍🚀 llm -> " with nothing after the arrow.
+	out := hookResponse("ask", "llm", "", "curl example.com")
 	var r HookResponse
 	if err := json.Unmarshal([]byte(out), &r); err != nil {
 		t.Fatal(err)
 	}
-	truncated := longCmd[:77] + "..."
-	want := "yolonot: safe — `" + truncated + "`"
-	if r.SystemMessage != want {
-		t.Errorf("systemMessage = %q, want %q", r.SystemMessage, want)
+	want := "🧑‍🚀 llm -> curl example.com"
+	if r.HookSpecificOutput.PermissionDecisionReason != want {
+		t.Errorf("reason = %q, want %q", r.HookSpecificOutput.PermissionDecisionReason, want)
 	}
 }
 
-func TestHookResponseSystemMessageEmptyCommand(t *testing.T) {
-	out := hookResponse("allow", "yolonot: safe", "")
+func TestHookResponseAllowNoLongerTruncatesCommand(t *testing.T) {
+	longCmd := strings.Repeat("a", 100)
+	out := hookResponse("allow", "fast_allow", "ls is read-only", longCmd)
 	var r HookResponse
 	if err := json.Unmarshal([]byte(out), &r); err != nil {
 		t.Fatal(err)
 	}
-	// Empty command falls back to reason-only
-	if r.SystemMessage != "yolonot: safe" {
-		t.Errorf("systemMessage = %q, want %q", r.SystemMessage, "yolonot: safe")
+	want := "🧑‍🚀 fast_allow -> " + longCmd
+	if r.SystemMessage != want {
+		t.Errorf("systemMessage = %q, want full command without truncation", r.SystemMessage)
+	}
+}
+
+func TestHookResponseAllowEmptyCommand(t *testing.T) {
+	out := hookResponse("allow", "rule", "safe", "")
+	var r HookResponse
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	// Empty command still produces banner; terminal renders a trailing space.
+	want := "🧑‍🚀 rule -> "
+	if r.SystemMessage != want {
+		t.Errorf("systemMessage = %q, want %q", r.SystemMessage, want)
 	}
 }
 
@@ -2098,8 +2240,9 @@ func TestCmdHookSessionAllow(t *testing.T) {
 	if !strings.Contains(out, `"permissionDecision":"allow"`) {
 		t.Errorf("should allow pre-approved command, got: %s", out)
 	}
-	if !strings.Contains(out, "previously approved") {
-		t.Error("should mention previously approved")
+	// New banner: "🧑‍🚀 session -> ls -la" in systemMessage.
+	if !strings.Contains(out, "session") {
+		t.Errorf("should mention session layer, got: %s", out)
 	}
 }
 
@@ -2707,8 +2850,8 @@ func TestCmdHookSessionSimilarity(t *testing.T) {
 	if !strings.Contains(out, `"permissionDecision":"allow"`) {
 		t.Errorf("similar command should be allowed, got: %s", out)
 	}
-	if !strings.Contains(out, "similar to approved") {
-		t.Errorf("should mention similarity, got: %s", out)
+	if !strings.Contains(out, "session_llm") {
+		t.Errorf("should mention session_llm layer, got: %s", out)
 	}
 }
 
@@ -4047,8 +4190,9 @@ func TestHook_ProjectIsolation(t *testing.T) {
 	payloadPre := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"%s"}}`, sid, dirB, command)
 	out := runHookWithPayload(t, payloadPre)
 
-	// Should NOT get "previously approved this session" — the command was only approved in project A
-	if strings.Contains(out, "previously approved") {
+	// Should NOT get a session-layer allow — the command was only approved in project A.
+	// New banner format: "🧑‍🚀 session -> <command>" lives in systemMessage.
+	if strings.Contains(out, `🧑\u200d🚀 session -\u003e `) {
 		t.Errorf("command approved in project A should NOT auto-approve in project B, got: %s", out)
 	}
 }
@@ -4069,7 +4213,8 @@ func TestHook_SameProjectSessionMatch(t *testing.T) {
 	payloadPre := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"%s"}}`, sid, dir, command)
 	out := runHookWithPayload(t, payloadPre)
 
-	if !strings.Contains(out, "previously approved") {
+	// New banner format: "🧑‍🚀 session -> <command>" in systemMessage.
+	if !strings.Contains(out, "session") {
 		t.Errorf("same project should session-match, got: %s", out)
 	}
 	if !strings.Contains(out, `"permissionDecision":"allow"`) {
@@ -4166,7 +4311,10 @@ func TestDecisionShortReason(t *testing.T) {
 	}
 }
 
-func TestCmdHookLLMAllowUsesShortInBanner(t *testing.T) {
+func TestCmdHookLLMAllowBannerOnlyHasLayerAndCommand(t *testing.T) {
+	// The allow banner is intentionally terse — layer + command only,
+	// no LLM reasoning/short fields. Users that want to see per-decision
+	// detail can check the decision log.
 	dir, cleanup := withFakeHome(t)
 	defer cleanup()
 
@@ -4194,46 +4342,16 @@ func TestCmdHookLLMAllowUsesShortInBanner(t *testing.T) {
 	if !strings.Contains(out, `"permissionDecision":"allow"`) {
 		t.Fatalf("expected allow, got: %s", out)
 	}
-	// Banner should use the short field, NOT the long reasoning.
-	if !strings.Contains(out, "read-only ls") {
-		t.Errorf("expected short banner 'read-only ls' in output, got: %s", out)
+	// Neither the Short nor the long Reasoning should appear in the banner —
+	// allow only shows layer + command.
+	if strings.Contains(out, "read-only ls") {
+		t.Errorf("allow banner should not include Short reason, got: %s", out)
 	}
 	if strings.Contains(out, "strictly read-only and listing") {
-		t.Errorf("expected long reasoning to NOT be in systemMessage banner, got: %s", out)
+		t.Errorf("allow banner should not include long Reasoning, got: %s", out)
 	}
-}
-
-func TestCmdHookLLMAllowFallsBackWhenShortMissing(t *testing.T) {
-	// Older models / transient bugs: no "short" field emitted.
-	// We still want a usable banner via Reasoning truncation.
-	dir, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"choices": []map[string]interface{}{
-				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.9,"reasoning":"safe build command"}`}},
-			},
-		})
-	}))
-	defer server.Close()
-
-	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test"}})
-	projectDir := filepath.Join(dir, "project")
-	os.MkdirAll(projectDir, 0755)
-	origCwd, _ := os.Getwd()
-	os.Chdir(projectDir)
-	defer os.Chdir(origCwd)
-
-	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"short-fallback","cwd":"%s","tool_input":{"command":"go build ./..."}}`, projectDir)
-	out := runHookWithPayload(t, payload)
-
-	if !strings.Contains(out, `"permissionDecision":"allow"`) {
-		t.Fatalf("expected allow, got: %s", out)
-	}
-	if !strings.Contains(out, "safe build command") {
-		t.Errorf("expected reasoning fallback banner, got: %s", out)
+	if !strings.Contains(out, "llm") || !strings.Contains(out, "ls -la") {
+		t.Errorf("expected '🧑‍🚀 llm -> ls -la' banner, got: %s", out)
 	}
 }
 
@@ -4341,9 +4459,11 @@ func TestCmdHookQuietOnAllowSilencesBanner(t *testing.T) {
 	if strings.Contains(out, "systemMessage") {
 		t.Errorf("quiet-on-allow should omit systemMessage, got: %s", out)
 	}
-	// Reason should still be on the hookSpecificOutput for Claude Code's internal log.
-	if !strings.Contains(out, "read-only ls") {
-		t.Errorf("expected short reason in permissionDecisionReason, got: %s", out)
+	// In the new format, allow never puts the reason in permissionDecisionReason
+	// (reason only shows up for ask/deny). So quiet-on-allow is effectively
+	// silent except for the decision itself.
+	if strings.Contains(out, `"permissionDecisionReason":"🧑`) {
+		t.Errorf("allow should leave reason empty, got: %s", out)
 	}
 }
 
@@ -4375,10 +4495,11 @@ func TestCmdHookQuietOnAllowStillShowsAsk(t *testing.T) {
 	if !strings.Contains(out, `"permissionDecision":"ask"`) {
 		t.Fatalf("expected ask, got: %s", out)
 	}
-	// Ask is unaffected by QuietOnAllow — the reason is surfaced via
-	// permissionDecisionReason (hookResponse only adds systemMessage for allow).
-	if !strings.Contains(out, "uncertain") {
-		t.Errorf("expected reason for ask decision, got: %s", out)
+	// Ask is unaffected by QuietOnAllow — ask/deny put the full reasoning
+	// (not the short field) in permissionDecisionReason so Claude Code can
+	// show it in the permission prompt.
+	if !strings.Contains(out, "needs review") {
+		t.Errorf("expected reasoning for ask decision, got: %s", out)
 	}
 }
 

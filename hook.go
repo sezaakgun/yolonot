@@ -107,34 +107,47 @@ func sanitizeBanner(s string) string {
 	return b.String()
 }
 
-func hookResponse(decision, reason, command string) string {
-	// All text that flows to Claude Code must pass through sanitizeBanner:
-	// rule messages (deny-cmd ... "text"), pre-check hook output, LLM
-	// reasoning — any of these can carry attacker-chosen bytes that a
-	// trust-rooted walk-up can't fully rule out. Centralizing here closes
-	// the prompt-injection / length-bomb / bidi-override class regardless
-	// of caller.
+// hookResponse builds the hook JSON for Claude Code.
+//
+// Banner format varies by decision:
+//   - allow: "🧑‍🚀 <layer> -> <command>" in systemMessage.
+//     permissionDecisionReason left empty so the TUI doesn't prefix it with
+//     "PreToolUse:Bash says:" (which was duplicating the banner).
+//   - ask: "🧑‍🚀 <layer> -> <reason>" in permissionDecisionReason.
+//     Command is omitted because Claude Code already renders the command
+//     front-and-center in the permission prompt — showing it twice is noise.
+//     The reason is what the user actually needs to decide.
+//   - deny: "🧑‍🚀 <layer> -> <command>\n<reason>". Command is kept here
+//     because the user doesn't get an interactive prompt; the full context
+//     (what was blocked + why) needs to live in the reason.
+//   - quietOnAllow suppresses the allow banner entirely.
+//
+// All user-visible text flows through sanitizeBanner — rule messages,
+// pre-check output and LLM reasoning can all carry attacker-chosen bytes.
+func hookResponse(decision, layer, reason, command string) string {
+	layer = sanitizeBanner(layer)
 	reason = sanitizeBanner(reason)
 	r := HookResponse{}
 	r.HookSpecificOutput.HookEventName = "PreToolUse"
 	r.HookSpecificOutput.PermissionDecision = decision
-	r.HookSpecificOutput.PermissionDecisionReason = reason
-	// For auto-approvals (allow), mirror the reason + command into systemMessage
-	// so the user sees WHAT was approved and WHY in the terminal — otherwise
-	// allow decisions go completely silent and the user has no visibility into
-	// which layer (session/rule/cache/LLM) approved what.
-	// When quietOnAllow is true, skip the banner for allows entirely so only
-	// ask/deny show up in the user's terminal.
-	if decision == "allow" && quietOnAllow {
-		// intentionally no systemMessage
-	} else if decision == "allow" && command != "" {
-		cmd := command
-		if len(cmd) > 80 {
-			cmd = cmd[:77] + "..."
+
+	switch decision {
+	case "allow":
+		if !quietOnAllow {
+			r.SystemMessage = fmt.Sprintf("🧑‍🚀 %s -> %s", layer, command)
 		}
-		r.SystemMessage = fmt.Sprintf("%s — `%s`", reason, cmd)
-	} else if decision == "allow" {
-		r.SystemMessage = reason
+	case "ask":
+		body := reason
+		if body == "" {
+			body = command
+		}
+		r.HookSpecificOutput.PermissionDecisionReason = fmt.Sprintf("🧑‍🚀 %s -> %s", layer, body)
+	case "deny":
+		banner := fmt.Sprintf("🧑‍🚀 %s -> %s", layer, command)
+		if reason != "" {
+			banner = banner + "\n" + reason
+		}
+		r.HookSpecificOutput.PermissionDecisionReason = banner
 	}
 	data, _ := json.Marshal(r)
 	return string(data)
@@ -169,6 +182,21 @@ func cmdHook() {
 	// Clean old sessions (background, non-blocking)
 	go CleanOldSessions()
 
+	// Disabled via env var — total bypass (applies to Post too, so paused
+	// sessions don't silently accumulate pre-approvals).
+	if os.Getenv("YOLONOT_DISABLED") == "1" {
+		return
+	}
+
+	// Paused for this session — total bypass (same: Post writes are gated
+	// too, so unpausing doesn't reveal a pile of "pre-approved" commands
+	// that yolonot never actually vetted).
+	if sessionID != "" {
+		if _, err := os.Stat(filepath.Join(YolonotDir(), "sessions", sessionID+".paused")); err == nil {
+			return
+		}
+	}
+
 	// PostToolUse: command ran → user approved → save to .approved
 	if payload.HookEventName == "PostToolUse" {
 		if sessionID != "" && command != "" {
@@ -183,48 +211,107 @@ func cmdHook() {
 		return
 	}
 
-	// Disabled via env var — total bypass
-	if os.Getenv("YOLONOT_DISABLED") == "1" {
-		return
-	}
-
-	// Paused for this session — total bypass
-	if sessionID != "" {
-		if _, err := os.Stat(filepath.Join(YolonotDir(), "sessions", sessionID+".paused")); err == nil {
-			return
-		}
-	}
-
 	// Load config once — used by pre-check, threshold, and the quiet-on-allow
 	// banner suppression. Keeps disk reads down to one per hook invocation.
 	config := LoadConfig()
 	quietOnAllow = config.QuietOnAllow
 
-	// Step 0: Deny rules — checked first, absolute, no override
+	// User rules reflect the user's *current* intent, so they take priority
+	// over session memory — with one deliberate exception:
+	//
+	//   Step 0:    rule deny        — hard gate
+	//   Step 0.4:  rule allow       — explicit user approval; overrides prior
+	//                                 session_deny so newly-added allow rules
+	//                                 actually unblock previously-rejected cmds
+	//   Step 0.5:  session approved — prior approval bypasses newly-added ask
+	//                                 rule (so users aren't re-prompted mid-flow)
+	//   Step 0.55: session deny     — prior rejection blocks re-asking
+	//   Step 0.6:  rule ask         — only fires if session has no opinion
+	//
+	// Rule priority is deny > ask > allow (file order irrelevant), handled by
+	// MatchRuleByPriority.
 	rules := LoadRules()
 	sensitive := LoadSensitivePatterns()
-	firstToken := command
-	if idx := strings.IndexByte(command, ' '); idx > 0 {
-		firstToken = command[:idx]
+	ruleMatch := MatchRuleByPriority(command, rules, sensitive)
+	if ruleMatch != nil && ruleMatch.Action == "deny" {
+		userReason := fmt.Sprintf("rule %s", ruleMatch.Pattern)
+		if ruleMatch.Message != "" {
+			userReason = ruleMatch.Message
+		}
+		reasoning := fmt.Sprintf("matched rule: deny-%s", ruleMatch.Pattern)
+		if ruleMatch.Message != "" {
+			reasoning += " — " + ruleMatch.Message
+		}
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "deny", Reasoning: reasoning})
+		fmt.Println(hookResponse("deny", "rule", userReason, command))
+		return
 	}
-	for _, r := range rules {
-		if r.Action == "deny" {
-			if (r.Type == "cmd" && matchCmd(r.Pattern, command, firstToken)) ||
-				(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && globMatch(r.Pattern, scriptPathRe.FindStringSubmatch(" "+command)[1])) {
-				banner := fmt.Sprintf("yolonot: 🧑‍🚀 rule %s", r.Pattern)
-				reasoning := fmt.Sprintf("matched rule: deny-%s %s", r.Type, r.Pattern)
-				if r.Message != "" {
-					banner = fmt.Sprintf("yolonot: 🧑‍🚀 %s", r.Message)
-					reasoning = fmt.Sprintf("matched rule: deny-%s %s — %s", r.Type, r.Pattern, r.Message)
-				}
-				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "deny", Reasoning: reasoning})
-				fmt.Println(hookResponse("deny", banner, command))
-				return
-			}
+
+	// Step 0.4: Rule allow. Placed above session_deny so an explicitly added
+	// allow-cmd clears a prior rejection — symmetric with deny-cmd overriding
+	// a prior approval.
+	if ruleMatch != nil && ruleMatch.Action == "allow" {
+		userReason := fmt.Sprintf("rule %s", ruleMatch.Pattern)
+		if ruleMatch.Message != "" {
+			userReason = ruleMatch.Message
+		}
+		reasoning := fmt.Sprintf("matched rule: allow-%s", ruleMatch.Pattern)
+		if ruleMatch.Message != "" {
+			reasoning += " — " + ruleMatch.Message
+		}
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "allow", Reasoning: reasoning})
+		if sessionID != "" {
+			AppendLine(projSessionID, "approved", command)
+		}
+		fmt.Println(hookResponse("allow", "rule", userReason, command))
+		return
+	}
+
+	// Step 0.5: Session exact match → allow. Placed here (before ask rule)
+	// so a prior approval bypasses a newly-added ask-cmd.
+	if sessionID != "" && ContainsLine(projSessionID, "approved", command) {
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "exact_match"})
+		fmt.Println(hookResponse("allow", "session", "previously approved this session", command))
+		return
+	}
+
+	// Step 0.55: Session deny. If the user previously rejected this exact
+	// command (or was asked about it and didn't approve), honor that before
+	// falling into an ask-rule that would just re-prompt forever.
+	if sessionID != "" {
+		if ContainsLine(projSessionID, "denied", command) {
+			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "previously_rejected"})
+			fmt.Println(hookResponse("deny", "session_deny", "previously rejected this session", command))
+			return
+		}
+		if ContainsLine(projSessionID, "asked", command) && !ContainsLine(projSessionID, "approved", command) {
+			AppendLine(projSessionID, "denied", command)
+			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "asked_not_approved"})
+			fmt.Println(hookResponse("deny", "session_deny", "previously rejected this session", command))
+			return
 		}
 	}
 
-	// Step 0.5: Pre-check hooks. Fast deterministic gates that run before
+	// Step 0.6: Rule ask. Deny/allow already handled above; remaining
+	// matches are ask-rules that fall through session checks.
+	if ruleMatch != nil && ruleMatch.Action == "ask" {
+		userReason := fmt.Sprintf("rule %s", ruleMatch.Pattern)
+		if ruleMatch.Message != "" {
+			userReason = ruleMatch.Message
+		}
+		reasoning := fmt.Sprintf("matched rule: ask-%s", ruleMatch.Pattern)
+		if ruleMatch.Message != "" {
+			reasoning += " — " + ruleMatch.Message
+		}
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "ask", Reasoning: reasoning})
+		if sessionID != "" {
+			AppendLine(projSessionID, "asked", command)
+		}
+		fmt.Println(hookResponse("ask", "rule", userReason, command))
+		return
+	}
+
+	// Step 1: Pre-check hooks. Fast deterministic gates that run before
 	// yolonot's own pipeline, in the order configured. Only "allow"
 	// short-circuits — ask/deny/empty all fall through to the next hook and
 	// ultimately to yolonot's own rules/LLM (matches the common chain-hook
@@ -240,64 +327,26 @@ func cmdHook() {
 			continue
 		}
 		if preCheck == FastAllowSentinel {
+			// Any rule match already short-circuited at step 0, so reaching
+			// fast_allow means no user rule applies — safe to consult the
+			// built-in parser.
 			if ok, reason := IsLocallySafeWith(command, AllowRedirectPatterns(rules)); ok {
 				if sessionID != "" {
 					AppendLine(projSessionID, "approved", command)
 				}
 				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "fast_allow", Decision: "allow", Reasoning: reason})
-				fmt.Println(hookResponse("allow", "yolonot: 🧑‍🚀 "+reason, command))
+				fmt.Println(hookResponse("allow", "fast_allow", reason, command))
 				return
 			}
 			continue
 		}
-		if resp, reason, ok := runPreCheck(preCheck, input); ok {
+		if _, reason, ok := runPreCheck(preCheck, input); ok {
 			if sessionID != "" {
 				AppendLine(projSessionID, "approved", command)
 			}
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "pre_check", Decision: "allow", Reasoning: reason})
-
-			// Brand the forwarded systemMessage so the user knows yolonot
-			// ran and a pre-check hook short-circuited the decision. If the
-			// hook set no systemMessage, fall back to its reason.
-			// Sanitize all untrusted fields — a compromised pre-check could
-			// otherwise inject ANSI to spoof banners or clear the terminal.
-			via := preCheckShortName(preCheck)
-			body := sanitizeBanner(resp.SystemMessage)
-			if body == "" {
-				body = sanitizeBanner(reason)
-			}
-			resp.HookSpecificOutput.PermissionDecisionReason = sanitizeBanner(resp.HookSpecificOutput.PermissionDecisionReason)
-			if quietOnAllow {
-				resp.SystemMessage = ""
-			} else {
-				resp.SystemMessage = fmt.Sprintf("yolonot (via %s): %s", via, body)
-			}
-			data, _ := json.Marshal(resp)
-			fmt.Println(string(data))
-			return
-		}
-	}
-
-	// Step 1: Session exact match → allow
-	if sessionID != "" && ContainsLine(projSessionID, "approved", command) {
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "exact_match"})
-		fmt.Println(hookResponse("allow", "yolonot: 🧑‍🚀 previously approved this session", command))
-		return
-	}
-
-	// Step 1.5: Session deny
-	if sessionID != "" {
-		// Check explicit deny list
-		if ContainsLine(projSessionID, "denied", command) {
-			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "ask", Source: "previously_rejected"})
-			fmt.Println(hookResponse("deny", "yolonot: 🧑‍🚀 previously rejected this session", command))
-			return
-		}
-		// Check asked-but-not-approved
-		if ContainsLine(projSessionID, "asked", command) && !ContainsLine(projSessionID, "approved", command) {
-			AppendLine(projSessionID, "denied", command)
-			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "ask", Source: "asked_not_approved"})
-			fmt.Println(hookResponse("deny", "yolonot: 🧑‍🚀 previously rejected this session", command))
+			layer := "pre_check (" + preCheckShortName(preCheck) + ")"
+			fmt.Println(hookResponse("allow", layer, reason, command))
 			return
 		}
 	}
@@ -321,50 +370,15 @@ func cmdHook() {
 						fullReason := fmt.Sprintf("%s: %s", shortReason, d.Reasoning)
 						AppendLine(projSessionID, "asked", command)
 						LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "ask", Confidence: d.Confidence, Short: shortReason, Reasoning: fullReason, DurationMs: ms})
-						fmt.Println(hookResponse("ask", "yolonot: 🧑‍🚀 "+shortReason, command))
+						fmt.Println(hookResponse("ask", "session_llm", fullReason, command))
 						return
 					}
 					AppendLine(projSessionID, "approved", command)
 					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "allow", Short: d.Short, Reasoning: d.Reasoning, DurationMs: ms})
-					detail := d.ShortReason()
-					banner := "similar to approved"
-					if detail != "" {
-						banner = "similar to approved — " + detail
-					}
-					fmt.Println(hookResponse("allow", "yolonot: 🧑‍🚀 "+banner, command))
+					fmt.Println(hookResponse("allow", "session_llm", d.Reasoning, command))
 					return
 				}
 			}
-		}
-	}
-
-	// Step 3: Rule matching (allow/ask — deny already handled in step 0)
-	if match := MatchRuleWith(command, rules, sensitive); match != nil {
-		banner := fmt.Sprintf("yolonot: 🧑‍🚀 rule %s", match.Pattern)
-		if match.Message != "" {
-			banner = fmt.Sprintf("yolonot: 🧑‍🚀 %s", match.Message)
-		}
-		reasoning := fmt.Sprintf("matched rule: %s-%s", match.Action, match.Pattern)
-		if match.Message != "" {
-			reasoning += " — " + match.Message
-		}
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: match.Action, Reasoning: reasoning})
-		if match.Action == "allow" {
-			if sessionID != "" {
-				AppendLine(projSessionID, "approved", command)
-			}
-			fmt.Println(hookResponse("allow", banner, command))
-			return
-		} else if match.Action == "deny" {
-			fmt.Println(hookResponse("deny", banner, command))
-			return
-		} else {
-			// ask rule
-			if sessionID != "" {
-				AppendLine(projSessionID, "asked", command)
-			}
-			fmt.Println(hookResponse("ask", banner, command))
-			return
 		}
 	}
 
@@ -378,24 +392,20 @@ func cmdHook() {
 				AppendLine(projSessionID, "asked", command)
 			}
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "cache", Decision: "ask", Confidence: cached.Confidence, Short: shortReason, Reasoning: "(cached) " + fullReason})
-			fmt.Println(hookResponse("ask", "yolonot: 🧑‍🚀 "+shortReason, command))
+			fmt.Println(hookResponse("ask", "cache", fullReason, command))
 			return
-		}
-		banner := cached.ShortReason()
-		if banner == "" {
-			banner = "cached decision"
 		}
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "cache", Decision: cached.Decision, Confidence: cached.Confidence, Short: cached.Short, Reasoning: "(cached) " + cached.Reasoning})
 		if cached.Decision == "allow" {
 			if sessionID != "" {
 				AppendLine(projSessionID, "approved", command)
 			}
-			fmt.Println(hookResponse("allow", "yolonot: 🧑‍🚀 "+banner, command))
+			fmt.Println(hookResponse("allow", "cache", cached.Reasoning, command))
 		} else {
 			if sessionID != "" {
 				AppendLine(projSessionID, "asked", command)
 			}
-			fmt.Println(hookResponse("ask", "yolonot: 🧑‍🚀 "+banner, command))
+			fmt.Println(hookResponse("ask", "cache", cached.Reasoning, command))
 		}
 		return
 	}
@@ -438,23 +448,22 @@ func cmdHook() {
 			AppendLine(projSessionID, "asked", command)
 		}
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "ask", Confidence: d.Confidence, Short: shortReason, Reasoning: fullReason, DurationMs: ms})
-		fmt.Println(hookResponse("ask", "yolonot: 🧑‍🚀 "+shortReason, command))
+		fmt.Println(hookResponse("ask", "llm", fullReason, command))
 		return
 	}
 
 	LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: d.Decision, Confidence: d.Confidence, Short: d.Short, Reasoning: d.Reasoning, DurationMs: ms})
 
-	banner := d.ShortReason()
 	if d.Decision == "allow" {
 		if sessionID != "" {
 			AppendLine(projSessionID, "approved", command)
 		}
-		fmt.Println(hookResponse("allow", "yolonot: 🧑‍🚀 "+banner, command))
+		fmt.Println(hookResponse("allow", "llm", d.Reasoning, command))
 	} else {
 		if sessionID != "" {
 			AppendLine(projSessionID, "asked", command)
 		}
-		fmt.Println(hookResponse("ask", "yolonot: 🧑‍🚀 "+banner, command))
+		fmt.Println(hookResponse("ask", "llm", d.Reasoning, command))
 	}
 }
 

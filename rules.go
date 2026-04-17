@@ -354,6 +354,62 @@ func MatchRule(command string, rules []Rule) *RuleMatch {
 	return MatchRuleWith(command, rules, LoadSensitivePatterns())
 }
 
+// MatchRuleByPriority picks the highest-priority rule match (deny > ask > allow)
+// regardless of rule file order. Used at step 0 of the hook pipeline where user
+// rules are authoritative — a deny-cmd always beats an overlapping allow-cmd,
+// an ask-cmd always beats an overlapping allow-cmd, and file order is irrelevant.
+// MatchRuleWith (first-match-wins) is still used where needed.
+func MatchRuleByPriority(command string, rules []Rule, sensitive []string) *RuleMatch {
+	skipAllow := hasChainOperator(command) || hasSensitivePathWith(command, sensitive)
+
+	var scriptPath string
+	if m := scriptPathRe.FindStringSubmatch(" " + command); len(m) > 1 {
+		scriptPath = m[1]
+	}
+	firstToken := command
+	if idx := strings.IndexByte(command, ' '); idx > 0 {
+		firstToken = command[:idx]
+	}
+
+	var denyM, askM, allowM *RuleMatch
+	for _, r := range rules {
+		matches := false
+		switch r.Type {
+		case "cmd":
+			matches = matchCmd(r.Pattern, command, firstToken)
+		case "path":
+			if scriptPath != "" {
+				matches = globMatch(r.Pattern, scriptPath)
+			}
+		}
+		if !matches {
+			continue
+		}
+		m := &RuleMatch{Action: r.Action, Pattern: r.Pattern, Message: r.Message}
+		switch r.Action {
+		case "deny":
+			if denyM == nil {
+				denyM = m
+			}
+		case "ask":
+			if askM == nil {
+				askM = m
+			}
+		case "allow":
+			if !skipAllow && allowM == nil {
+				allowM = m
+			}
+		}
+	}
+	if denyM != nil {
+		return denyM
+	}
+	if askM != nil {
+		return askM
+	}
+	return allowM
+}
+
 // MatchRuleWith is like MatchRule but accepts pre-loaded sensitive patterns.
 func MatchRuleWith(command string, rules []Rule, sensitive []string) *RuleMatch {
 	skipAllow := hasChainOperator(command) || hasSensitivePathWith(command, sensitive)
