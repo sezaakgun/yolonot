@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -27,9 +28,16 @@ type ProviderConfig struct {
 type Config struct {
 	Provider            ProviderConfig `json:"provider"`
 	ConfidenceThreshold float64        `json:"confidence_threshold,omitempty"` // 0 = disabled (default)
-	PreCheck            PreCheckList   `json:"pre_check,omitempty"`            // optional external hooks (e.g. dippy-hook) run before yolonot's pipeline; first "allow" wins
+	PreCheck            PreCheckList   `json:"pre_check,omitempty"`            // optional pre-checkers run before yolonot's pipeline; "fast-allow" is a reserved sentinel for the built-in Go bash parser, others are external hook binaries (e.g. /opt/homebrew/bin/dippy). First "allow" wins.
 	QuietOnAllow        bool           `json:"quiet_on_allow,omitempty"`       // when true, allow decisions emit no systemMessage — only ask/deny show a banner
+	LocalAllow          bool           `json:"local_allow,omitempty"`          // DEPRECATED: migrated on load into PreCheck as "fast-allow". Kept for backward-compat read only.
 }
+
+// FastAllowSentinel is the reserved entry in Config.PreCheck that dispatches
+// to the built-in Go bash parser (IsLocallySafeWith) instead of fork+exec.
+// Treated as just another pre-checker so users can reorder it alongside
+// external binaries (e.g. Dippy) without learning a second concept.
+const FastAllowSentinel = "fast-allow"
 
 // PreCheckList is a list of external hook commands. It accepts either a
 // single string or an array of strings in JSON so older single-hook configs
@@ -80,6 +88,24 @@ func LoadConfig() Config {
 	}
 	var c Config
 	json.Unmarshal(data, &c)
+
+	// Migrate legacy `local_allow: true` into the unified pre-check list by
+	// prepending the fast-allow sentinel. Write the rewritten config back so
+	// the migration happens once, not on every load.
+	if c.LocalAllow {
+		hasFastAllow := false
+		for _, p := range c.PreCheck {
+			if p == FastAllowSentinel {
+				hasFastAllow = true
+				break
+			}
+		}
+		if !hasFastAllow {
+			c.PreCheck = append(PreCheckList{FastAllowSentinel}, c.PreCheck...)
+		}
+		c.LocalAllow = false
+		SaveConfig(c)
+	}
 	return c
 }
 
@@ -720,43 +746,153 @@ func listOllamaModels() []string {
 }
 
 func cmdRules() {
-	cwd, _ := os.Getwd()
-	projectRules := filepath.Join(cwd, ".yolonot")
-	fmt.Printf("Project rules (%s):\n", projectRules)
-	rules := loadRulesFromFile(projectRules)
-	if len(rules) > 0 {
-		for _, r := range rules {
-			fmt.Printf("  %s-%s %s\n", r.Action, r.Type, r.Pattern)
+	// --trace prints every `.yolonot` yolonot actually loads (walk-up order),
+	// shows each rule's source path + line, and marks shadowed entries —
+	// answers "which ancestor .yolonot did this rule come from?".
+	trace := false
+	for _, a := range os.Args[2:] {
+		if a == "--trace" || a == "-t" {
+			trace = true
 		}
-	} else {
-		fmt.Println("  (none)")
 	}
 
-	globalRules := filepath.Join(YolonotDir(), "rules")
-	fmt.Printf("\nGlobal rules (%s):\n", globalRules)
-	rules = loadRulesFromFile(globalRules)
-	if len(rules) > 0 {
-		for _, r := range rules {
-			fmt.Printf("  %s-%s %s\n", r.Action, r.Type, r.Pattern)
+	if trace {
+		cmdRulesTrace()
+		return
+	}
+
+	// Default view: every loaded source, rules listed per-source.
+	paths := yolonotConfigSearchPaths()
+	anyPrinted := false
+	for _, path := range paths {
+		rules := loadRulesFromFile(path)
+		if len(rules) == 0 {
+			continue
 		}
-	} else {
-		fmt.Println("  (none)")
+		anyPrinted = true
+		fmt.Printf("%s:\n", path)
+		for _, r := range rules {
+			if r.Message != "" {
+				fmt.Printf("  %s-%s %s  \"%s\"\n", r.Action, r.Type, r.Pattern, r.Message)
+			} else {
+				fmt.Printf("  %s-%s %s\n", r.Action, r.Type, r.Pattern)
+			}
+		}
+		fmt.Println()
+	}
+	if !anyPrinted {
+		fmt.Println("Rules: (none)")
+		fmt.Println("Drop a .yolonot in this project or run `yolonot init`.")
 	}
 
 	patterns := LoadSensitivePatterns()
 	if len(patterns) == 0 {
-		fmt.Println("\nSensitive file checks: disabled (opt-in)")
+		fmt.Println("Sensitive file checks: disabled (opt-in)")
 		fmt.Println("  Uncomment patterns in ~/.yolonot/rules, or add to any .yolonot file:")
 		fmt.Println("    sensitive .env")
 		fmt.Println("    sensitive .pem")
 		fmt.Println("    sensitive .ssh/")
 	} else {
-		fmt.Printf("\nSensitive file checks: enabled (%d patterns)\n", len(patterns))
+		fmt.Printf("Sensitive file checks: enabled (%d patterns)\n", len(patterns))
 		for _, pat := range patterns {
 			fmt.Printf("  %s\n", pat)
 		}
 		fmt.Println()
 		fmt.Println("  Disable with 'not-sensitive *' or remove individual patterns with 'not-sensitive <pattern>'.")
+	}
+}
+
+// cmdRulesTrace shows every loaded rule with its source path + line number,
+// and marks rules that are shadowed by earlier ones (same action+type+pattern,
+// first-match-wins). Helps users answer "why is this rule in effect?" /
+// "where did this rule come from?" after a walk-up load.
+func cmdRulesTrace() {
+	type entry struct {
+		source  string
+		line    int
+		rule    Rule
+		shadowed bool
+		shadowedBy string
+	}
+	var all []entry
+	seen := map[string]string{} // key -> first source:line
+
+	paths := yolonotConfigSearchPaths()
+	for _, path := range paths {
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		lineNum := 0
+		for scanner.Scan() {
+			lineNum++
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, " ", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			actionType := parts[0]
+			idx := strings.Index(actionType, "-")
+			if idx < 0 {
+				continue
+			}
+			action := actionType[:idx]
+			ruleType := actionType[idx+1:]
+			if (action != "allow" && action != "deny" && action != "ask") ||
+				(ruleType != "cmd" && ruleType != "path" && ruleType != "redirect") {
+				continue
+			}
+			pattern, message := splitTrailingMessage(parts[1])
+			r := Rule{Action: action, Type: ruleType, Pattern: pattern, Message: message}
+			key := r.Action + "-" + r.Type + " " + r.Pattern
+			e := entry{source: path, line: lineNum, rule: r}
+			if prev, ok := seen[key]; ok {
+				e.shadowed = true
+				e.shadowedBy = prev
+			} else {
+				seen[key] = fmt.Sprintf("%s:%d", path, lineNum)
+			}
+			all = append(all, e)
+		}
+		f.Close()
+	}
+
+	if len(all) == 0 {
+		fmt.Println("No rules loaded.")
+		return
+	}
+
+	repoRoot := ""
+	if cwd, err := os.Getwd(); err == nil {
+		abs, _ := filepath.Abs(cwd)
+		repoRoot = findRepoRoot(abs)
+	}
+	if repoRoot == "" {
+		fmt.Println("(cwd not in a git repo — walk-up disabled; only global rules loaded)")
+	} else {
+		fmt.Printf("(walk-up trust boundary: %s)\n", repoRoot)
+	}
+	fmt.Println()
+
+	for _, e := range all {
+		tag := "active "
+		if e.shadowed {
+			tag = "shadow "
+		}
+		trailer := ""
+		if e.rule.Message != "" {
+			trailer = fmt.Sprintf("  \"%s\"", e.rule.Message)
+		}
+		fmt.Printf("  [%s] %s-%s %s%s\n", tag, e.rule.Action, e.rule.Type, e.rule.Pattern, trailer)
+		fmt.Printf("            %s:%d", e.source, e.line)
+		if e.shadowed {
+			fmt.Printf(" (shadowed by %s)", e.shadowedBy)
+		}
+		fmt.Println()
 	}
 }
 
@@ -1092,19 +1228,23 @@ func cmdPreCheck(args []string) {
 
 	printHelp := func() {
 		fmt.Println("Usage:")
-		fmt.Println("  yolonot pre-check                  List configured hooks")
-		fmt.Println("  yolonot pre-check add <cmd>        Append a hook")
-		fmt.Println("  yolonot pre-check remove <n|path>  Remove by index (1-based) or exact path")
-		fmt.Println("  yolonot pre-check clear            Remove all hooks")
+		fmt.Println("  yolonot pre-check                   List configured hooks")
+		fmt.Println("  yolonot pre-check add fast-allow    Append built-in Go bash parser (no subprocess)")
+		fmt.Println("  yolonot pre-check add <path>        Append an external hook binary (e.g. dippy)")
+		fmt.Println("  yolonot pre-check remove <n|path>   Remove by index (1-based) or exact entry")
+		fmt.Println("  yolonot pre-check clear             Remove all hooks")
 		fmt.Println()
 		fmt.Println("Pre-check hooks run after deny rules, before yolonot's own pipeline,")
-		fmt.Println("in the order listed. Each receives the standard Claude Code PreToolUse")
-		fmt.Println("hook JSON on stdin. The first hook that returns permissionDecision=\"allow\"")
+		fmt.Println("in the order listed. The first entry that returns permissionDecision=\"allow\"")
 		fmt.Println("wins. Any other outcome (ask/deny/empty/error/timeout) falls through to")
-		fmt.Println("the next hook and eventually to yolonot's own rules + LLM.")
+		fmt.Println("the next entry and eventually to yolonot's own rules + LLM.")
 		fmt.Println()
-		fmt.Println("⚠ Security: pre-check commands run with YOUR user privileges on every")
-		fmt.Println("  Bash tool invocation. Only add commands you trust — a malicious or")
+		fmt.Println("The reserved entry `fast-allow` dispatches to the built-in Go bash")
+		fmt.Println("parser — cheap, strict, no fork/exec. External binaries receive the")
+		fmt.Println("standard Claude Code PreToolUse JSON on stdin.")
+		fmt.Println()
+		fmt.Println("⚠ Security: external pre-check binaries run with YOUR user privileges on")
+		fmt.Println("  every Bash tool invocation. Only add commands you trust — a malicious or")
 		fmt.Println("  compromised hook can bypass yolonot by returning \"allow\" for anything.")
 	}
 
@@ -1114,7 +1254,11 @@ func cmdPreCheck(args []string) {
 		} else {
 			fmt.Println("Pre-check hooks (run in order; first allow wins):")
 			for i, p := range cfg.PreCheck {
-				fmt.Printf("  [%d] %s\n", i+1, p)
+				if p == FastAllowSentinel {
+					fmt.Printf("  [%d] %s  (built-in Go bash parser)\n", i+1, p)
+				} else {
+					fmt.Printf("  [%d] %s\n", i+1, p)
+				}
 			}
 		}
 		fmt.Println()

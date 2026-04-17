@@ -679,3 +679,317 @@ func TestIntegration_AskRule_SavesAsked(t *testing.T) {
 		t.Error("ask rule should save command to .asked session file")
 	}
 }
+
+// --- fast-allow integration tests ---
+
+func TestIntegration_FastAllow_AllowsSafeCommand(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+
+	sid := "int-fast-allow-ls"
+	payload := makePrePayload(sid, "ls -la /tmp", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Errorf("expected allow, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "built-in allow") {
+		t.Errorf("reason should mention built-in allow, got %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+
+	// Session memory should be updated.
+	projSID := ProjectSessionID(sid, "/tmp")
+	if !ContainsLine(projSID, "approved", "ls -la /tmp") {
+		t.Error("fast-allow should record command in .approved session file")
+	}
+}
+
+func TestIntegration_FastAllow_FallsThroughOnUnsafe(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+
+	// CmdSubst with an unsafe inner command must not short-circuit as
+	// fast_allow. (CmdSubst with a safe inner — e.g. `ls $(pwd)` — is
+	// allowed per Dippy parity; here we pick an inner that can't pass.)
+	payload := makePrePayload("int-fast-allow-subst", "ls $(rm -rf /tmp/foo)", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		// Passthrough when no LLM configured is fine — it means we did NOT
+		// short-circuit as fast_allow, which is what we're checking.
+		return
+	}
+	resp := parseResponse(t, out)
+	// Whatever the final layer, it must not be the fast_allow fast path.
+	if strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "built-in allow") {
+		t.Errorf("command with $(...) should NOT hit fast_allow, got reason %q",
+			resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+func TestIntegration_FastAllow_OffMeansNoShortCircuit(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// No fast-allow in pre-check list.
+	SaveConfig(Config{})
+
+	payload := makePrePayload("int-fast-allow-off", "ls", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		// Passthrough — fine, means we did not short-circuit.
+		return
+	}
+	resp := parseResponse(t, out)
+	if strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "built-in allow") {
+		t.Errorf("fast-allow was off but still fired: %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+func TestIntegration_FastAllow_DenyRuleStillWins(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+	// A deny-cmd rule that matches `ls` — Step 0 (deny rules) must beat
+	// Step 0.5 (pre-check including fast-allow).
+	writeGlobalRules(t, home, "deny-cmd ls*\n")
+
+	payload := makePrePayload("int-fast-allow-deny", "ls -la", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Errorf("expected deny from rule, got %q with reason %q",
+			resp.HookSpecificOutput.PermissionDecision,
+			resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+// TestIntegration_LocalAllowConfigMigrates verifies the one-shot migration
+// from legacy `local_allow: true` to an explicit `fast-allow` entry at the
+// head of the pre-check list. Users who set `yolonot local-allow on` before
+// this refactor must keep getting the fast path after upgrading.
+func TestIntegration_LocalAllowConfigMigrates(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Write the legacy config shape directly (not via SaveConfig, to keep
+	// the field on disk until LoadConfig migrates it).
+	legacy := []byte(`{"local_allow": true}`)
+	os.MkdirAll(YolonotDir(), 0755)
+	if err := os.WriteFile(configPath(), legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := LoadConfig()
+	if cfg.LocalAllow {
+		t.Error("LocalAllow should be cleared after migration")
+	}
+	if len(cfg.PreCheck) == 0 || cfg.PreCheck[0] != FastAllowSentinel {
+		t.Errorf("fast-allow should be prepended to PreCheck, got %v", cfg.PreCheck)
+	}
+
+	// And it should have been persisted — a second load should not re-migrate.
+	cfg2 := LoadConfig()
+	if len(cfg2.PreCheck) != 1 {
+		t.Errorf("migration should run exactly once, got %v", cfg2.PreCheck)
+	}
+}
+
+// chdirInRepo creates a git repo rooted at `repoRoot` (makes a `.git` dir),
+// then chdirs to `sub` beneath it. Returns a cleanup that restores cwd.
+// Needed because walk-up is trust-bounded to the git-repo root.
+func chdirInRepo(t *testing.T, repoRoot, sub string) func() {
+	t.Helper()
+	orig, _ := os.Getwd()
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if sub == "" {
+		sub = repoRoot
+	} else {
+		os.MkdirAll(sub, 0755)
+	}
+	if err := os.Chdir(sub); err != nil {
+		t.Fatal(err)
+	}
+	return func() { os.Chdir(orig) }
+}
+
+func TestIntegration_AllowRedirect_WiredIntoHook(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+	SaveConfig(Config{PreCheck: PreCheckList{FastAllowSentinel}})
+
+	repo := filepath.Join(home, "proj")
+	restore := chdirInRepo(t, repo, repo)
+	defer restore()
+
+	os.WriteFile(filepath.Join(repo, ".yolonot"),
+		[]byte("allow-redirect /tmp/build/*\n"), 0644)
+	os.MkdirAll("/tmp/build", 0755)
+
+	payload := makePrePayload("int-allow-redir", "ls > /tmp/build/log", repo)
+	out := runHookWithStruct(t, payload)
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Errorf("expected allow (allow-redirect wired), got %q reason=%q",
+			resp.HookSpecificOutput.PermissionDecision,
+			resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "built-in allow") {
+		t.Errorf("expected fast_allow reason, got %q",
+			resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+func TestIntegration_RuleMessageAppearsInDecisionReason(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+	writeGlobalRules(t, home, `deny-cmd *rm -rf /* "custom warning about rm"`+"\n")
+
+	payload := makePrePayload("int-msg", "rm -rf /important", "/tmp")
+	out := runHookWithStruct(t, payload)
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("expected deny, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "custom warning about rm") {
+		t.Errorf("per-rule message not surfaced in reason: %q",
+			resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+func TestWalkUpConfigOrdering(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	repo := filepath.Join(home, "proj")
+	child := filepath.Join(repo, "sub", "deep")
+	restore := chdirInRepo(t, repo, child)
+	defer restore()
+
+	// Closer wins first-match. Both files define the same pattern but with
+	// different actions — whichever is returned first is the active rule.
+	os.WriteFile(filepath.Join(repo, ".yolonot"),
+		[]byte("deny-cmd testcmd*\n"), 0644)
+	os.MkdirAll(filepath.Join(repo, "sub"), 0755)
+	os.WriteFile(filepath.Join(repo, "sub", ".yolonot"),
+		[]byte("allow-cmd testcmd*\n"), 0644)
+
+	rules := LoadRules()
+	m := MatchRuleWith("testcmd foo", rules, nil)
+	if m == nil {
+		t.Fatal("expected a match, got none")
+	}
+	if m.Action != "allow" {
+		t.Errorf("expected closer (sub/) to win with allow, got %s", m.Action)
+	}
+}
+
+func TestWalkUpStopsAtHome(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Legacy file form of ~/.yolonot (not the sessions/cache directory).
+	// withFakeHome creates it as a dir — remove and replace with a file so
+	// the dedup path can fire.
+	os.RemoveAll(filepath.Join(home, ".yolonot"))
+	os.WriteFile(filepath.Join(home, ".yolonot"),
+		[]byte("deny-cmd dupcheck*\n"), 0644)
+
+	// Git repo AT $HOME so walk-up reaches ~/.yolonot via the walk, and the
+	// legacy-file branch at the end would also try to add it — dedup must fire.
+	restore := chdirInRepo(t, home, home)
+	defer restore()
+
+	paths := yolonotConfigSearchPaths()
+	count := 0
+	target := filepath.Join(home, ".yolonot")
+	for _, p := range paths {
+		if p == target {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("~/.yolonot should appear exactly once in search paths, got %d: %v", count, paths)
+	}
+}
+
+func TestWalkUpScopedToGitRepo(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Outside-repo `.yolonot` must NOT be loaded — trust-root boundary.
+	outside := filepath.Join(home, "untrusted")
+	os.MkdirAll(outside, 0755)
+	os.WriteFile(filepath.Join(outside, ".yolonot"),
+		[]byte("allow-cmd evilcmd*\n"), 0644)
+
+	// Repo under the untrusted ancestor. Walk-up must stop at repo root.
+	repo := filepath.Join(outside, "proj")
+	restore := chdirInRepo(t, repo, repo)
+	defer restore()
+
+	rules := LoadRules()
+	for _, r := range rules {
+		if r.Pattern == "evilcmd*" {
+			t.Error("rule from outside-repo .yolonot leaked through walk-up — trust boundary breached")
+		}
+	}
+}
+
+func TestCmdPreCheckAddFastAllow(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// default: no pre-check entries
+	cfg := LoadConfig()
+	for _, p := range cfg.PreCheck {
+		if p == FastAllowSentinel {
+			t.Fatal("expected fast-allow NOT to be set by default")
+		}
+	}
+
+	captureStdout(func() { cmdPreCheck([]string{"add", FastAllowSentinel}) })
+	cfg = LoadConfig()
+	found := false
+	for _, p := range cfg.PreCheck {
+		if p == FastAllowSentinel {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("fast-allow should be in PreCheck after add, got %v", cfg.PreCheck)
+	}
+
+	// Adding again should be a no-op (dedup), not a duplicate.
+	captureStdout(func() { cmdPreCheck([]string{"add", FastAllowSentinel}) })
+	cfg = LoadConfig()
+	count := 0
+	for _, p := range cfg.PreCheck {
+		if p == FastAllowSentinel {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("fast-allow should appear exactly once, got %d (%v)", count, cfg.PreCheck)
+	}
+
+	captureStdout(func() { cmdPreCheck([]string{"remove", FastAllowSentinel}) })
+	cfg = LoadConfig()
+	for _, p := range cfg.PreCheck {
+		if p == FastAllowSentinel {
+			t.Error("fast-allow should be gone after remove")
+		}
+	}
+}

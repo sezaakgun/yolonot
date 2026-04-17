@@ -102,13 +102,99 @@ allow-path scripts/*
 	}
 }
 
+func TestLoadRulesWithMessages(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".yolonot")
+	os.WriteFile(path, []byte(`deny-cmd *rm -rf /* "you almost deleted the world"
+allow-cmd git status "safe read-only"
+ask-cmd *curl *
+allow-cmd *"quoted"*
+deny-cmd foo "escaped \" quote inside"
+`), 0644)
+
+	rules := loadRulesFromFile(path)
+	if len(rules) != 5 {
+		t.Fatalf("got %d rules, want 5: %+v", len(rules), rules)
+	}
+	if rules[0].Pattern != "*rm -rf /*" || rules[0].Message != "you almost deleted the world" {
+		t.Errorf("rule 0: %+v", rules[0])
+	}
+	if rules[1].Pattern != "git status" || rules[1].Message != "safe read-only" {
+		t.Errorf("rule 1: %+v", rules[1])
+	}
+	if rules[2].Pattern != "*curl *" || rules[2].Message != "" {
+		t.Errorf("rule 2: %+v", rules[2])
+	}
+	// quote not preceded by whitespace — not a message, pattern intact
+	if rules[3].Pattern != `*"quoted"*` || rules[3].Message != "" {
+		t.Errorf("rule 3: %+v", rules[3])
+	}
+	if rules[4].Pattern != "foo" || rules[4].Message != `escaped " quote inside` {
+		t.Errorf("rule 4: %+v", rules[4])
+	}
+}
+
+func TestAllowRedirectPatternsInFastAllow(t *testing.T) {
+	// Without allow-redirect: output redirect to arbitrary path is rejected.
+	if ok, _ := IsLocallySafeWith("ls > /tmp/build/log", nil); ok {
+		t.Error("expected reject for ls > /tmp/build/log without allow-redirect")
+	}
+	// With allow-redirect glob covering the target: accept.
+	if ok, _ := IsLocallySafeWith("ls > /tmp/build/log", []string{"/tmp/build/*"}); !ok {
+		t.Error("expected accept for ls > /tmp/build/log with allow-redirect /tmp/build/*")
+	}
+	// Non-matching pattern: still reject.
+	if ok, _ := IsLocallySafeWith("ls > /etc/passwd", []string{"/tmp/build/*"}); ok {
+		t.Error("allow-redirect must not permit /etc/passwd via /tmp/build/*")
+	}
+	// Append redirect also respected.
+	if ok, _ := IsLocallySafeWith("ls >> /tmp/build/log", []string{"/tmp/build/*"}); !ok {
+		t.Error("expected accept for >> with allow-redirect match")
+	}
+	// CmdSubst target still rejected even with allow-redirect — we only
+	// match literal targets.
+	if ok, _ := IsLocallySafeWith(`ls > $(echo /tmp/build/x)`, []string{"/tmp/build/*"}); ok {
+		t.Error("cmdsubst target must still be rejected")
+	}
+}
+
+func TestLoadRulesParsesRedirectType(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".yolonot")
+	os.WriteFile(path, []byte(`allow-redirect /tmp/build/*
+deny-redirect /etc/*
+ask-redirect ./dist/*
+`), 0644)
+	rules := loadRulesFromFile(path)
+	if len(rules) != 3 {
+		t.Fatalf("got %d rules, want 3", len(rules))
+	}
+	if rules[0].Type != "redirect" || rules[0].Action != "allow" || rules[0].Pattern != "/tmp/build/*" {
+		t.Errorf("rule 0: %+v", rules[0])
+	}
+	patterns := AllowRedirectPatterns(rules)
+	if len(patterns) != 1 || patterns[0] != "/tmp/build/*" {
+		t.Errorf("AllowRedirectPatterns = %v", patterns)
+	}
+}
+
+func TestMatchRuleSurfacesMessage(t *testing.T) {
+	rules := []Rule{
+		{Action: "deny", Type: "cmd", Pattern: "*rm -rf /*", Message: "nope"},
+	}
+	m := MatchRuleWith("rm -rf /", rules, nil)
+	if m == nil || m.Message != "nope" {
+		t.Errorf("got %+v, want Message=nope", m)
+	}
+}
+
 func TestMatchRule(t *testing.T) {
 	rules := []Rule{
-		{"allow", "cmd", "curl localhost*"},
-		{"ask", "cmd", "*curl *"},
-		{"deny", "cmd", "*rm -rf /*"},
-		{"allow", "path", "scripts/*"},
-		{"ask", "path", "deploy/*"},
+		{Action: "allow", Type: "cmd", Pattern: "curl localhost*"},
+		{Action: "ask", Type: "cmd", Pattern: "*curl *"},
+		{Action: "deny", Type: "cmd", Pattern: "*rm -rf /*"},
+		{Action: "allow", Type: "path", Pattern: "scripts/*"},
+		{Action: "ask", Type: "path", Pattern: "deploy/*"},
 	}
 
 	tests := []struct {
@@ -1505,7 +1591,7 @@ func TestSensitivePatternsGlobalAndProject(t *testing.T) {
 
 func TestMatchRuleWithCustomSensitivePatterns(t *testing.T) {
 	rules := []Rule{
-		{"allow", "cmd", "cat *"},
+		{Action: "allow", Type: "cmd", Pattern: "cat *"},
 	}
 
 	// With default patterns: cat .env is sensitive → skip allow
@@ -1536,12 +1622,12 @@ func TestMatchRuleWithCustomSensitivePatterns(t *testing.T) {
 
 func TestMatchRuleSkipsAllowForChainsSensitivesRedirects(t *testing.T) {
 	rules := []Rule{
-		{"allow", "cmd", "cat *"},
-		{"allow", "cmd", "echo *"},
-		{"allow", "cmd", "grep *"},
-		{"allow", "cmd", "ls *"},
-		{"deny", "cmd", "*rm -rf /*"},
-		{"ask", "cmd", "*curl *"},
+		{Action: "allow", Type: "cmd", Pattern: "cat *"},
+		{Action: "allow", Type: "cmd", Pattern: "echo *"},
+		{Action: "allow", Type: "cmd", Pattern: "grep *"},
+		{Action: "allow", Type: "cmd", Pattern: "ls *"},
+		{Action: "deny", Type: "cmd", Pattern: "*rm -rf /*"},
+		{Action: "ask", Type: "cmd", Pattern: "*curl *"},
 	}
 
 	tests := []struct {
@@ -1607,9 +1693,9 @@ func TestMatchRuleSkipsAllowForChainsSensitivesRedirects(t *testing.T) {
 
 func TestCmdRuleMatchesFirstTokenOnly(t *testing.T) {
 	rules := []Rule{
-		{"ask", "cmd", "*curl *"},
-		{"ask", "cmd", "*sudo *"},
-		{"deny", "cmd", "*rm -rf /*"},
+		{Action: "ask", Type: "cmd", Pattern: "*curl *"},
+		{Action: "ask", Type: "cmd", Pattern: "*sudo *"},
+		{Action: "deny", Type: "cmd", Pattern: "*rm -rf /*"},
 	}
 
 	tests := []struct {
@@ -1660,8 +1746,8 @@ func TestCmdRuleMatchesFirstTokenOnly(t *testing.T) {
 func TestMatchRuleOrderingPriority(t *testing.T) {
 	// Test that rule ordering matters — first match wins
 	rules := []Rule{
-		{"ask", "cmd", "*curl *"},
-		{"allow", "cmd", "curl localhost*"},
+		{Action: "ask", Type: "cmd", Pattern: "*curl *"},
+		{Action: "allow", Type: "cmd", Pattern: "curl localhost*"},
 	}
 
 	// ask-cmd *curl * is first, so it should win
@@ -1672,8 +1758,8 @@ func TestMatchRuleOrderingPriority(t *testing.T) {
 
 	// Reversed order: allow first
 	rulesReversed := []Rule{
-		{"allow", "cmd", "curl localhost*"},
-		{"ask", "cmd", "*curl *"},
+		{Action: "allow", Type: "cmd", Pattern: "curl localhost*"},
+		{Action: "ask", Type: "cmd", Pattern: "*curl *"},
 	}
 
 	match = MatchRuleWith("curl localhost:8080", rulesReversed, nil)
@@ -1687,15 +1773,15 @@ func TestDefaultGlobalRulesWithRuleEngine(t *testing.T) {
 	// with the rule engine's chain/sensitive detection
 	rules := []Rule{
 		// Subset of default global rules
-		{"allow", "cmd", "cat *"},
-		{"allow", "cmd", "ls *"},
-		{"allow", "cmd", "grep *"},
-		{"allow", "cmd", "echo *"},
-		{"allow", "cmd", "mkdir *"},
-		{"allow", "cmd", "touch *"},
-		{"allow", "cmd", "curl localhost*"},
-		{"deny", "cmd", "*rm -rf /*"},
-		{"ask", "cmd", "*curl *"},
+		{Action: "allow", Type: "cmd", Pattern: "cat *"},
+		{Action: "allow", Type: "cmd", Pattern: "ls *"},
+		{Action: "allow", Type: "cmd", Pattern: "grep *"},
+		{Action: "allow", Type: "cmd", Pattern: "echo *"},
+		{Action: "allow", Type: "cmd", Pattern: "mkdir *"},
+		{Action: "allow", Type: "cmd", Pattern: "touch *"},
+		{Action: "allow", Type: "cmd", Pattern: "curl localhost*"},
+		{Action: "deny", Type: "cmd", Pattern: "*rm -rf /*"},
+		{Action: "ask", Type: "cmd", Pattern: "*curl *"},
 	}
 
 	tests := []struct {

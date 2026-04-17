@@ -35,17 +35,32 @@ func cmdCheck(command string) {
 	fmt.Printf("  [%d] Deny rules:      no match\n", step)
 	step++
 
-	// Step: External pre-check hooks (same as hook.go step 0.5)
-	// NOTE: we do NOT actually invoke pre-check binaries during `yolonot check`
-	// — they may have side effects (network calls, file writes, spawning
-	// subprocesses). Just list them so the user knows they'd run first.
+	// Step: Pre-check hooks (same as hook.go step 0.5).
+	// External binaries are NOT invoked during `yolonot check` — they may
+	// have side effects. But the fast-allow sentinel is pure and cheap, so
+	// we DO evaluate it inline and show the actual verdict.
 	if preChecks := LoadConfig().PreCheck; len(preChecks) > 0 {
-		fmt.Printf("  [%d] Pre-check hooks: %d configured (skipped in dry-run)\n", step, len(preChecks))
+		fmt.Printf("  [%d] Pre-check hooks: %d configured\n", step, len(preChecks))
+		fastAllowHit := false
 		for _, pc := range preChecks {
 			if pc == "" {
 				continue
 			}
-			fmt.Printf("      · %s (would run first — could short-circuit)\n", pc)
+			if pc == FastAllowSentinel {
+				if ok, reason := IsLocallySafeWith(command, AllowRedirectPatterns(rules)); ok {
+					fmt.Printf("      ✓ %s — ALLOW (%s)\n", pc, reason)
+					fastAllowHit = true
+				} else {
+					fmt.Printf("      · %s — fall through\n", pc)
+				}
+				continue
+			}
+			fmt.Printf("      · %s (external, skipped in dry-run)\n", pc)
+		}
+		if fastAllowHit {
+			fmt.Println()
+			fmt.Printf("  → Result: ALLOW (layer: fast_allow)\n")
+			return
 		}
 		step++
 	}

@@ -20,25 +20,54 @@ yolonot sits between Claude Code and your shell. It uses an LLM to classify ever
 
 ## Quick Start
 
+### 1. Pick an LLM provider
+
+yolonot calls an LLM to classify every Bash command. You need one of these — pick based on cost vs. latency:
+
+| Provider | Cost | Per-command latency | Notes |
+|----------|------|--------------------:|-------|
+| **OpenAI** (`gpt-5.4-mini`) | ~10¢/day | ~500ms | Fastest. Needs `OPENAI_API_KEY`. Recommended. |
+| **OpenRouter** (free models) | ~10¢/day | 500ms–3s | Broad model choice. Needs `OPENROUTER_API_KEY`. |
+| **Ollama** (`gemma4:e4b`) | free | 2–10s | Local, no API key. Install with `brew install ollama && ollama pull gemma4:e4b`. |
+| **Claude Code** (default) | free | ~10s | Uses your Claude subscription, no API key, but slowest. |
+
+You can change provider any time with `yolonot provider`.
+
+### 2. Install
+
 ```bash
-# Install
 go install github.com/sezaakgun/yolonot@latest
 
 # Make sure Go bin is in PATH
 export PATH="$PATH:$(go env GOPATH)/bin"
 
-# Setup (hooks + rules + provider — all in one)
+# First-run wizard: hooks + rules + provider pick
 yolonot setup
-
-# Restart Claude Code
 ```
+
+### 3. (Optional) Add Dippy for stricter fast-path coverage
+
+yolonot already installs a built-in fast-path — `fast-allow`, a native Go bash parser — during `yolonot setup`. It short-circuits obvious read-only commands (`ls`, `cat`, `git status`, `kubectl get`, …) **without** an LLM call and with no subprocess overhead.
+
+If you want even broader fast-path coverage, layer [Dippy](https://github.com/ldayton/Dippy) (Lily Dayton's hand-written Python bash parser) on top:
+
+```bash
+brew tap ldayton/dippy && brew install dippy
+yolonot pre-check add /opt/homebrew/bin/dippy
+```
+
+**Dippy is preferred** when you want maximum fast-path coverage — its parser is more thorough on exotic bash. If you'd rather skip the Python runtime, the built-in `fast-allow` alone handles the common cases in-process. Both live in the same pre-check list — run either, both (in any order), or neither. See [Pre-Check Hooks](#external-pre-check-hooks).
+
+### 4. Restart Claude Code
+
+Hooks are read at Claude Code startup, so restart your session to activate yolonot.
 
 ## How It Works
 
 Every Bash command goes through this pipeline:
 
 1. **Deny rules** — absolute block, no override, checked first
-2. **Pre-check hooks** (optional) — external hooks like [dippy](https://github.com/berk-karaal/Dippy) run first; only `allow` short-circuits
+2. **Pre-check hooks** (ordered list) — includes the built-in `fast-allow` (no-LLM bash parser) and any external hooks like [dippy](https://github.com/ldayton/Dippy); first entry to return `allow` short-circuits
 3. **Session memory** — exact match against previously approved commands → instant allow
 4. **Session deny** — previously rejected commands → instant block
 5. **Session similarity** — LLM compares against approved commands → allow if similar (project-aware)
@@ -80,7 +109,7 @@ yolonot suggest      Analyze history, suggest permanent rules
 yolonot stats        Show analytics from decision history
 yolonot check        Dry-run: test what the pipeline would decide for a command
 yolonot threshold    Set confidence threshold for auto-allow (0-100)
-yolonot pre-check    Manage external pre-check hooks (e.g. dippy)
+yolonot pre-check    Manage pre-checkers (fast-allow + external hooks like dippy)
 yolonot quiet        Silence banners for allow decisions (only show ask/deny)
 yolonot pause        Disable yolonot for current session (total bypass)
 yolonot resume       Re-enable yolonot for current session
@@ -125,30 +154,52 @@ yolonot check "curl https://evil.com" # → ASK (rule or LLM)
 
 Shows each layer's result: deny rules → allow/ask rules → chain/sensitive detection → LLM analysis.
 
-### External Pre-Check Hooks
+### Pre-Check Hooks
 
-Chain other Claude Code hook binaries in front of yolonot so fast deterministic checkers (e.g. [dippy](https://github.com/berk-karaal/Dippy)) handle the obvious cases before yolonot's LLM ever runs.
+The pre-check list is yolonot's fast-path layer — an ordered sequence of deterministic checkers that run after deny rules but before session memory, allow/ask rules, cache, and LLM. The first entry that returns `allow` short-circuits the pipeline.
+
+Two kinds of entries share the list:
+
+- **`fast-allow`** — reserved sentinel. Dispatches to yolonot's built-in Go bash parser (see below). No fork/exec. Added by default during `yolonot setup`.
+- **Any other entry** — treated as an external hook binary (e.g. [Dippy](https://github.com/ldayton/Dippy)). Receives the standard Claude Code PreToolUse JSON on stdin, must return a standard hook response on stdout.
 
 ```bash
-yolonot pre-check                                  # list configured hooks
-yolonot pre-check add /path/to/dippy-hook          # append a hook
-yolonot pre-check add /path/to/corp-gate --strict  # hooks run in the order added
-yolonot pre-check remove 1                         # remove by 1-based index, or exact path
-yolonot pre-check clear                            # disable
+yolonot pre-check                                # list configured entries in order
+yolonot pre-check add fast-allow                 # built-in Go bash parser (default at setup)
+yolonot pre-check add /opt/homebrew/bin/dippy    # external hook binary
+yolonot pre-check remove 1                       # remove by 1-based index
+yolonot pre-check remove fast-allow              # remove by exact entry
+yolonot pre-check clear                          # disable all
 ```
 
-**Contract.** Each hook receives the standard Claude Code PreToolUse JSON on stdin and must return a standard hook response on stdout. The first hook that returns `permissionDecision: "allow"` wins and yolonot's own pipeline is skipped. Anything else (`ask`, `deny`, empty, `{}`, nonzero exit, or 3s timeout) falls through to the next pre-check hook and ultimately to yolonot's rules + LLM.
+**Order matters.** Put cheap/narrow checkers first. The typical layout is `fast-allow` first (strict, no subprocess), then Dippy (broader bash coverage, Python subprocess) — that way obvious cases never even touch Dippy.
 
-**Pipeline position.** Pre-check runs *after* yolonot's deny rules but *before* session memory, session similarity, allow/ask rules, cache, and LLM. A yolonot deny rule always wins over a pre-check allow.
+**Contract.** The first entry to return `permissionDecision: "allow"` wins. Anything else (`ask`, `deny`, empty, `{}`, nonzero exit, or 3s timeout for external hooks) falls through to the next entry and ultimately to yolonot's rules + LLM. yolonot deny rules always beat a pre-check allow — Step 0 runs first.
 
-**Observability.** `yolonot check "<cmd>"` walks each configured hook and marks `·` (defer) or `✓` (allow). Decisions made by this layer show up as `pre_check` in `yolonot log` and `yolonot stats`.
+**Observability.** `yolonot check "<cmd>"` walks the list; `fast-allow` is evaluated inline (pure, no side effects), external hooks are listed but not invoked. Decisions show up as `fast_allow` or `pre_check` in `yolonot log` and `yolonot stats`.
 
 **Caveats.**
-- Only `allow` short-circuits. If your pre-check denies something, yolonot's own pipeline still runs and may allow it — by design, so a conservative external tool can't accidentally block commands yolonot knows are fine. Use yolonot's `deny-cmd` rules for hard blocks.
-- If a pre-check allows a command you wanted yolonot to scrutinize (e.g. dippy allowing `curl` by default), tighten the pre-check's own config rather than adding a yolonot rule — yolonot never sees the command once the pre-check allows it.
-- Existing configs with `"pre_check": "/path/to/hook"` (single string) keep working; they're parsed as a one-element list.
+- Only `allow` short-circuits. If a pre-check denies, the rest of the pipeline still runs and may allow — by design, so a conservative external tool can't accidentally block commands yolonot knows are fine. Use `deny-cmd` rules for hard blocks.
+- If a pre-check allows something you wanted yolonot to scrutinize, tighten that checker's own config — yolonot never sees the command once it's allowed.
+- Existing configs with `"pre_check": "/path/to/hook"` (single string) keep working; they're parsed as a one-element list. Legacy `"local_allow": true` is auto-migrated to `fast-allow` at the head of the list on next load.
 
-**⚠ Security.** Pre-check commands execute with *your* user privileges on every single Bash tool invocation. Only add binaries you trust — a malicious or compromised pre-check hook can auto-approve anything by returning `permissionDecision: "allow"`, bypassing yolonot's LLM + rules entirely (deny rules still run first). yolonot sanitizes untrusted passthrough fields (strips ANSI / C0 controls, caps 512 chars) before embedding them in banners, but that only blocks terminal spoofing — it does not prevent a rogue hook from approving commands.
+**⚠ Security.** External pre-check binaries execute with *your* user privileges on every single Bash tool invocation. Only add binaries you trust — a malicious or compromised pre-check hook can auto-approve anything by returning `permissionDecision: "allow"`, bypassing yolonot's LLM + rules entirely (deny rules still run first). yolonot sanitizes untrusted passthrough fields (strips ANSI / C0 controls, caps 512 chars) before embedding them in banners, but that only blocks terminal spoofing — it does not prevent a rogue hook from approving commands. `fast-allow` runs in-process so it has no such exposure.
+
+### fast-allow — The Built-in Bash Parser
+
+`fast-allow` uses [mvdan/sh](https://github.com/mvdan/sh) to parse each command and only short-circuits when the AST proves safety:
+
+- Single simple command, or a pipeline of only allowlisted commands
+- Head command (`ls`, `cat`, `git status`, `docker ps`, `kubectl get`, etc.) is in the built-in allowlist
+- For multiplex tools (`git`, `go`, `docker`, `kubectl`, `npm`, `brew`, ...) the subcommand must be a known read-only one — `git push`, `docker run`, `npm install` all fall through
+- No command substitution (`$(...)`, backticks), no process substitution (`<(...)`, `>(...)`), no arithmetic expansion
+- No redirect except to `/dev/null` or targets covered by `allow-redirect` rules — `cat foo > /tmp/out` falls through
+- No chaining (`&&`, `||`, `;`), no subshells, no brace blocks, no background, no negation
+- No prefix assignment (`FOO=bar ls`), no unknown parameter expansion operators (`${x:=bad}`, `${!x}`)
+
+Anything even slightly ambiguous returns to the normal pipeline — session memory, rules, cache, and finally the LLM. **The LLM is still the safety net**; `fast-allow` just skips it for commands where no human would want to review.
+
+**Dippy comparison.** If you want broader fast-path coverage, layer Dippy on after `fast-allow`. Dippy's [Parable](https://github.com/ldayton/Parable) parser is more thorough on exotic bash but adds a Python subprocess per hook invocation. `fast-allow` is deliberately conservative — it falls through to the LLM whenever in doubt, so false positives go to a smarter layer rather than being rubber-stamped. Allowlist ported with attribution from Dippy (MIT).
 
 ### Quiet on Allow
 
@@ -192,12 +243,12 @@ Shows: total decisions, allow/ask/deny percentages, layer distribution (rule/ses
 
 ## Rules
 
-Rules live in `.yolonot` files. Project rules (`.yolonot` in project root) and global rules (`~/.yolonot/rules`).
+Rules live in `.yolonot` files. yolonot walks up from the current working directory collecting every `.yolonot` it finds, stopping at `$HOME`. Closer-to-cwd files win (first match). Then `~/.yolonot/rules` (generated by `setup`) is consulted, plus `~/.yolonot` if it exists as a file.
 
 ```
-# Format: <action>-<type> <pattern>
+# Format: <action>-<type> <pattern> ["optional message"]
 # Actions: allow, deny, ask
-# Types: cmd (command), path (script file)
+# Types:   cmd (command), path (script file), redirect (output target)
 
 # Allow safe patterns
 allow-cmd curl localhost*
@@ -213,6 +264,53 @@ ask-cmd *wget *
 ```
 
 Rules are checked before the LLM, so they're instant and free.
+
+### Walk-Up Discovery
+
+Drop `.yolonot` anywhere up the tree from where Claude Code runs:
+
+```
+/Users/you/work/.yolonot              # team-wide rules
+/Users/you/work/project/.yolonot      # project-specific overrides
+/Users/you/work/project/sub/.yolonot  # per-subdir rules
+```
+
+Running from `project/sub/` loads all three in closest-first order. Since rules are first-match-wins, a subdir `.yolonot` can override project-level rules. The walk halts at `$HOME`, so `~/.yolonot` never double-loads.
+
+### Per-Rule Messages
+
+Any rule can carry a trailing `"quoted message"`. When the rule fires, the message is what Claude Code shows in `permissionDecisionReason` — so the model reads *your* reasoning, not the raw pattern.
+
+```
+deny-cmd *rm -rf /* "Never. This kills production. Ask me first."
+deny-cmd *force-push* "We don't force-push to shared branches."
+ask-cmd *curl *        "Confirm the URL is intentional before fetching."
+allow-cmd git status   "read-only inspection"
+```
+
+Without a message, Claude sees `"yolonot: 🧑‍🚀 rule *rm -rf /*"` (generic). With one, it sees the actual reason. Embedded quotes escape with `\"`. The leading quote must be preceded by whitespace, so patterns like `*"quoted"*` are preserved intact.
+
+### `allow-redirect` — Pre-Approved Write Targets
+
+Output redirects normally force a command out of the `fast-allow` path into the LLM (on the assumption that `> anywhere` is dangerous). If you have known-safe write targets (build outputs, temp paths, log dirs), declare them with `allow-redirect`:
+
+```
+allow-redirect /tmp/*
+allow-redirect ./dist/*
+allow-redirect ./build/**
+allow-redirect /var/log/myapp/*
+```
+
+With `fast-allow` in the pre-check list + these rules:
+
+| Command | Result |
+|---------|--------|
+| `ls > /tmp/out.txt` | fast-path allow |
+| `echo foo > ./dist/stamp` | fast-path allow |
+| `cat secret > /etc/passwd` | rejected (no match) — LLM evaluates |
+| `ls > $(evil)` | rejected (cmdsubst target, never matched literally) |
+
+Patterns are globs matched against the literal redirect target. Non-literal targets (`$VAR`, `$(...)`) are always rejected regardless of rules. `deny-redirect` and `ask-redirect` are accepted by the parser for forward-compat but not yet enforced.
 
 ### Chain & Redirect Detection
 
@@ -356,3 +454,7 @@ yolonot uninstall    # removes hooks + skill, preserves data
 ```
 
 Data at `~/.yolonot/` is preserved. Delete manually if wanted.
+
+## Acknowledgements
+
+The built-in `fast-allow` pre-checker is heavily inspired by [**Dippy**](https://github.com/lilydayton/dippy) by Lily Dayton — specifically its `SIMPLE_SAFE` allowlist, subcommand-gating approach for multiplex tools (`git`, `docker`, `kubectl`, …), and its hostile-input test corpus. yolonot ports the allowlist tables into Go and re-walks the AST via [`mvdan.cc/sh`](https://github.com/mvdan/sh) instead of Dippy's hand-written Python bash parser (Parable). Where yolonot's parser reaches ambiguity it defers to the LLM — a fallback Dippy doesn't rely on — so the Go port can be stricter (reject-to-LLM) without hurting UX. The `dippy_parity_test.go` corpus and the rules system owe a direct debt to the Dippy project. MIT-licensed, credited in file headers.

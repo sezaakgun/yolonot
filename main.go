@@ -94,6 +94,12 @@ func main() {
 		cmdPreCheck(os.Args[2:])
 	case "quiet":
 		cmdQuiet(os.Args[2:])
+	case "local-allow", "localallow":
+		fmt.Fprintln(os.Stderr, "yolonot: `local-allow` was replaced by the unified pre-check list.")
+		fmt.Fprintln(os.Stderr, "  enable:  yolonot pre-check add fast-allow")
+		fmt.Fprintln(os.Stderr, "  disable: yolonot pre-check remove fast-allow")
+		fmt.Fprintln(os.Stderr, "  status:  yolonot pre-check")
+		os.Exit(2)
 	case "check":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: yolonot check <command>")
@@ -197,7 +203,7 @@ func cmdDefault() {
 	fmt.Println("  check       Dry-run: test what the pipeline would decide for a command")
 	fmt.Println("  suggest     Analyze history, suggest permanent rules")
 	fmt.Println("  threshold   Set confidence threshold for auto-allow")
-	fmt.Println("  pre-check   Set an external pre-check hook (e.g. dippy-hook)")
+	fmt.Println("  pre-check   Manage pre-checkers (fast-allow + external hooks like dippy)")
 	fmt.Println("  quiet       Silence banners for allow decisions (only show ask/deny)")
 	fmt.Println("  pause       Disable yolonot for current session (total bypass)")
 	fmt.Println("  resume      Re-enable yolonot for current session")
@@ -212,22 +218,44 @@ func cmdSetup() {
 
 	// Step 1: Install hooks
 	if IsInstalled() {
-		fmt.Println("  [1/3] Hooks: already installed")
+		fmt.Println("  [1/4] Hooks: already installed")
 	} else {
-		fmt.Println("  [1/3] Installing hooks...")
+		fmt.Println("  [1/4] Installing hooks...")
 		cmdInstall()
 	}
 
 	// Step 2: Init rules
 	fmt.Println()
-	fmt.Println("  [2/3] Creating rule files...")
+	fmt.Println("  [2/4] Creating rule files...")
 	cmdInit()
 
 	// Step 3: Provider
 	fmt.Println()
-	fmt.Println("  [3/3] Configure LLM provider")
+	fmt.Println("  [3/4] Configure LLM provider")
 	fmt.Println()
 	cmdProvider()
+
+	// Step 4: Fast-allow pre-check — recommend on by default. Saves LLM
+	// calls on the bulk of safe read-only commands (ls, cat, git status, ...)
+	// without depending on any external tool. Lives in the pre-check list
+	// so users can reorder it alongside Dippy or other external hooks.
+	fmt.Println()
+	fmt.Println("  [4/4] Enabling built-in fast-allow for read-only commands...")
+	cfg := LoadConfig()
+	hasFastAllow := false
+	for _, p := range cfg.PreCheck {
+		if p == FastAllowSentinel {
+			hasFastAllow = true
+			break
+		}
+	}
+	if !hasFastAllow {
+		cfg.PreCheck = append(PreCheckList{FastAllowSentinel}, cfg.PreCheck...)
+		SaveConfig(cfg)
+		fmt.Println("      fast-allow: ON (yolonot pre-check remove fast-allow to disable)")
+	} else {
+		fmt.Println("      fast-allow: already ON")
+	}
 
 	fmt.Println()
 	fmt.Println("Setup complete. Restart Claude Code to activate.")

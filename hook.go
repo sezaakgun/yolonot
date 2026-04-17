@@ -108,6 +108,13 @@ func sanitizeBanner(s string) string {
 }
 
 func hookResponse(decision, reason, command string) string {
+	// All text that flows to Claude Code must pass through sanitizeBanner:
+	// rule messages (deny-cmd ... "text"), pre-check hook output, LLM
+	// reasoning — any of these can carry attacker-chosen bytes that a
+	// trust-rooted walk-up can't fully rule out. Centralizing here closes
+	// the prompt-injection / length-bomb / bidi-override class regardless
+	// of caller.
+	reason = sanitizeBanner(reason)
 	r := HookResponse{}
 	r.HookSpecificOutput.HookEventName = "PreToolUse"
 	r.HookSpecificOutput.PermissionDecision = decision
@@ -204,20 +211,43 @@ func cmdHook() {
 		if r.Action == "deny" {
 			if (r.Type == "cmd" && matchCmd(r.Pattern, command, firstToken)) ||
 				(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && globMatch(r.Pattern, scriptPathRe.FindStringSubmatch(" "+command)[1])) {
-				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "deny", Reasoning: fmt.Sprintf("matched rule: deny-%s %s", r.Type, r.Pattern)})
-				fmt.Println(hookResponse("deny", fmt.Sprintf("yolonot: 🧑‍🚀 rule %s", r.Pattern), command))
+				banner := fmt.Sprintf("yolonot: 🧑‍🚀 rule %s", r.Pattern)
+				reasoning := fmt.Sprintf("matched rule: deny-%s %s", r.Type, r.Pattern)
+				if r.Message != "" {
+					banner = fmt.Sprintf("yolonot: 🧑‍🚀 %s", r.Message)
+					reasoning = fmt.Sprintf("matched rule: deny-%s %s — %s", r.Type, r.Pattern, r.Message)
+				}
+				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "deny", Reasoning: reasoning})
+				fmt.Println(hookResponse("deny", banner, command))
 				return
 			}
 		}
 	}
 
-	// Step 0.5: External pre-check hooks (e.g. dippy-hook)
-	// Fast deterministic gates that run before yolonot's own pipeline, in
-	// the order configured. Only "allow" short-circuits — ask/deny/empty all
-	// fall through to the next hook and ultimately to yolonot's own rules/LLM
-	// (matches the common chain-hook convention).
+	// Step 0.5: Pre-check hooks. Fast deterministic gates that run before
+	// yolonot's own pipeline, in the order configured. Only "allow"
+	// short-circuits — ask/deny/empty all fall through to the next hook and
+	// ultimately to yolonot's own rules/LLM (matches the common chain-hook
+	// convention).
+	//
+	// Two kinds of entries share this list:
+	//   1. FastAllowSentinel — dispatches to the built-in Go bash parser
+	//      (no fork/exec). Cheap, strict, always available.
+	//   2. Anything else — treated as an external binary path and invoked
+	//      with the standard Claude Code hook JSON on stdin (e.g. Dippy).
 	for _, preCheck := range config.PreCheck {
 		if preCheck == "" {
+			continue
+		}
+		if preCheck == FastAllowSentinel {
+			if ok, reason := IsLocallySafeWith(command, AllowRedirectPatterns(rules)); ok {
+				if sessionID != "" {
+					AppendLine(projSessionID, "approved", command)
+				}
+				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "fast_allow", Decision: "allow", Reasoning: reason})
+				fmt.Println(hookResponse("allow", "yolonot: 🧑‍🚀 "+reason, command))
+				return
+			}
 			continue
 		}
 		if resp, reason, ok := runPreCheck(preCheck, input); ok {
@@ -310,22 +340,30 @@ func cmdHook() {
 
 	// Step 3: Rule matching (allow/ask — deny already handled in step 0)
 	if match := MatchRuleWith(command, rules, sensitive); match != nil {
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: match.Action, Reasoning: fmt.Sprintf("matched rule: %s-%s", match.Action, match.Pattern)})
+		banner := fmt.Sprintf("yolonot: 🧑‍🚀 rule %s", match.Pattern)
+		if match.Message != "" {
+			banner = fmt.Sprintf("yolonot: 🧑‍🚀 %s", match.Message)
+		}
+		reasoning := fmt.Sprintf("matched rule: %s-%s", match.Action, match.Pattern)
+		if match.Message != "" {
+			reasoning += " — " + match.Message
+		}
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: match.Action, Reasoning: reasoning})
 		if match.Action == "allow" {
 			if sessionID != "" {
 				AppendLine(projSessionID, "approved", command)
 			}
-			fmt.Println(hookResponse("allow", fmt.Sprintf("yolonot: 🧑‍🚀 rule %s", match.Pattern), command))
+			fmt.Println(hookResponse("allow", banner, command))
 			return
 		} else if match.Action == "deny" {
-			fmt.Println(hookResponse("deny", fmt.Sprintf("yolonot: 🧑‍🚀 rule %s", match.Pattern), command))
+			fmt.Println(hookResponse("deny", banner, command))
 			return
 		} else {
 			// ask rule
 			if sessionID != "" {
 				AppendLine(projSessionID, "asked", command)
 			}
-			fmt.Println(hookResponse("ask", fmt.Sprintf("yolonot: 🧑‍🚀 rule %s", match.Pattern), command))
+			fmt.Println(hookResponse("ask", banner, command))
 			return
 		}
 	}

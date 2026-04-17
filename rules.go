@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,34 +13,122 @@ type Rule struct {
 	Action  string // allow, deny, ask
 	Type    string // cmd, path
 	Pattern string
+	Message string // optional, shown to the AI via permissionDecisionReason
 }
 
 type RuleMatch struct {
 	Action  string
 	Pattern string
+	Message string
 }
 
 var scriptPathRe = regexp.MustCompile(`[\s]([^\s]+\.(py|sh|bash|zsh|js|mjs|cjs|ts|tsx|jsx|rb|pl|php|lua|go))(\s|$)`)
 
-// LoadRules reads .yolonot rules from project dir and global dir.
+// LoadRules reads .yolonot rules from project dir (walking up from cwd)
+// and global dir. Rules loaded first win on match, so order is:
+//
+//  1. cwd/.yolonot, parent/.yolonot, ..., up to the nearest ancestor
+//     containing a .yolonot (closer = more specific = higher priority);
+//  2. ~/.yolonot/rules (per-user directory form);
+//  3. ~/.yolonot (per-user file form, if present).
 func LoadRules() []Rule {
-	paths := []string{
-		".yolonot",
-		filepath.Join(YolonotDir(), "rules"),
-	}
-	// Also check ~/.yolonot if it's a file (not a directory)
-	home, _ := os.UserHomeDir()
-	globalFile := filepath.Join(home, ".yolonot")
-	info, err := os.Stat(globalFile)
-	if err == nil && !info.IsDir() {
-		paths = append(paths, globalFile)
-	}
+	paths := yolonotConfigSearchPaths()
 
 	var rules []Rule
 	for _, path := range paths {
 		rules = append(rules, loadRulesFromFile(path)...)
 	}
 	return rules
+}
+
+// yolonotConfigSearchPaths returns the ordered list of .yolonot paths that
+// config loaders should read. Shared by LoadRules and LoadSensitivePatterns
+// so both observe the same walk-up hierarchy.
+//
+// Trust boundary: walk-up is scoped to the enclosing git repo root. A
+// `.yolonot` outside the repo is NOT loaded automatically — otherwise an
+// attacker-writable ancestor like `/tmp` or `~/Downloads` could silently
+// inject rules (e.g. `allow-cmd *` or `allow-redirect *`) the moment
+// Claude Code is launched under it. If cwd is not inside a git repo, no
+// ancestor `.yolonot` is loaded — only the global config. Users who want
+// "repo-less" walk-up can `git init` or place rules in ~/.yolonot/rules.
+func yolonotConfigSearchPaths() []string {
+	var paths []string
+
+	cwd, err := os.Getwd()
+	if err == nil {
+		home, _ := os.UserHomeDir()
+		cur, _ := filepath.Abs(cwd)
+		repoRoot := findRepoRoot(cur) // empty string if not in a repo
+		seen := map[string]bool{}
+		for {
+			if seen[cur] {
+				break
+			}
+			seen[cur] = true
+			candidate := filepath.Join(cur, ".yolonot")
+			info, err := os.Stat(candidate)
+			if err == nil && !info.IsDir() {
+				paths = append(paths, candidate)
+			}
+			// Stop conditions, in order of precedence:
+			//   1. $HOME — so ~/.yolonot isn't double-loaded below.
+			//   2. Git repo root — trust boundary.
+			//   3. Not in a git repo — don't walk out of cwd at all.
+			//   4. Filesystem root — belt-and-suspenders.
+			if home != "" && cur == home {
+				break
+			}
+			if repoRoot == "" || cur == repoRoot {
+				break
+			}
+			parent := filepath.Dir(cur)
+			if parent == cur {
+				break
+			}
+			cur = parent
+		}
+	}
+
+	// Global rules directory — yolonot's own data dir.
+	paths = append(paths, filepath.Join(YolonotDir(), "rules"))
+
+	// Legacy: ~/.yolonot when used as a file instead of a directory.
+	home, _ := os.UserHomeDir()
+	globalFile := filepath.Join(home, ".yolonot")
+	info, err := os.Stat(globalFile)
+	if err == nil && !info.IsDir() {
+		// Avoid duplicating if we already loaded it during the walk-up.
+		alreadyLoaded := false
+		for _, p := range paths {
+			if p == globalFile {
+				alreadyLoaded = true
+				break
+			}
+		}
+		if !alreadyLoaded {
+			paths = append(paths, globalFile)
+		}
+	}
+
+	return paths
+}
+
+// findRepoRoot walks up from start looking for a `.git` entry (directory
+// or file — Git worktrees and submodules use a file form). Returns the
+// containing directory, or "" if cwd is not inside a git repo.
+func findRepoRoot(start string) string {
+	cur := start
+	for {
+		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
+			return cur
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return ""
+		}
+		cur = parent
+	}
 }
 
 func loadRulesFromFile(path string) []Rule {
@@ -51,7 +140,9 @@ func loadRulesFromFile(path string) []Rule {
 
 	var rules []Rule
 	scanner := bufio.NewScanner(f)
+	lineNum := 0
 	for scanner.Scan() {
+		lineNum++
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -61,7 +152,7 @@ func loadRulesFromFile(path string) []Rule {
 			continue
 		}
 		actionType := parts[0]
-		pattern := parts[1]
+		rest := parts[1]
 
 		idx := strings.Index(actionType, "-")
 		if idx < 0 {
@@ -70,12 +161,57 @@ func loadRulesFromFile(path string) []Rule {
 		action := actionType[:idx]
 		ruleType := actionType[idx+1:]
 
+		pattern, message := splitTrailingMessage(rest)
+
 		if (action == "allow" || action == "deny" || action == "ask") &&
-			(ruleType == "cmd" || ruleType == "path") {
-			rules = append(rules, Rule{Action: action, Type: ruleType, Pattern: pattern})
+			(ruleType == "cmd" || ruleType == "path" || ruleType == "redirect") {
+			// Warn loudly for redirect directives that parse but aren't
+			// yet enforced — silent acceptance is worse than no acceptance.
+			// Users otherwise write `deny-redirect /etc/*`, assume it works,
+			// then blame the LLM when the write goes through.
+			if ruleType == "redirect" && (action == "deny" || action == "ask") {
+				fmt.Fprintf(os.Stderr,
+					"yolonot: %s:%d: %s-redirect is not yet enforced; "+
+						"use `deny-cmd '*> /etc/*'` for deny-write semantics.\n",
+					path, lineNum, action)
+				// Still register the rule so dry-run tooling can surface it,
+				// but hook.go's match loop will skip it (type=redirect is
+				// only consulted for allow).
+			}
+			rules = append(rules, Rule{Action: action, Type: ruleType, Pattern: pattern, Message: message})
 		}
 	}
 	return rules
+}
+
+// splitTrailingMessage extracts an optional trailing "quoted message" from
+// the pattern portion of a rule line. The quote must be preceded by
+// whitespace so patterns like *"quoted"* are not misinterpreted. Supports
+// \" as an embedded-quote escape inside the message.
+func splitTrailingMessage(s string) (pattern, message string) {
+	s = strings.TrimRight(s, " \t")
+	if !strings.HasSuffix(s, `"`) {
+		return s, ""
+	}
+	end := len(s) - 1
+	for i := end - 1; i >= 0; i-- {
+		if s[i] != '"' {
+			continue
+		}
+		if i > 0 && s[i-1] == '\\' {
+			continue
+		}
+		if i == 0 {
+			return s, ""
+		}
+		if s[i-1] != ' ' && s[i-1] != '\t' {
+			return s, ""
+		}
+		pattern = strings.TrimRight(s[:i], " \t")
+		message = strings.ReplaceAll(s[i+1:end], `\"`, `"`)
+		return pattern, message
+	}
+	return s, ""
 }
 
 // hasChainOperator returns true if the command contains shell chaining
@@ -127,16 +263,7 @@ var allSensitivePatterns = []string{
 // rule files. Only explicitly added "sensitive <pattern>" directives are
 // active — nothing is enabled by default.
 func LoadSensitivePatterns() []string {
-	paths := []string{
-		".yolonot",
-		filepath.Join(YolonotDir(), "rules"),
-	}
-	home, _ := os.UserHomeDir()
-	globalFile := filepath.Join(home, ".yolonot")
-	info, err := os.Stat(globalFile)
-	if err == nil && !info.IsDir() {
-		paths = append(paths, globalFile)
-	}
+	paths := yolonotConfigSearchPaths()
 
 	var adds []string
 	removes := map[string]bool{}
@@ -206,6 +333,19 @@ func hasSensitivePathWith(command string, patterns []string) bool {
 	return false
 }
 
+// AllowRedirectPatterns returns patterns from `allow-redirect <glob>` rules.
+// Used by the fast-allow path to permit writes to user-declared-safe
+// paths (e.g., ./dist/*, /tmp/build/*).
+func AllowRedirectPatterns(rules []Rule) []string {
+	var out []string
+	for _, r := range rules {
+		if r.Type == "redirect" && r.Action == "allow" {
+			out = append(out, r.Pattern)
+		}
+	}
+	return out
+}
+
 // MatchRule checks a command against rules. Returns first match or nil.
 // Allow rules are skipped when the command contains chain operators,
 // redirects, or references sensitive file paths — the LLM evaluates instead.
@@ -238,11 +378,11 @@ func MatchRuleWith(command string, rules []Rule, sensitive []string) *RuleMatch 
 		switch r.Type {
 		case "cmd":
 			if matchCmd(r.Pattern, command, firstToken) {
-				return &RuleMatch{Action: r.Action, Pattern: r.Pattern}
+				return &RuleMatch{Action: r.Action, Pattern: r.Pattern, Message: r.Message}
 			}
 		case "path":
 			if scriptPath != "" && globMatch(r.Pattern, scriptPath) {
-				return &RuleMatch{Action: r.Action, Pattern: r.Pattern}
+				return &RuleMatch{Action: r.Action, Pattern: r.Pattern, Message: r.Message}
 			}
 		}
 	}
