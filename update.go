@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,7 +20,10 @@ func checkForUpdate() string {
 		return ""
 	}
 
-	latest := fetchLatestVersion()
+	latest, err := fetchLatestVersion(3 * time.Second)
+	if err != nil {
+		return ""
+	}
 	clean := strings.Split(Version, "+")[0]
 	if latest != "" && latest != clean && latest > clean {
 		return latest
@@ -25,25 +31,61 @@ func checkForUpdate() string {
 	return ""
 }
 
-func fetchLatestVersion() string {
-	client := &http.Client{Timeout: 3 * time.Second}
+// fetchLatestVersion calls the GitHub releases API. Returns (tag, nil) on
+// success, ("", err) on any failure — callers can present a human-friendly
+// reason. Timeout is a parameter so the hint path can stay snappy while
+// user-invoked `upgrade` gets a more forgiving window.
+func fetchLatestVersion(timeout time.Duration) (string, error) {
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Get("https://api.github.com/repos/sezaakgun/yolonot/releases/latest")
 	if err != nil {
-		return ""
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return ""
+		return "", fmt.Errorf("github api returned status %d", resp.StatusCode)
 	}
 
 	var release struct {
 		TagName string `json:"tag_name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", err
+	}
+	if release.TagName == "" {
+		return "", errors.New("github api returned empty tag_name")
+	}
+	return release.TagName, nil
+}
+
+// explainFetchError turns a fetch error into a short, actionable reason.
+// Stays intentionally boring — the goal is to help the user decide whether
+// to retry or fall back to the manual install command.
+func explainFetchError(err error) string {
+	if err == nil {
 		return ""
 	}
-	return release.TagName
+	msg := err.Error()
+	// net/http wraps timeouts with a "Client.Timeout exceeded" marker;
+	// also cover the bare DeadlineExceeded case for robustness.
+	if strings.Contains(msg, "Client.Timeout") || errors.Is(err, context.DeadlineExceeded) {
+		return "network timeout talking to api.github.com"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "DNS lookup failed for api.github.com (check your network)"
+	}
+	if strings.Contains(msg, "status 403") {
+		return "GitHub API rate-limited this IP (unauthenticated limit is 60/hr)"
+	}
+	if strings.Contains(msg, "status 404") {
+		return "release not found on GitHub"
+	}
+	if strings.Contains(msg, "status ") {
+		return msg
+	}
+	return "could not reach api.github.com (" + msg + ")"
 }
 
 func printUpdateHint() {
@@ -57,9 +99,11 @@ func cmdUpgrade() {
 	fmt.Printf("Current version: %s\n", Version)
 	fmt.Print("Checking for updates... ")
 
-	latest := fetchLatestVersion()
-	if latest == "" {
-		fmt.Println("failed to check")
+	latest, err := fetchLatestVersion(8 * time.Second)
+	if err != nil {
+		fmt.Println("failed")
+		fmt.Printf("  Reason: %s\n", explainFetchError(err))
+		fmt.Println("  Fallback: go install github.com/sezaakgun/yolonot@latest")
 		return
 	}
 
