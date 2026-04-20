@@ -6,13 +6,58 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 )
+
+// validateLLMURL enforces a scheme+host allowlist on env/config-supplied
+// LLM endpoints. Without this, a malicious LLM_URL (set via .env, repo
+// config, or a prior approved command) would turn yolonot into an exfil
+// channel (SSRF) — every classified command goes into the request body
+// and the attacker controls the "decision" response.
+//
+// Policy:
+//   - https://<host> — always accepted (trusted transport).
+//   - http://<loopback> — accepted for Ollama / claude-cli-style setups.
+//   - http://<anything else> — rejected.
+//   - file://, gopher://, data://, ftp://, other schemes — rejected.
+func validateLLMURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid LLM URL: %w", err)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if isLoopbackHost(host) {
+			return nil
+		}
+		return fmt.Errorf("refusing plain http to non-loopback host %q; use https or set the host to localhost/127.0.0.1/::1", host)
+	default:
+		return fmt.Errorf("refusing LLM URL with scheme %q; only https:// or http://loopback accepted", u.Scheme)
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "localhost.":
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
+}
 
 // SystemPrompt is the command safety classifier prompt. Produces a 2-class
 // decision (allow/ask) plus a 5-tier risk tag. The tier is categorical —
@@ -260,6 +305,9 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 		return "", err
 	}
 
+	if err := validateLLMURL(cfg.URL); err != nil {
+		return "", err
+	}
 	req, err := http.NewRequest("POST", cfg.URL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", err
@@ -282,7 +330,10 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 	}
 	defer resp.Body.Close()
 
-	respBytes, err := io.ReadAll(resp.Body)
+	// Cap response body at 1 MiB. A malicious or misconfigured provider that
+	// returns an unbounded stream would otherwise OOM the hook process, and
+	// hook crashes fall through to the host's native permission layer.
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", err
 	}
@@ -356,15 +407,27 @@ var inlineScriptRe = regexp.MustCompile(`-c\s+["'](.+?)["']`)
 func BuildAnalyzePrompt(command string) string {
 	prompt := "Command: " + command
 
-	// Read script file if referenced
+	// Read script file if referenced. Two guards protect privacy:
+	//   1. Path must resolve inside the current project root — prevents
+	//      `python3 ~/.ssh/id_rsa.py` from exfiltrating user secrets via
+	//      the LLM prompt (file is read, first 100 lines go to provider).
+	//   2. Lines that look like they contain credentials are redacted —
+	//      even in-repo scripts commonly contain SECRET=... or PEM blobs.
 	if m := scriptPathRe.FindStringSubmatch(" " + command); len(m) > 1 {
 		path := m[1]
-		if data, err := os.ReadFile(path); err == nil {
-			lines := strings.SplitN(string(data), "\n", 101)
-			if len(lines) > 100 {
-				lines = lines[:100]
+		if isPathInsideProject(path) {
+			if data, err := os.ReadFile(path); err == nil {
+				lines := strings.SplitN(string(data), "\n", 101)
+				if len(lines) > 100 {
+					lines = lines[:100]
+				}
+				for i, ln := range lines {
+					if looksLikeSecret(ln) {
+						lines[i] = "<redacted line — looks like a secret>"
+					}
+				}
+				prompt += "\n\nScript file contents:\n" + strings.Join(lines, "\n")
 			}
-			prompt += "\n\nScript file contents:\n" + strings.Join(lines, "\n")
 		}
 	}
 
@@ -375,6 +438,39 @@ func BuildAnalyzePrompt(command string) string {
 
 	prompt += "\n\nAnalyze: is this safe to execute?"
 	return prompt
+}
+
+// isPathInsideProject returns true if path resolves to a file inside the
+// current working directory's subtree. Absolute paths outside cwd and
+// paths that escape via `..` are rejected. Symlinks are resolved.
+func isPathInsideProject(path string) bool {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	abs := path
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(cwd, abs)
+	}
+	abs = filepath.Clean(abs)
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	cwdClean := filepath.Clean(cwd)
+	rel, err := filepath.Rel(cwdClean, abs)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
+var secretLineRe = regexp.MustCompile(`(?i)(sk-[a-z0-9]{20,}|sk-ant-[a-z0-9-]{20,}|AKIA[A-Z0-9]{16}|ghp_[a-z0-9]{36}|xox[abprs]-[a-z0-9-]{10,}|BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY|(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*['"]?[a-z0-9_\-/+=]{8,})`)
+
+func looksLikeSecret(line string) bool {
+	return secretLineRe.MatchString(line)
 }
 
 // BuildComparePrompt builds the user prompt for session similarity comparison.

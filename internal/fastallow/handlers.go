@@ -364,18 +364,33 @@ func sedExtractScripts(tokens []string) []string {
 }
 
 // sedHasExecuteCommand looks for the `e` command (GNU sed shell exec).
-// Matches: `s///e`, `/pat/e`, standalone `e` at statement start.
+// Matches: `s<D>...<D>...<D>e`, `/pat/e`, standalone `e` at statement start.
+// Uses findLastSedDelimiter to handle alternative delimiters (s|...|...|e).
 func sedHasExecuteCommand(script string) bool {
 	stmts := splitSedStatements(script)
 	for _, s := range stmts {
 		s = strings.TrimSpace(s)
-		// Form 1: ends with /e (flag on substitution or /pat/e)
-		if strings.HasSuffix(s, "/e") {
-			return true
-		}
-		// Form 2: standalone e command
+		// Form 1: standalone e command.
 		if s == "e" || strings.HasPrefix(s, "e ") {
 			return true
+		}
+		// Form 2: substitution with e flag — honor the alternative-delimiter
+		// form (s|a|b|e, s#a#b#e, etc.), not just s/a/b/e.
+		if strings.HasPrefix(s, "s") && len(s) > 1 {
+			if idx := findLastSedDelimiter(s); idx > 0 && idx < len(s)-1 {
+				flags := s[idx+1:]
+				if strings.ContainsRune(flags, 'e') {
+					return true
+				}
+			}
+		}
+		// Form 3: address-prefixed e — `/pat/e` with any delimiter. The last
+		// char is `e` and is preceded by a non-alphanumeric delimiter.
+		if strings.HasSuffix(s, "e") && len(s) >= 2 {
+			prev := s[len(s)-2]
+			if !isAlnum(prev) && prev != ' ' && prev != '\t' {
+				return true
+			}
 		}
 	}
 	return false
@@ -525,6 +540,18 @@ func awkHandler(tokens []string) (bool, string) {
 	if strings.Contains(program, "system(") {
 		return false, ""
 	}
+	// `cmd | getline var` and `"cmd" | getline` open a shell pipeline from
+	// inside awk — equivalent to system(). Reject any getline adjacent to a
+	// pipe (either side) and any getline whose argument is not a bare
+	// filename literal.
+	if hasAwkGetlinePipe(program) {
+		return false, ""
+	}
+	// `cmd` | exec-only form is caught above; also catch `exec(` and the
+	// `| & coproc form.
+	if strings.Contains(program, "|&") {
+		return false, ""
+	}
 	// Rough pipe detection: | " or | '  (awk pipes to shell command).
 	if hasAwkPipe(program) {
 		return false, ""
@@ -534,6 +561,51 @@ func awkHandler(tokens []string) (bool, string) {
 		return false, ""
 	}
 	return true, "awk"
+}
+
+// hasAwkGetlinePipe returns true if the awk program uses `getline` with a
+// pipe on either side. Both `"cmd" | getline x` and `getline x < "file"`
+// exist, but the pipe form executes a shell command — we reject it. The
+// redirect-from-file form is handled by the file-redirect check.
+func hasAwkGetlinePipe(program string) bool {
+	idx := 0
+	for {
+		at := strings.Index(program[idx:], "getline")
+		if at < 0 {
+			return false
+		}
+		pos := idx + at
+		// Check 128 chars of context on each side for a `|` that is not `||`.
+		start := pos - 128
+		if start < 0 {
+			start = 0
+		}
+		end := pos + len("getline") + 128
+		if end > len(program) {
+			end = len(program)
+		}
+		window := program[start:end]
+		// Look for a bare `|` (not `||`) in the window — this covers the
+		// standard `"cmd" | getline` form.
+		for i := 0; i < len(window); i++ {
+			if window[i] != '|' {
+				continue
+			}
+			prev := byte(0)
+			if i > 0 {
+				prev = window[i-1]
+			}
+			next := byte(0)
+			if i+1 < len(window) {
+				next = window[i+1]
+			}
+			if prev == '|' || next == '|' {
+				continue // logical ||
+			}
+			return true
+		}
+		idx = pos + len("getline")
+	}
 }
 
 func hasAwkPipe(program string) bool {
@@ -1051,8 +1123,10 @@ func gitCheckSubmodule(rest []string) bool {
 	if len(rest) == 0 {
 		return false
 	}
+	// `foreach` takes a shell command and executes it in each submodule —
+	// it's git's documented escape hatch into the shell. Never safe.
 	switch rest[0] {
-	case "status", "summary", "foreach":
+	case "status", "summary":
 		return true
 	}
 	return false

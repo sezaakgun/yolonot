@@ -2903,12 +2903,38 @@ func TestBuildAnalyzePromptWithScriptFile(t *testing.T) {
 	scriptPath := filepath.Join(dir, "test.py")
 	os.WriteFile(scriptPath, []byte("#!/usr/bin/env python3\nprint('hello')\n"), 0644)
 
+	// BuildAnalyzePrompt only reads scripts inside cwd to prevent LLM
+	// exfiltration of files outside the project (~/.ssh/id_rsa.py etc).
+	origCwd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(origCwd)
+
 	prompt := BuildAnalyzePrompt("python3 " + scriptPath)
 	if !strings.Contains(prompt, "Script file contents:") {
 		t.Error("should include script file contents")
 	}
 	if !strings.Contains(prompt, "print('hello')") {
 		t.Error("should include actual script content")
+	}
+}
+
+func TestBuildAnalyzePromptRejectsOutsideProject(t *testing.T) {
+	outside := t.TempDir()
+	scriptPath := filepath.Join(outside, "evil.py")
+	os.WriteFile(scriptPath, []byte("secret = 'sk-abcdefghijklmnop1234567890'\n"), 0600)
+
+	// cwd must be different from the script's dir for the guard to fire.
+	cwd := t.TempDir()
+	origCwd, _ := os.Getwd()
+	os.Chdir(cwd)
+	defer os.Chdir(origCwd)
+
+	prompt := BuildAnalyzePrompt("python3 " + scriptPath)
+	if strings.Contains(prompt, "Script file contents:") {
+		t.Error("must NOT include script contents when file is outside project")
+	}
+	if strings.Contains(prompt, "sk-") {
+		t.Error("must NOT leak a key from a file outside the project")
 	}
 }
 

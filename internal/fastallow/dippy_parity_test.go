@@ -95,6 +95,31 @@ func init() {
 		"docker --host tcp://localhost:2375 ps",
 		"docker -H tcp://localhost:2375 ps",
 		"docker --context mycontext ps",
+		// `security` subcommands that read credentials from the macOS
+		// Keychain — Dippy classifies these read-only, but `-g` / `-d`
+		// prints passwords/keys in cleartext. yolonot intentionally
+		// escalates every find-*/dump-* / get-identity-preference invocation
+		// to the LLM/user layer. See security-audit F-20.
+		"security show-keychain-info login.keychain",
+		"security dump-keychain login.keychain",
+		"security find-generic-password -s service",
+		"security find-generic-password -a account -s service",
+		"security find-internet-password -s server",
+		"security find-key -t public",
+		"security find-certificate -a",
+		"security find-certificate -c CommonName",
+		"security find-identity -v",
+		"security find-identity -p codesigning",
+		"security get-identity-preference -s https://example.com",
+		"security dump-trust-settings",
+		"security dump-trust-settings -d",
+		// `bash -lc` / `bash -cl` / `zsh -lc` — Dippy allows, yolonot
+		// rejects because -l makes the shell a login shell and sources
+		// rc files before the -c string runs, giving the rc file an
+		// execution vector. See security-audit F-06.
+		"bash -lc 'ls'",
+		"bash -cl 'ls'",
+		"zsh -lc 'ls'",
 	} {
 		parityFallthroughOK[cmd] = true
 	}

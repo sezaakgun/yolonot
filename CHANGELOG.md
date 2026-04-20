@@ -5,6 +5,98 @@ All notable changes to yolonot are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-04-20
+
+### Security — classifier-bypass fixes (SECURITY)
+
+Multiple classifier-bypass findings from an internal security audit. Every
+bypass below was confirmed live against the prior binary and is corrected
+in this release. Users on ≤0.9.1 should upgrade.
+
+- **Fast-allow: drop `git submodule foreach`.** `foreach` takes a shell
+  command and runs it in each submodule — git's documented escape hatch
+  into the shell. Previously marked "read-only"; now falls through to the
+  LLM/user layer. (F-14)
+- **Fast-allow: drop macOS `security` credential-read subcommands.**
+  `dump-keychain`, `find-generic-password`, `find-internet-password`,
+  `find-key`, `find-certificate`, `find-identity`, `show-keychain-info`,
+  `get-identity-preference`, `dump-trust-settings` removed from the safe
+  list. With `-g` / `-d` they print secrets in cleartext; not safe. (F-20)
+- **Fast-allow: reject `awk` programs with `| getline`.** The `"cmd" |
+  getline` form opens a shell pipeline from inside awk (equivalent to
+  `system()`). Previously approved as "read-only". (F-18)
+- **Fast-allow: detect `sed` alternative-delimiter exec flag.**
+  `sed 's|…|…|e'` and `sed 's#…#…#e'` were approved because
+  `sedHasExecuteCommand` only matched `/e` suffixes. Now honors any
+  delimiter via `findLastSedDelimiter`. (F-19)
+- **Fast-allow: reject `env VAR=value cmd` when VAR is dangerous.**
+  `envHandler` now mirrors `isSafeAssign`'s check against
+  `dangerousEnvNames` and the `GIT_CONFIG_*` prefix, so
+  `env GIT_SSH_COMMAND='…' git fetch` no longer fast-allows. (F-05)
+- **Fast-allow: shell `-c` no longer approves `-lc` / `-ic` / `--login`
+  / `--rcfile` / `--init-file` / `--posix`.** Login/interactive shells
+  source rc files before the `-c` string runs. (F-06)
+- **Rules layer: `hasChainOperator` rewritten as AST walk.** The prior
+  character scanner missed lone `&` (background operator), `||`-
+  adjacent forms, process substitution `<(…)` / `>(…)`, and multi-
+  statement `;`. Now parses with `mvdan.cc/sh` and rejects any
+  `BinaryCmd`, `CmdSubst`, `ProcSubst`, backgrounded `Stmt`, or non-
+  `2>&1` redirect. Legacy character-scan remains as a fail-closed
+  fallback when the parser rejects the input. (F-01, F-21)
+- **LLM client: scheme + loopback host validation on `LLM_URL`.**
+  Rejects `file://`, `gopher://`, and plain `http://` to non-loopback
+  hosts. Prevents SSRF / exfiltration via a malicious `LLM_URL`. (F-04)
+- **LLM client: response body capped at 1 MiB.** Prior `io.ReadAll`
+  with no `io.LimitReader` would OOM the hook on a malicious provider
+  response and fall through to the host's native permission layer.
+  (F-03)
+- **LLM prompt: script-file reader restricted to project root + secret
+  scrubbing.** `BuildAnalyzePrompt` previously read any
+  `[...].py|.sh|...` path from the command and shipped the first 100
+  lines to the provider. Now requires the path to resolve inside the
+  current cwd subtree (EvalSymlinks) and redacts lines matching
+  common secret patterns before inclusion. (F-09)
+- **OpenCode plugin: fail closed.** `harness_opencode_plugin.ts` now
+  returns `{decision:"deny"}` on hook crash/timeout/JSON-parse error
+  instead of `{decision:"allow"}`. Prevents one transient failure from
+  turning into a full bypass for the rest of the session. (F-22)
+- **`~/.yolonot/decisions.jsonl` and `config.json` perms.** Apply
+  `os.Chmod(path, 0600)` after every write to repair legacy 0644 files
+  that pre-date the current default. Cache directory created 0700
+  instead of 0755. Decision log frequently contains inline secrets
+  (`Bearer sk-…`, `postgres://user:pass@…`). (Secrets-audit Highs)
+- **Atomic settings writes + symlink rejection.** All harness adapters
+  (Claude, Gemini, Codex, OpenCode) now write settings/plugin files via
+  a same-dir tempfile + rename, refusing to overwrite if the target is
+  a pre-existing symlink. Prevents a TOCTOU redirect of writes to
+  `~/.claude/settings.json`, `~/.gemini/settings.json`,
+  `~/.codex/hooks.json`, or `~/.config/opencode/plugin/yolonot.ts`.
+  Same helper used for `~/.yolonot/config.json`. (F-10)
+- **API key no longer persisted to disk.** `SaveConfig` scrubs
+  `Provider.APIKey` before serialisation; the TUI now prints
+  `export <ENV_VAR>=…` instructions instead of writing the key to
+  `~/.yolonot/config.json`. Keys entered via TUI are used only for the
+  current process's connection-test LLM call. (Secrets-audit Medium)
+- **`findRepoRoot` depth cap (64).** Prevents AI-controlled deep `cwd`
+  values from DoS'ing the hook with thousands of `os.Stat` lookups.
+  (F-08)
+- **`.yolonot` walk-up: reject symlinks.** `os.Lstat` instead of
+  `os.Stat`; rule files that are symlinks are ignored. Prevents
+  attacker-planted symlinks pointing at permissive rule bodies. (F-23)
+
+### Other
+
+- **Go toolchain** pinned to `go1.26.2` (`toolchain` directive).
+  Resolves 8 symbol-reachable stdlib CVEs: GO-2026-4870 (TLS-DoS),
+  GO-2026-4866 / 4599 / 4600 (x509 auth-bypass / panic), GO-2026-4947
+  / 4946 (x509 DoS), GO-2026-4601 (net/url IPv6), GO-2026-4602
+  (os.ReadDir Root).
+- **CI: `test.yml` permissions block.** Declares `contents: read`
+  explicitly rather than inheriting repo default.
+- **`mvdan.cc/sh/v3`** promoted from indirect → direct require
+  (now used by the rules-layer AST walker).
+- **`.dippy` removed from git tracking** (`git rm --cached`).
+
 ## [0.9.1] — 2026-04-20
 
 ### Changed — Internal

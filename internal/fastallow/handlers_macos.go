@@ -145,17 +145,11 @@ func scutilHandler(tokens []string) (bool, string) {
 // security — keychain / certificate utility.
 // -----------------------------------------------------------------------------
 
+// `find-*` / `dump-*` subcommands read credentials from the Keychain and,
+// with -g/-d, print them in cleartext — they are not read-only-safe. They
+// must go through the LLM/user layer, never fast-allow.
 var securitySafeSubcommands = map[string]struct{}{
 	"help":                       {},
-	"show-keychain-info":         {},
-	"dump-keychain":              {},
-	"find-generic-password":      {},
-	"find-internet-password":     {},
-	"find-key":                   {},
-	"find-certificate":           {},
-	"find-identity":              {},
-	"get-identity-preference":    {},
-	"dump-trust-settings":        {},
 	"verify-cert":                {},
 	"error":                      {},
 	"leaks":                      {},

@@ -106,9 +106,20 @@ func LoadConfig() Config {
 }
 
 func SaveConfig(c Config) {
-	os.MkdirAll(YolonotDir(), 0755)
+	// Never persist APIKey to disk. If a user entered a key via the TUI,
+	// it lives in memory for this process and is expected to come from
+	// the env var on the next run. Plaintext on-disk storage is a weak
+	// default — a same-user process (backup agent, cloud sync, snooper)
+	// could read it. See security-audit: "API key persisted plaintext to
+	// ~/.yolonot/config.json" (Medium).
+	c.Provider.APIKey = ""
 	data, _ := json.MarshalIndent(c, "", "  ")
-	os.WriteFile(configPath(), append(data, '\n'), 0600)
+	// atomicWriteFile does symlink rejection + rename-from-tempfile so
+	// an attacker can't redirect the write via a TOCTOU symlink.
+	if err := atomicWriteFile(configPath(), append(data, '\n'), 0600); err != nil {
+		Verbosef("save config failed: %v", err)
+		return
+	}
 	Verbosef("wrote %s (%d bytes)", configPath(), len(data)+1)
 }
 
@@ -622,6 +633,9 @@ func cmdProvider() {
 		selected = ProviderConfig{Name: p.Name, URL: p.URL, Model: model, EnvKey: p.EnvKey, Timeout: timeout}
 		if apiKey != "" && os.Getenv(p.EnvKey) == "" {
 			selected.APIKey = apiKey
+			fmt.Printf("\nThe entered key will be used for this run's connection test but NOT written to disk.\n")
+			fmt.Printf("For persistent use, export %s in your shell rc:\n", p.EnvKey)
+			fmt.Printf("  export %s=<your-key>\n\n", p.EnvKey)
 		}
 
 	case idx == len(providers):

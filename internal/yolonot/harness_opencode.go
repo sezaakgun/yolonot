@@ -95,11 +95,8 @@ func (o *OpencodeHarness) IsInstalled() bool {
 
 func (o *OpencodeHarness) Install(binaryPath string) error {
 	path := o.SettingsPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
 	ts := bytes.ReplaceAll(embeddedOpencodePluginTS, []byte("__YOLONOT_BIN__"), []byte(binaryPath))
-	if err := os.WriteFile(path, ts, 0644); err != nil {
+	if err := atomicWriteFile(path, ts, 0644); err != nil {
 		return err
 	}
 	Verbosef("wrote %s (%d bytes)", path, len(ts))

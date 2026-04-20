@@ -380,6 +380,20 @@ func isSafeAssign(a *syntax.Assign) bool {
 	return isSafeWord(a.Value)
 }
 
+// isDangerousEnvName reports whether name is in dangerousEnvNames or
+// matches the GIT_CONFIG_* prefix. Exported for use by envHandler — the
+// `env VAR=value cmd` path bypasses the AST-level isSafeAssign because
+// tokens are already stripped before the assign check runs.
+func isDangerousEnvName(name string) bool {
+	if _, bad := dangerousEnvNames[name]; bad {
+		return true
+	}
+	if strings.HasPrefix(name, "GIT_CONFIG_") {
+		return true
+	}
+	return false
+}
+
 // dangerousEnvNames are environment-variable names whose values are
 // interpreted as executable commands or config-file overrides, giving a
 // prefix assignment the same blast radius as `cmd --flag=value`. Blocking

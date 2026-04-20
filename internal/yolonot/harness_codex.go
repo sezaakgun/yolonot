@@ -239,12 +239,8 @@ func (c *CodexHarness) loadHooks() map[string]interface{} {
 }
 
 func (c *CodexHarness) saveHooks(s map[string]interface{}) error {
-	path := c.SettingsPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
 	data, _ := json.MarshalIndent(s, "", "  ")
-	return os.WriteFile(path, append(data, '\n'), 0644)
+	return atomicWriteFile(c.SettingsPath(), append(data, '\n'), 0644)
 }
 
 func (c *CodexHarness) removeHooks() {

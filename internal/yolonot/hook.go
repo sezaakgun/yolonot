@@ -666,10 +666,12 @@ func saveCache(command string, d *Decision) {
 		return
 	}
 	dir := cacheDir()
-	os.MkdirAll(dir, 0755)
+	os.MkdirAll(dir, 0700)
 	data, err := json.Marshal(d)
 	if err != nil {
 		return
 	}
-	os.WriteFile(filepath.Join(dir, hash+".json"), data, 0600)
+	cachePath := filepath.Join(dir, hash+".json")
+	os.WriteFile(cachePath, data, 0600)
+	os.Chmod(cachePath, 0600)
 }

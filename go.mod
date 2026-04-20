@@ -2,7 +2,12 @@ module github.com/sezaakgun/yolonot
 
 go 1.25.0
 
-require github.com/charmbracelet/huh v1.0.0
+toolchain go1.26.2
+
+require (
+	github.com/charmbracelet/huh v1.0.0
+	mvdan.cc/sh/v3 v3.13.1
+)
 
 require (
 	github.com/atotto/clipboard v0.1.4 // indirect
@@ -31,5 +36,4 @@ require (
 	golang.org/x/sync v0.17.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
-	mvdan.cc/sh/v3 v3.13.1 // indirect
 )

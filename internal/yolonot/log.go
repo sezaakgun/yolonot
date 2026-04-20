@@ -49,13 +49,18 @@ func LogDecision(entry DecisionEntry) {
 	}
 
 	dir := YolonotDir()
-	os.MkdirAll(dir, 0755)
+	os.MkdirAll(dir, 0700)
 
-	f, err := os.OpenFile(decisionsPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	path := decisionsPath()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return
 	}
 	defer f.Close()
+	// OpenFile's perm arg applies only on creation. Fix legacy 0644 files
+	// that pre-date the 0600 default — every classified command lands here,
+	// and commands frequently embed secrets (Bearer tokens, DB URIs).
+	os.Chmod(path, 0600)
 
 	data, err := json.Marshal(entry)
 	if err != nil {

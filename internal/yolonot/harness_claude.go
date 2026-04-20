@@ -173,7 +173,10 @@ func (c *ClaudeHarness) loadSettings() map[string]interface{} {
 
 func (c *ClaudeHarness) saveSettings(s map[string]interface{}) {
 	data, _ := json.MarshalIndent(s, "", "  ")
-	os.WriteFile(c.SettingsPath(), append(data, '\n'), 0644)
+	// atomicWriteFile rejects symlinks at the target and renames over a
+	// same-dir temp, preventing a TOCTOU symlink in ~/.claude/ from
+	// redirecting our write elsewhere. See atomicwrite.go.
+	atomicWriteFile(c.SettingsPath(), append(data, '\n'), 0644)
 }
 
 func (c *ClaudeHarness) removeHooks() {

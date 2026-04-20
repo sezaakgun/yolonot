@@ -233,12 +233,8 @@ func (g *GeminiHarness) loadSettings() map[string]interface{} {
 }
 
 func (g *GeminiHarness) saveSettings(s map[string]interface{}) error {
-	path := g.SettingsPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
 	data, _ := json.MarshalIndent(s, "", "  ")
-	return os.WriteFile(path, append(data, '\n'), 0644)
+	return atomicWriteFile(g.SettingsPath(), append(data, '\n'), 0644)
 }
 
 func (g *GeminiHarness) removeHooks() {

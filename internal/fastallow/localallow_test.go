@@ -208,7 +208,7 @@ func TestIsLocallySafe_Allow(t *testing.T) {
 		"tar tf archive.tar",
 		// --- Delegating wrappers ---
 		"env ls",
-		"env LANG=C PATH=/bin ls",
+		"env LANG=C ls",
 		"env -u FOO cat file",
 		"bash -c 'ls -la'",
 		"sh -c 'git status'",

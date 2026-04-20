@@ -47,8 +47,13 @@ async function askYolonot(
     new Response(proc.stdout).text(),
     proc.exited,
   ])
+  // Fail CLOSED on any hook error. A crash, OOM, or parse failure must not
+  // result in silent blanket-allow — that turns one transient failure into a
+  // full bypass for the rest of the session. OpenCode has no `ask` primitive,
+  // so we deny and include the raw exit code so the user can see what
+  // happened. The user can always re-run with yolonot disabled if intentional.
   if (exitCode !== 0 || !out.trim()) {
-    return { decision: "allow", reason: "" }
+    return { decision: "deny", reason: `yolonot hook exited ${exitCode} with empty output — failing closed` }
   }
   try {
     const parsed = JSON.parse(out)
@@ -57,8 +62,8 @@ async function askYolonot(
       decision: h.permissionDecision ?? "allow",
       reason: h.permissionDecisionReason ?? "",
     }
-  } catch {
-    return { decision: "allow", reason: "" }
+  } catch (e) {
+    return { decision: "deny", reason: `yolonot hook returned unparseable output — failing closed` }
   }
 }
 

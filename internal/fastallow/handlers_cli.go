@@ -2031,7 +2031,15 @@ func envHandler(tokens []string) (bool, string) {
 			i++
 			continue
 		}
-		if strings.Contains(t, "=") {
+		if eq := strings.IndexByte(t, '='); eq > 0 {
+			// Mirror localallow.isSafeAssign: reject dangerous env-var names
+			// (GIT_SSH_COMMAND, LD_PRELOAD, etc.) at fast-allow time. Without
+			// this, `env GIT_SSH_COMMAND='id' git fetch` gets approved because
+			// envHandler strips assignments and delegates to the inner cmd.
+			name := t[:eq]
+			if isDangerousEnvName(name) {
+				return false, ""
+			}
 			i++
 			continue
 		}
@@ -2060,9 +2068,28 @@ func shellHandler(tokens []string) (bool, string) {
 	}
 	cIdx := -1
 	for i, t := range tokens {
-		if strings.HasPrefix(t, "-") && !strings.HasPrefix(t, "--") && strings.ContainsRune(t, 'c') {
-			cIdx = i
-			break
+		if !strings.HasPrefix(t, "-") || strings.HasPrefix(t, "--") {
+			continue
+		}
+		// Combined short-flag form (-lc, -ic, -xc, …). Reject any combination
+		// containing `i` or `l` — these turn the shell interactive or login,
+		// sourcing ~/.bashrc or ~/.profile before the -c string runs.
+		flags := t[1:]
+		if !strings.ContainsRune(flags, 'c') {
+			continue
+		}
+		if strings.ContainsRune(flags, 'i') || strings.ContainsRune(flags, 'l') {
+			return false, ""
+		}
+		cIdx = i
+		break
+	}
+	// Reject unsupported long flags that source rc files or change the
+	// startup behavior around -c.
+	for _, t := range tokens[1:] {
+		switch t {
+		case "--login", "--interactive", "--rcfile", "--init-file", "--posix":
+			return false, ""
 		}
 	}
 	if cIdx == -1 || cIdx+1 >= len(tokens) {

