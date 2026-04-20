@@ -5,6 +5,22 @@ All notable changes to yolonot are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] — 2026-04-20
+
+### Changed — Internal
+- **Package split.** Moved all CLI logic from root `package main` into
+  `internal/yolonot`; bash-AST allowlist into `internal/fastallow` (public
+  API: `IsLocallySafe`, `IsLocallySafeWith`); fnmatch helper into
+  `internal/glob` (public API: `Match`). Root now contains only a thin
+  `main.go` shim calling `yolonot.Run()` — `go install
+  github.com/sezaakgun/yolonot@latest` unchanged. goreleaser ldflag target
+  is now `-X github.com/sezaakgun/yolonot/internal/yolonot.Version=...`.
+- **`dippy_parity_test.go`** shrunk from 6157 lines to 121; 5897 cases
+  extracted to `internal/fastallow/testdata/dippy_parity.jsonl`.
+- **README** rewritten as a ~80-line index pointing at a new `docs/` folder
+  (how-it-works, commands, rules, pre-check, risk-tiers, providers,
+  harnesses, analytics, eval, architecture).
+
 ## [0.9.0] — 2026-04-20
 
 ### Added
