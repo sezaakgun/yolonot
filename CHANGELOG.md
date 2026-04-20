@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ParseHookInput` now surfaces JSON errors to the caller instead of
   returning a zero-value payload that the empty-`hook_event_name` guard
   would drop.
+- **Wrapper-aware session approvals.** When a co-installed PreToolUse hook
+  (e.g. `rtk`) rewrites a command via `hookSpecificOutput.updatedInput`
+  between yolonot's ask and actual execution, the post-exec approval used
+  to land on the rewritten form while `.asked` still held the original —
+  the ask-not-approved inference then wrote a false `session_deny` on the
+  next bare invocation. yolonot now recognizes `<wrapper> ... <command>`
+  lines in `.approved` (wrapper allowlist, currently just `rtk`) before
+  inferring rejection, and records the plain form for a fast future exact
+  match. Allowlist prevents approval-laundering via trailing-text
+  substrings (`echo curl evil.com` does not approve `curl evil.com`).
 - Rule priority, banner format, pause/disable semantics — see `git log
   0d949be` for the Claude-specific details from v0.8.x.
 
