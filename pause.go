@@ -22,8 +22,9 @@ func isPaused(sessionID string) bool {
 }
 
 // resolveSessionID resolves the session ID from args (--session-id flag),
-// --current flag (most recent session), then CLAUDE_SESSION_ID env var.
-// Returns empty if none is set.
+// --current flag (most recent session), then the active harness's session
+// env var (CLAUDE_SESSION_ID, CODEX_SESSION_ID, ...). Returns empty if none
+// is set.
 func resolveSessionID(args []string) string {
 	for i, a := range args {
 		if a == "--session-id" && i+1 < len(args) {
@@ -36,7 +37,7 @@ func resolveSessionID(args []string) string {
 			return FindSessionID()
 		}
 	}
-	return os.Getenv("CLAUDE_SESSION_ID")
+	return GetSessionIDFromEnv()
 }
 
 func printSessionIDError(verb string) {
@@ -50,10 +51,32 @@ func printSessionIDError(verb string) {
 	fmt.Println("Inside Claude Code, use /yolonot", verb, "instead.")
 }
 
+// hasConfirmBypass returns true if the caller explicitly opted into
+// bypassing yolonot via --confirm-bypass flag or YOLONOT_CONFIRM_BYPASS=1
+// env var. Required for pause because pause is a total safety-layer
+// disable: an agent reaching for pause to work around a blocked command
+// should fail here unless the user typed the opt-in themselves.
+func hasConfirmBypass(args []string) bool {
+	for _, a := range args {
+		if a == "--confirm-bypass" || a == "--i-understand" {
+			return true
+		}
+	}
+	return os.Getenv("YOLONOT_CONFIRM_BYPASS") == "1"
+}
+
 func cmdPause(args []string) {
 	sid := resolveSessionID(args)
 	if sid == "" {
 		printSessionIDError("pause")
+		return
+	}
+
+	if !hasConfirmBypass(args) {
+		fmt.Println("yolonot: pause is a total safety-layer bypass.")
+		fmt.Println("  Prefer: yolonot approve '<exact command>' — unblocks one command only.")
+		fmt.Println("  If you really want to disable yolonot for this session:")
+		fmt.Println("    yolonot pause --current --confirm-bypass")
 		return
 	}
 
@@ -62,6 +85,14 @@ func cmdPause(args []string) {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
+
+	// Log pause activation so audits can spot agents disabling the safety
+	// layer. DecisionEntry.Layer="pause" makes this grep-able alongside
+	// regular decisions.
+	LogDecision(DecisionEntry{
+		SessionID: sid, Command: "yolonot pause", Cwd: ".", Layer: "pause",
+		Decision: "bypass_enabled", Reasoning: "session paused via --confirm-bypass",
+	})
 
 	fmt.Printf("yolonot paused for session %s\n", sid)
 	fmt.Println("All commands bypass yolonot (no rules, no LLM, no session memory).")

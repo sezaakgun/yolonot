@@ -2304,7 +2304,7 @@ func TestCmdPauseAndResume(t *testing.T) {
 	}
 
 	// Pause via --session-id flag
-	captureStdout(func() { cmdPause([]string{"--session-id", sid}) })
+	captureStdout(func() { cmdPause([]string{"--session-id", sid, "--confirm-bypass"}) })
 	if !isPaused(sid) {
 		t.Error("should be paused after cmdPause with --session-id flag")
 	}
@@ -2318,7 +2318,7 @@ func TestCmdPauseAndResume(t *testing.T) {
 	// Pause via env var
 	os.Setenv("CLAUDE_SESSION_ID", sid)
 	defer os.Unsetenv("CLAUDE_SESSION_ID")
-	captureStdout(func() { cmdPause(nil) })
+	captureStdout(func() { cmdPause([]string{"--confirm-bypass"}) })
 	if !isPaused(sid) {
 		t.Error("should be paused via env var")
 	}
@@ -2342,7 +2342,7 @@ func TestCmdPauseAndResumeCurrentFlag(t *testing.T) {
 	AppendLine(sid, "approved", "echo hello")
 
 	// Pause via --current
-	captureStdout(func() { cmdPause([]string{"--current"}) })
+	captureStdout(func() { cmdPause([]string{"--current", "--confirm-bypass"}) })
 	if !isPaused(sid) {
 		t.Error("--current should pause the most recent session")
 	}
@@ -2378,6 +2378,32 @@ func TestResolveSessionIDPrecedence(t *testing.T) {
 	got := resolveSessionID([]string{"--session-id", "explicit-id", "--current"})
 	if got != "explicit-id" {
 		t.Errorf("--session-id should take precedence, got %q", got)
+	}
+}
+
+func TestCmdPauseRequiresConfirmBypass(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	sid := "gated-session"
+	os.Setenv("CLAUDE_SESSION_ID", sid)
+	defer os.Unsetenv("CLAUDE_SESSION_ID")
+
+	// Without --confirm-bypass, pause must refuse.
+	out := captureStdout(func() { cmdPause(nil) })
+	if isPaused(sid) {
+		t.Error("pause should refuse without --confirm-bypass")
+	}
+	if !strings.Contains(out, "safety-layer bypass") {
+		t.Errorf("error message should mention safety bypass, got: %s", out)
+	}
+
+	// YOLONOT_CONFIRM_BYPASS=1 env var is the alternate opt-in.
+	os.Setenv("YOLONOT_CONFIRM_BYPASS", "1")
+	defer os.Unsetenv("YOLONOT_CONFIRM_BYPASS")
+	captureStdout(func() { cmdPause(nil) })
+	if !isPaused(sid) {
+		t.Error("YOLONOT_CONFIRM_BYPASS=1 should allow pause")
 	}
 }
 
@@ -2654,7 +2680,7 @@ func TestCmdHookLLMAsk(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"choices": []map[string]interface{}{
-				{"message": map[string]string{"content": `{"decision":"ask","confidence":0.9,"reasoning":"DANGEROUS: mutation on prod"}`}},
+				{"message": map[string]string{"content": `{"decision":"ask","risk":"high","reasoning":"DANGEROUS: mutation on prod"}`}},
 			},
 		})
 	}))
@@ -3720,372 +3746,6 @@ func TestStats_SingleEntry(t *testing.T) {
 	}
 }
 
-// --- Confidence Threshold Tests ---
-
-func TestConfidenceThreshold_DisabledByDefault(t *testing.T) {
-	_, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	cfg := LoadConfig()
-	if cfg.ConfidenceThreshold != 0 {
-		t.Errorf("default ConfidenceThreshold should be 0, got %f", cfg.ConfidenceThreshold)
-	}
-}
-
-func TestConfidenceThreshold_AllowPassesAboveThreshold(t *testing.T) {
-	dir, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	// Mock LLM returns allow with confidence 0.95
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"choices": []map[string]interface{}{
-				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.95,"reasoning":"safe command"}`}},
-			},
-		})
-	}))
-	defer server.Close()
-
-	// Configure with threshold 0.9
-	SaveConfig(Config{
-		Provider:            ProviderConfig{URL: server.URL, Model: "test"},
-		ConfidenceThreshold: 0.9,
-	})
-
-	projectDir := filepath.Join(dir, "project")
-	os.MkdirAll(projectDir, 0755)
-	origCwd, _ := os.Getwd()
-	os.Chdir(projectDir)
-	defer os.Chdir(origCwd)
-
-	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"threshold-above","cwd":"%s","tool_input":{"command":"go test ./..."}}`, projectDir)
-	out := runHookWithPayload(t, payload)
-
-	if !strings.Contains(out, `"permissionDecision":"allow"`) {
-		t.Errorf("confidence 0.95 >= threshold 0.9 should allow, got: %s", out)
-	}
-}
-
-func TestConfidenceThreshold_DowngradeBelowThreshold(t *testing.T) {
-	dir, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	// Mock LLM returns allow with confidence 0.7
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"choices": []map[string]interface{}{
-				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.7,"reasoning":"probably safe"}`}},
-			},
-		})
-	}))
-	defer server.Close()
-
-	// Configure with threshold 0.9
-	SaveConfig(Config{
-		Provider:            ProviderConfig{URL: server.URL, Model: "test"},
-		ConfidenceThreshold: 0.9,
-	})
-
-	projectDir := filepath.Join(dir, "project")
-	os.MkdirAll(projectDir, 0755)
-	origCwd, _ := os.Getwd()
-	os.Chdir(projectDir)
-	defer os.Chdir(origCwd)
-
-	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"threshold-below","cwd":"%s","tool_input":{"command":"go test ./..."}}`, projectDir)
-	out := runHookWithPayload(t, payload)
-
-	if !strings.Contains(out, `"permissionDecision":"ask"`) {
-		t.Errorf("confidence 0.7 < threshold 0.9 should ask, got: %s", out)
-	}
-	if !strings.Contains(out, "below threshold") {
-		t.Errorf("should mention below threshold, got: %s", out)
-	}
-	// Should be in asked, not approved (under project-scoped session ID)
-	projSID := ProjectSessionID("threshold-below", projectDir)
-	if ContainsLine(projSID, "approved", "go test ./...") {
-		t.Error("below-threshold command should NOT be in approved")
-	}
-	if !ContainsLine(projSID, "asked", "go test ./...") {
-		t.Error("below-threshold command should be in asked")
-	}
-}
-
-func TestConfidenceThreshold_ZeroDisablesCheck(t *testing.T) {
-	dir, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	// Mock LLM returns allow with low confidence 0.3
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"choices": []map[string]interface{}{
-				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.3,"reasoning":"might be safe"}`}},
-			},
-		})
-	}))
-	defer server.Close()
-
-	// Configure with threshold 0 (disabled)
-	SaveConfig(Config{
-		Provider:            ProviderConfig{URL: server.URL, Model: "test"},
-		ConfidenceThreshold: 0,
-	})
-
-	projectDir := filepath.Join(dir, "project")
-	os.MkdirAll(projectDir, 0755)
-	origCwd, _ := os.Getwd()
-	os.Chdir(projectDir)
-	defer os.Chdir(origCwd)
-
-	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"threshold-zero","cwd":"%s","tool_input":{"command":"go test ./..."}}`, projectDir)
-	out := runHookWithPayload(t, payload)
-
-	if !strings.Contains(out, `"permissionDecision":"allow"`) {
-		t.Errorf("threshold 0 (disabled) should allow even at confidence 0.3, got: %s", out)
-	}
-}
-
-func TestConfidenceThreshold_AskDecisionUnaffected(t *testing.T) {
-	dir, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	// Mock LLM returns ask
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"choices": []map[string]interface{}{
-				{"message": map[string]string{"content": `{"decision":"ask","confidence":0.95,"reasoning":"DANGEROUS: mutation"}`}},
-			},
-		})
-	}))
-	defer server.Close()
-
-	// Configure with threshold 0.9
-	SaveConfig(Config{
-		Provider:            ProviderConfig{URL: server.URL, Model: "test"},
-		ConfidenceThreshold: 0.9,
-	})
-
-	projectDir := filepath.Join(dir, "project")
-	os.MkdirAll(projectDir, 0755)
-	origCwd, _ := os.Getwd()
-	os.Chdir(projectDir)
-	defer os.Chdir(origCwd)
-
-	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"threshold-ask","cwd":"%s","tool_input":{"command":"kubectl delete pod"}}`, projectDir)
-	out := runHookWithPayload(t, payload)
-
-	if !strings.Contains(out, `"permissionDecision":"ask"`) {
-		t.Errorf("ask decision should be unaffected by threshold, got: %s", out)
-	}
-	// Should NOT mention "below threshold" — it's an ask decision, not a downgraded allow
-	if strings.Contains(out, "below threshold") {
-		t.Errorf("ask decision should not mention below threshold, got: %s", out)
-	}
-}
-
-func TestConfidenceThreshold_CacheAllowDowngraded(t *testing.T) {
-	dir, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	// Mock LLM returns allow with confidence 0.7 — stays constant across calls
-	var llmCallCount int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		llmCallCount++
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"choices": []map[string]interface{}{
-				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.7,"reasoning":"probably safe"}`}},
-			},
-		})
-	}))
-	defer server.Close()
-
-	// Configure with threshold 0.9
-	SaveConfig(Config{
-		Provider:            ProviderConfig{URL: server.URL, Model: "test"},
-		ConfidenceThreshold: 0.9,
-	})
-
-	// Create a script file so checkCache / saveCache actually engage (they only
-	// cache when the command references a script path).
-	projectDir := filepath.Join(dir, "project")
-	os.MkdirAll(projectDir, 0755)
-	scriptPath := filepath.Join(projectDir, "deploy.sh")
-	os.WriteFile(scriptPath, []byte("#!/bin/sh\necho deploying\n"), 0644)
-
-	origCwd, _ := os.Getwd()
-	os.Chdir(projectDir)
-	defer os.Chdir(origCwd)
-
-	command := "sh " + scriptPath
-
-	// Use two DIFFERENT session IDs so Step 1.5 (session_deny for asked-but-not-approved)
-	// doesn't short-circuit the second call — we want to exercise the cache path.
-	payload1 := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"cache-threshold-1","cwd":"%s","tool_input":{"command":%q}}`, projectDir, command)
-	payload2 := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"cache-threshold-2","cwd":"%s","tool_input":{"command":%q}}`, projectDir, command)
-
-	// First call: LLM evaluates, caches the raw allow@0.7, but threshold downgrades to ask
-	out1 := runHookWithPayload(t, payload1)
-	if !strings.Contains(out1, `"permissionDecision":"ask"`) {
-		t.Errorf("first call: allow 0.7 < threshold 0.9 should ask, got: %s", out1)
-	}
-	if !strings.Contains(out1, "below threshold") {
-		t.Errorf("first call: should mention below threshold, got: %s", out1)
-	}
-	if llmCallCount != 1 {
-		t.Errorf("first call: expected 1 LLM call, got %d", llmCallCount)
-	}
-
-	// Verify cache stored the RAW LLM decision (allow@0.7), not the downgraded ask
-	cached := checkCache(command)
-	if cached == nil {
-		t.Fatal("expected cache entry after first call")
-	}
-	if cached.Decision != "allow" {
-		t.Errorf("cache should store raw LLM decision (allow), got: %s", cached.Decision)
-	}
-	if cached.Confidence != 0.7 {
-		t.Errorf("cache should store raw confidence 0.7, got: %f", cached.Confidence)
-	}
-
-	// Second call (fresh session): should hit cache, threshold should downgrade cached allow to ask
-	out2 := runHookWithPayload(t, payload2)
-	if !strings.Contains(out2, `"permissionDecision":"ask"`) {
-		t.Errorf("second call: cached allow 0.7 < threshold 0.9 should downgrade to ask, got: %s", out2)
-	}
-	if !strings.Contains(out2, "below threshold") {
-		t.Errorf("second call: should mention below threshold, got: %s", out2)
-	}
-	if llmCallCount != 1 {
-		t.Errorf("second call: cache hit should NOT call LLM; got %d total LLM calls", llmCallCount)
-	}
-
-	// Second session's command should be in asked, not approved
-	projSID2 := ProjectSessionID("cache-threshold-2", projectDir)
-	if ContainsLine(projSID2, "approved", command) {
-		t.Error("downgraded cache hit should NOT add command to approved")
-	}
-	if !ContainsLine(projSID2, "asked", command) {
-		t.Error("downgraded cache hit should add command to asked")
-	}
-}
-
-// --- Threshold Command ---
-
-func TestThresholdCommand_ShowCurrent(t *testing.T) {
-	_, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	SaveConfig(Config{ConfidenceThreshold: 0.85})
-
-	out := captureStdout(func() { cmdThreshold(nil) })
-	if !strings.Contains(out, "85%") {
-		t.Errorf("should show 85%%, got: %s", out)
-	}
-	if !strings.Contains(out, "below this confidence") {
-		t.Errorf("should explain what threshold does, got: %s", out)
-	}
-}
-
-func TestThresholdCommand_ShowDisabled(t *testing.T) {
-	_, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	SaveConfig(Config{ConfidenceThreshold: 0})
-
-	out := captureStdout(func() { cmdThreshold(nil) })
-	if !strings.Contains(out, "disabled") {
-		t.Errorf("should show disabled, got: %s", out)
-	}
-}
-
-func TestThresholdCommand_SetValue(t *testing.T) {
-	_, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	captureStdout(func() { cmdThreshold([]string{"90"}) })
-
-	cfg := LoadConfig()
-	if cfg.ConfidenceThreshold != 0.9 {
-		t.Errorf("config threshold should be 0.9, got %f", cfg.ConfidenceThreshold)
-	}
-}
-
-func TestThresholdCommand_SetZero(t *testing.T) {
-	_, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	// First set a value
-	SaveConfig(Config{ConfidenceThreshold: 0.9})
-
-	out := captureStdout(func() { cmdThreshold([]string{"0"}) })
-
-	cfg := LoadConfig()
-	if cfg.ConfidenceThreshold != 0 {
-		t.Errorf("config threshold should be 0, got %f", cfg.ConfidenceThreshold)
-	}
-	if !strings.Contains(out, "disabled") {
-		t.Errorf("should say disabled, got: %s", out)
-	}
-}
-
-func TestThresholdCommand_InvalidInput(t *testing.T) {
-	_, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	SaveConfig(Config{ConfidenceThreshold: 0.85})
-
-	errOut := captureStderr(func() { cmdThreshold([]string{"abc"}) })
-
-	if !strings.Contains(errOut, "Invalid") {
-		t.Errorf("stderr should contain 'Invalid', got: %s", errOut)
-	}
-
-	cfg := LoadConfig()
-	if cfg.ConfidenceThreshold != 0.85 {
-		t.Errorf("config threshold should remain 0.85 after invalid input, got %f", cfg.ConfidenceThreshold)
-	}
-}
-
-func TestThresholdCommand_OutOfRange_High(t *testing.T) {
-	_, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	SaveConfig(Config{ConfidenceThreshold: 0.85})
-
-	errOut := captureStderr(func() { cmdThreshold([]string{"150"}) })
-
-	if !strings.Contains(errOut, "between 0 and 100") {
-		t.Errorf("stderr should show range error, got: %s", errOut)
-	}
-
-	cfg := LoadConfig()
-	if cfg.ConfidenceThreshold != 0.85 {
-		t.Errorf("config threshold should remain 0.85 after out-of-range input, got %f", cfg.ConfidenceThreshold)
-	}
-}
-
-func TestThresholdCommand_OutOfRange_Negative(t *testing.T) {
-	_, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	SaveConfig(Config{ConfidenceThreshold: 0.85})
-
-	errOut := captureStderr(func() { cmdThreshold([]string{"-5"}) })
-
-	if !strings.Contains(errOut, "between 0 and 100") {
-		t.Errorf("stderr should show range error, got: %s", errOut)
-	}
-
-	cfg := LoadConfig()
-	if cfg.ConfidenceThreshold != 0.85 {
-		t.Errorf("config threshold should remain 0.85 after negative input, got %f", cfg.ConfidenceThreshold)
-	}
-}
 
 // --- Project Session ID ---
 

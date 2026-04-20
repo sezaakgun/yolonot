@@ -24,4 +24,5 @@ yolonot log
 **Environment**
 - OS: [e.g., macOS 15, Ubuntu 24.04]
 - Go version: [e.g., 1.25]
+- Harness: [Claude Code / Codex CLI / OpenCode / Gemini CLI] and its version
 - LLM provider: [e.g., OpenAI gpt-5.4-mini, Ollama qwen3.5:9b]

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,10 +14,24 @@ import (
 	"time"
 )
 
-// SystemPrompt is the 2-class command safety classifier prompt.
+// SystemPrompt is the command safety classifier prompt. Produces a 2-class
+// decision (allow/ask) plus a 5-tier risk tag. The tier is categorical —
+// research (ACL 2024 survey on LLM confidence; arXiv 2412.01655 on
+// command-line risk classification) found LLMs classify to named buckets
+// far more reliably than to numeric confidence scores. Each harness then
+// maps tier → final action via its RiskMap.
 const SystemPrompt = `You are a command safety classifier. Evaluate in this EXACT order:
-Output ONLY JSON: {"decision":"allow|ask","confidence":0.0-1.0,"short":"6 words or fewer","reasoning":"one line"}
+Output ONLY JSON: {"decision":"allow|ask","risk":"safe|low|moderate|high|critical","short":"6 words or fewer","reasoning":"one line"}
 The "short" field is a human-readable label shown in the user's terminal banner (e.g. "read-only kubectl get", "destructive prod mutation"). Keep it under 60 chars, no punctuation at the end. The "reasoning" field is the full explanation for logs.
+
+Risk tier — pick ONE, based on REVERSIBILITY and BLAST RADIUS, not on how confident you feel:
+  safe     — read-only, no side effects. Examples: ls, cat, git status, kubectl get, aws ... describe, grep, find, env.
+  low      — local, easily reversible writes. Examples: touch, mkdir, git add, git commit (local), npm install (local), echo > /tmp/*.
+  moderate — network/external or scoped state change. Examples: curl https://..., git push feature-branch, docker build, npm publish --dry-run.
+  high     — destructive but bounded. Examples: rm <specific-file>, git push main, kill <pid>, DROP TABLE tmp_X, kubectl delete pod X.
+  critical — irreversible + wide blast radius. Examples: rm -rf /, rm -rf $HOME, curl X | sh, dd of=/dev/sda, mkfs, force-push to main, DROP DATABASE prod.
+
+Decision is orthogonal to risk. A "safe" command is always allow. A "critical" command is always ask (rules will deny; LLM's role is to flag). "moderate"/"high" may go either way depending on context (prod vs dev, specific vs wildcard).
 
 STEP 1 — Is this a READ-ONLY operation? If yes → ALLOW regardless of target.
 Default to ALLOW for read-only commands. Reading is never dangerous — only writing/mutating is.
@@ -93,13 +108,47 @@ Examples:
 
 Be strict. When in doubt, ask.`
 
-// Decision represents an LLM classification result.
+// Decision represents an LLM classification result. Internal to the
+// LLMClassifier — the rest of yolonot consumes RiskResult. Confidence is
+// DEPRECATED: kept as a transitional fallback so models tuned against the
+// old prompt still produce usable tiers via confidenceToRisk.
 type Decision struct {
 	Decision   string  `json:"decision"`
-	Confidence float64 `json:"confidence"`
-	Short      string  `json:"short,omitempty"` // <=60 char banner label; falls back to truncated Reasoning
+	Risk       string  `json:"risk,omitempty"`       // one of safe|low|moderate|high|critical
+	Confidence float64 `json:"confidence,omitempty"` // DEPRECATED, mapped to Risk when Risk empty
+	Short      string  `json:"short,omitempty"`      // <=60 char banner label; falls back to truncated Reasoning
 	Reasoning  string  `json:"reasoning"`
 	ComparedTo string  `json:"compared_to,omitempty"`
+}
+
+// confidenceToRisk maps legacy confidence scores to the 5-tier taxonomy.
+// Only used when a model emits {confidence} without {risk}. The mapping
+// differs by decision: an "allow" with 0.9 confidence is "safe", while an
+// "ask" with 0.9 confidence is the LLM being confident it's DANGEROUS
+// (=> critical). This matches how the old prompt used the score.
+func confidenceToRisk(decision string, conf float64) string {
+	if decision == "ask" {
+		switch {
+		case conf >= 0.9:
+			return RiskCritical
+		case conf >= 0.7:
+			return RiskHigh
+		case conf >= 0.5:
+			return RiskModerate
+		default:
+			return RiskModerate
+		}
+	}
+	switch {
+	case conf >= 0.9:
+		return RiskSafe
+	case conf >= 0.7:
+		return RiskLow
+	case conf >= 0.5:
+		return RiskModerate
+	default:
+		return RiskModerate
+	}
 }
 
 // ShortReason returns a compact banner-friendly reason: prefers d.Short,
@@ -376,12 +425,55 @@ func ParseDecision(text string) *Decision {
 			depth--
 			if depth == 0 {
 				var d Decision
-				if err := json.Unmarshal([]byte(text[start:i+1]), &d); err == nil {
-					return &d
+				if err := json.Unmarshal([]byte(text[start:i+1]), &d); err != nil {
+					return nil
 				}
-				return nil
+				if d.Risk == "" && d.Confidence > 0 {
+					d.Risk = confidenceToRisk(d.Decision, d.Confidence)
+					Verbosef("ParseDecision: legacy confidence=%.2f mapped to risk=%s", d.Confidence, d.Risk)
+				}
+				if d.Risk != "" && !isValidRisk(d.Risk) {
+					Verbosef("ParseDecision: unknown risk tier %q, defaulting to moderate", d.Risk)
+					d.Risk = RiskModerate
+				}
+				return &d
 			}
 		}
 	}
 	return nil
+}
+
+// LLMClassifier is the Phase 1 Classifier: delegates to the existing
+// CallLLM + BuildAnalyzePrompt + ParseDecision pipeline and produces a
+// RiskResult. Future classifiers (heuristic, distilled, knn) live in
+// sibling files behind the same interface — see classifier.go docblock.
+type LLMClassifier struct{}
+
+func init() { RegisterClassifier(&LLMClassifier{}) }
+
+func (*LLMClassifier) Name() string { return "llm" }
+
+func (*LLMClassifier) Classify(_ context.Context, cmd string, _ ClassifyMeta) (RiskResult, error) {
+	start := time.Now()
+	cfg := GetLLMConfig()
+	if cfg.URL == "" || cfg.Model == "" {
+		return RiskResult{Backend: "llm"}, fmt.Errorf("llm not configured")
+	}
+	raw, err := CallLLM(cfg, SystemPrompt, BuildAnalyzePrompt(cmd), 300)
+	ms := time.Since(start).Milliseconds()
+	if err != nil {
+		return RiskResult{Backend: "llm", LatencyMs: ms}, err
+	}
+	d := ParseDecision(raw)
+	if d == nil {
+		return RiskResult{Backend: "llm", LatencyMs: ms}, fmt.Errorf("unparseable LLM response")
+	}
+	return RiskResult{
+		Decision:  d.Decision,
+		Risk:      d.Risk,
+		Short:     d.Short,
+		Reason:    d.Reasoning,
+		Backend:   "llm",
+		LatencyMs: ms,
+	}, nil
 }

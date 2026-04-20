@@ -15,17 +15,18 @@ import (
 // --- Test case types ---
 
 type EvalCase struct {
-	ID          string   `json:"id"`
-	Command     string   `json:"command"`
-	Expected    string   `json:"expected"`
-	Step        int      `json:"step,omitempty"`
-	Category    string   `json:"category,omitempty"`
-	Subcategory string   `json:"subcategory,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Notes       string   `json:"notes,omitempty"`
-	Source      string   `json:"source,omitempty"`
-	Severity    string   `json:"severity,omitempty"`
-	Approved    []string `json:"approved,omitempty"` // brownfield only
+	ID           string   `json:"id"`
+	Command      string   `json:"command"`
+	Expected     string   `json:"expected"`
+	ExpectedRisk string   `json:"expected_risk,omitempty"` // optional: one of allRiskTiers. Populated by `yolonot eval annotate` and compared against classifier output.
+	Step         int      `json:"step,omitempty"`
+	Category     string   `json:"category,omitempty"`
+	Subcategory  string   `json:"subcategory,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	Notes        string   `json:"notes,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	Severity     string   `json:"severity,omitempty"`
+	Approved     []string `json:"approved,omitempty"` // brownfield only
 }
 
 type CaseResult struct {

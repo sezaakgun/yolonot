@@ -15,8 +15,10 @@ type DecisionEntry struct {
 	Command    string  `json:"command"`
 	Cwd        string  `json:"cwd"`
 	Project    string  `json:"project"`
+	Harness    string  `json:"harness,omitempty"` // claude | codex | opencode | gemini
 	Layer      string  `json:"layer"`
 	Decision   string  `json:"decision"`
+	Risk       string  `json:"risk,omitempty"` // safe | low | moderate | high | critical
 	Confidence float64 `json:"confidence,omitempty"`
 	Short      string  `json:"short,omitempty"` // compact banner label (from LLM)
 	Reasoning  string  `json:"reasoning,omitempty"`
@@ -39,6 +41,11 @@ func LogDecision(entry DecisionEntry) {
 	}
 	if entry.Project == "" && entry.Cwd != "" {
 		entry.Project = filepath.Base(entry.Cwd)
+	}
+	if entry.Harness == "" {
+		if h := ActiveHarness(); h != nil {
+			entry.Harness = h.Name()
+		}
 	}
 
 	dir := YolonotDir()

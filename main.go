@@ -89,7 +89,10 @@ func main() {
 	case "stats":
 		cmdStats()
 	case "threshold":
-		cmdThreshold(os.Args[2:])
+		fmt.Fprintln(os.Stderr, "yolonot: `threshold` was removed. Use `yolonot risk` to configure per-harness tier→action policy.")
+		os.Exit(2)
+	case "risk":
+		cmdRisk(os.Args[2:])
 	case "pre-check", "precheck":
 		cmdPreCheck(os.Args[2:])
 	case "quiet":
@@ -171,7 +174,7 @@ func cmdDefault() {
 	printUpdateHint()
 
 	// Session summary if available
-	sessionID := os.Getenv("CLAUDE_SESSION_ID")
+	sessionID := GetSessionIDFromEnv()
 	if sessionID == "" {
 		sessionID = FindSessionID()
 	}
@@ -202,7 +205,7 @@ func cmdDefault() {
 	fmt.Println("  stats       Show analytics from decision history")
 	fmt.Println("  check       Dry-run: test what the pipeline would decide for a command")
 	fmt.Println("  suggest     Analyze history, suggest permanent rules")
-	fmt.Println("  threshold   Set confidence threshold for auto-allow")
+	fmt.Println("  risk        Show/set per-harness risk tier → action policy")
 	fmt.Println("  pre-check   Manage pre-checkers (fast-allow + external hooks like dippy)")
 	fmt.Println("  quiet       Silence banners for allow decisions (only show ask/deny)")
 	fmt.Println("  pause       Disable yolonot for current session (total bypass)")

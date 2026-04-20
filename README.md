@@ -5,7 +5,8 @@
 <h1 align="center">yolonot</h1>
 
 <p align="center">
-  Smart auto-mode for Claude Code. The safe alternative to <code>--dangerously-skip-permissions</code>.
+  Smart auto-mode for AI coding assistants. The safe alternative to <code>--dangerously-skip-permissions</code>.<br>
+  Built for Claude Code. Also works with Codex CLI, OpenCode, and Gemini CLI.
 </p>
 
 <p align="center">
@@ -16,7 +17,9 @@
 
 ---
 
-yolonot sits between Claude Code and your shell. It uses an LLM to classify every Bash command as safe (allow) or needs-review (ask), with session memory so approved commands don't ask twice and rejected commands stay blocked.
+yolonot sits between your AI coding assistant and your shell. It uses an LLM to classify every Bash command as safe (allow) or needs-review (ask), with session memory so approved commands don't ask twice and rejected commands stay blocked.
+
+Claude Code is the flagship integration (full allow/ask/deny support). Adapters for Codex CLI, OpenCode, and Gemini CLI ship in-tree — see [Other AI harnesses](#other-ai-harnesses) for each host's caveats.
 
 ## Quick Start
 
@@ -79,7 +82,7 @@ Sessions are project-aware — a command approved in one project is not auto-app
 
 `deny` rules are absolute — nothing can override them (not session memory, not LLM). `ask` rules prompt you once, then session memory takes over. `allow` rules are instant but skipped for chained commands, redirects, or sensitive files.
 
-When the LLM is unavailable, yolonot emits a warning ('LLM unreachable, falling back to Claude Code permissions') and goes transparent — Claude Code's own permission system handles it.
+When the LLM is unavailable, yolonot emits a warning ('LLM unreachable, falling back to host permissions') and goes transparent — the host assistant's own permission system handles it.
 
 Session similarity pre-filters by command prefix before calling the LLM, skipping unnecessary API calls when the new command shares no executable with previously approved commands.
 
@@ -108,7 +111,7 @@ yolonot log          Show recent decisions with LLM timing
 yolonot suggest      Analyze history, suggest permanent rules
 yolonot stats        Show analytics from decision history
 yolonot check        Dry-run: test what the pipeline would decide for a command
-yolonot threshold    Set confidence threshold for auto-allow (0-100)
+yolonot risk         Show/set per-harness risk tier → action policy
 yolonot pre-check    Manage pre-checkers (fast-allow + external hooks like dippy)
 yolonot quiet        Silence banners for allow decisions (only show ask/deny)
 yolonot pause        Disable yolonot for current session (total bypass)
@@ -130,17 +133,30 @@ Sometimes you want to run commands without yolonot's interference — for a quic
 
 When paused, yolonot is **completely transparent** — no deny rules, no LLM, no session memory. Claude Code's native permissions handle everything as if yolonot weren't installed.
 
-### Confidence Threshold
+### Risk Tiers
 
-Control how confident the LLM must be to auto-allow:
+Every LLM decision carries a risk tier — `safe`, `low`, `moderate`, `high`, `critical` — based on reversibility and blast radius. Each harness has a default tier → action policy (allow / ask / deny / passthrough) that you can override per-harness:
 
 ```bash
-yolonot threshold         # show current (default: disabled)
-yolonot threshold 90      # only auto-allow when LLM is 90%+ confident
-yolonot threshold 0       # disable (allow all LLM "allow" decisions)
+yolonot risk                         # show merged map for active harness
+yolonot risk claude                  # show for a specific harness
+yolonot risk codex moderate deny     # override one cell
+yolonot risk codex reset             # drop all user overrides for a harness
+yolonot risk codex reset moderate    # drop one override
 ```
 
-When set, LLM "allow" decisions with confidence below the threshold are downgraded to "ask". This applies to both direct LLM analysis and session similarity checks.
+`passthrough` means yolonot emits no decision and lets the host's own permission engine handle the command. Shipped defaults:
+
+| Tier | Claude | Codex / OpenCode | Gemini |
+|---|---|---|---|
+| safe / low | allow | allow | allow |
+| moderate | ask | passthrough | ask |
+| high | ask | deny | ask |
+| critical | ask | deny | ask |
+
+On ask-capable harnesses (Claude, Gemini) the LLM layer never denies by default — deny stays rule-origin only. Codex / OpenCode have no `ask` primitive in their hook APIs, so `deny` is the only way to block there.
+
+Env vars override config at runtime: `YOLONOT_CODEX_RISK_MODERATE=deny`.
 
 ### Dry-Run Check
 
@@ -228,7 +244,7 @@ After install, `/yolonot` is available as a Claude Code skill:
 /yolonot suggest     Suggest permanent rules from history
 /yolonot check X     Dry-run: test pipeline for a command
 /yolonot stats       Show decision analytics
-/yolonot threshold   Show/set confidence threshold
+/yolonot risk        Show/set per-harness risk tier → action policy
 ```
 
 ### Analytics
@@ -366,7 +382,7 @@ yolonot prompts the LLM to return a single JSON object. Any provider / model you
 ```json
 {
   "decision": "allow" | "ask",
-  "confidence": 0.0,
+  "risk": "safe" | "low" | "moderate" | "high" | "critical",
   "short": "6 words or fewer",
   "reasoning": "one-sentence explanation",
   "compared_to": "optional — similarity comparisons only"
@@ -375,11 +391,13 @@ yolonot prompts the LLM to return a single JSON object. Any provider / model you
 
 | Field | Required | Purpose |
 |-------|----------|---------|
-| `decision` | yes | 2-class classifier. `deny` is reserved for explicit rules only; LLMs never emit `deny`. |
-| `confidence` | yes | Float 0.0–1.0. Used by `yolonot threshold` to downgrade low-confidence allows to ask. |
+| `decision` | yes | 2-class classifier. `deny` is reserved for explicit rules + the per-harness risk map; LLMs never emit `deny` directly. |
+| `risk` | yes | Categorical tier by reversibility × blast radius. The active harness's RiskMap turns the tier into a final action (allow / ask / deny / passthrough). |
 | `short` | no | ≤6-word banner shown in the terminal. Keeps `systemMessage` compact. Falls back to a truncated `reasoning` if missing. |
 | `reasoning` | yes | One sentence. Written to `decisions.jsonl` and surfaced via `yolonot log`. |
 | `compared_to` | no | Only set by session-similarity comparisons — names the approved command that matched. |
+
+Legacy outputs that emit `confidence` (0.0–1.0) instead of `risk` are mapped to a tier for backward compatibility and logged at verbose level. Migrate your provider prompt to emit `risk` when convenient.
 
 If a model returns unparseable JSON or omits required fields, yolonot treats the LLM as unreachable and falls through to Claude Code's native permission prompt (never a silent allow).
 
@@ -446,6 +464,34 @@ All yolonot data lives at `~/.yolonot/`:
 | `cache/` | Script file hash → cached LLM decisions |
 | `decisions.jsonl` | Decision log with timestamps and LLM timing |
 | `update-check` | Cached update check (once per day) |
+
+## Other AI harnesses
+
+yolonot was built for Claude Code but also ships adapters for other bash-capable AI coding tools. Pick one explicitly with `--harness` (or `YOLONOT_HARNESS=<name>`); otherwise yolonot auto-detects.
+
+| Harness | `ask` prompt support | Notes |
+|---------|----------------------|-------|
+| **Claude Code** (default) | full 3-state (allow/ask/deny) | Native hook protocol. |
+| **Codex CLI** | deny only | Upstream hook API has no user-prompt primitive. Moderate-risk commands fall through to Codex's own permission engine (yolonot goes transparent); high/critical still hard-deny. |
+| **OpenCode** | deny only | Plugin hook `tool.execute.before` is throw-to-block or return-to-allow. yolonot maps moderate-risk to allow since empty stdout is treated as allow; high/critical still hard-deny. |
+| **Gemini CLI** | full 3-state — **with caveat** (see below) | Needs `--yolo` for `allow` to take effect. |
+
+### Gemini CLI — run with `--yolo`
+
+Gemini's hook protocol has a genuine `ask` primitive (it fires the native TUI confirmation prompt with yolonot's reason), but its scheduler **silently ignores hook `allow` decisions unless YOLO mode is on**. The policy engine runs unconditionally, so without YOLO you'll still see Gemini's own "Allow once / Allow for this session / No" prompts even after yolonot has allowed a command.
+
+```bash
+# recommended: yolonot is the sole approval gate
+gemini --yolo
+```
+
+Or persist it in `~/.gemini/settings.json`:
+
+```json
+{ "general": { "defaultApprovalMode": "yolo" } }
+```
+
+**Without `--yolo`, yolonot still runs as an extra security layer** — `ask` and `deny` decisions are fully honored, so yolonot can force prompts and hard-block dangerous commands that Gemini would otherwise run without asking. It just can't suppress Gemini's own prompts for commands it auto-allows.
 
 ## Uninstall
 

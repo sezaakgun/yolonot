@@ -107,14 +107,14 @@ func sanitizeBanner(s string) string {
 	return b.String()
 }
 
-// hookResponse builds the hook JSON for Claude Code.
+// buildHookResponse assembles a canonical HookResponse for the given decision.
 //
 // Banner format varies by decision:
 //   - allow: "🧑‍🚀 <layer> -> <command>" in systemMessage.
 //     permissionDecisionReason left empty so the TUI doesn't prefix it with
 //     "PreToolUse:Bash says:" (which was duplicating the banner).
 //   - ask: "🧑‍🚀 <layer> -> <reason>" in permissionDecisionReason.
-//     Command is omitted because Claude Code already renders the command
+//     Command is omitted because the TUI already renders the command
 //     front-and-center in the permission prompt — showing it twice is noise.
 //     The reason is what the user actually needs to decide.
 //   - deny: "🧑‍🚀 <layer> -> <command>\n<reason>". Command is kept here
@@ -124,7 +124,41 @@ func sanitizeBanner(s string) string {
 //
 // All user-visible text flows through sanitizeBanner — rule messages,
 // pre-check output and LLM reasoning can all carry attacker-chosen bytes.
-func hookResponse(decision, layer, reason, command string) string {
+
+// applyRiskMap resolves the final hook action from the classifier's
+// decision + risk tier through the active harness's risk map.
+//
+// Escalate-only safety invariant: the risk map can make things stricter
+// (allow→ask, allow→deny, ask→deny, allow→passthrough) but cannot relax
+// a classifier "ask" back to "allow". This asymmetry is deliberate — if
+// the LLM already saw something worth asking about, a permissive tier
+// mapping shouldn't override that judgement.
+//
+// passthrough returns ("", true); callers emit nothing and defer to the
+// host's native permission engine. Any unknown action falls back to the
+// classifier's original decision.
+func applyRiskMap(h Harness, origDecision, risk string) (final string, passthrough bool) {
+	if h == nil || risk == "" {
+		return origDecision, false
+	}
+	action := ResolveRiskMap(h)[risk]
+	switch action {
+	case ActionPassthrough:
+		return "", true
+	case ActionDeny:
+		return "deny", false
+	case ActionAsk:
+		if origDecision == "allow" {
+			return "ask", false
+		}
+		return origDecision, false
+	case ActionAllow:
+		return origDecision, false
+	}
+	return origDecision, false
+}
+
+func buildHookResponse(decision, layer, reason, command string) HookResponse {
 	layer = sanitizeBanner(layer)
 	reason = sanitizeBanner(reason)
 	r := HookResponse{}
@@ -149,28 +183,82 @@ func hookResponse(decision, layer, reason, command string) string {
 		}
 		r.HookSpecificOutput.PermissionDecisionReason = banner
 	}
+	return r
+}
+
+// hookResponse is the stringified form of buildHookResponse, routed through
+// the active harness adapter so non-Claude harnesses can emit their own
+// JSON shape. For Claude (the canonical shape) this is a plain marshal.
+// Returns empty string when the adapter opted out of emitting a response
+// (e.g. Codex for allow decisions) — callers pair this with emitHook() so
+// no stray newline reaches stdout.
+func hookResponse(decision, layer, reason, command string) string {
+	r := buildHookResponse(decision, layer, reason, command)
+	return activeHarnessFormat(r)
+}
+
+// emitHook prints a hook response to stdout, skipping entirely when the
+// adapter returned "" (Codex's "allow = silence" contract). Using this
+// instead of fmt.Println keeps us from emitting a blank line that Codex
+// would try to parse as JSON.
+func emitHook(response string) {
+	if response == "" {
+		return
+	}
+	fmt.Println(response)
+}
+
+// activeHarnessFormat delegates to the active harness adapter's
+// FormatHookResponse, with a canonical JSON fallback if no harness is
+// registered (only possible in broken builds — every adapter registers
+// itself in init()).
+func activeHarnessFormat(r HookResponse) string {
+	if h := ActiveHarness(); h != nil {
+		return h.FormatHookResponse(r)
+	}
 	data, _ := json.Marshal(r)
 	return string(data)
 }
 
 func cmdHook() {
-	// Read payload from stdin
-	input, _ := io.ReadAll(os.Stdin)
-	if len(input) == 0 {
-		// Try env var fallback
-		if toolInput := os.Getenv("CLAUDE_TOOL_INPUT"); toolInput != "" {
-			input = []byte(fmt.Sprintf(`{"hook_event_name":"%s","tool_name":"%s","session_id":"%s","tool_input":%s}`,
-				envOr("CLAUDE_HOOK_EVENT_NAME", "PreToolUse"),
-				envOr("CLAUDE_TOOL_NAME", "Bash"),
-				envOr("CLAUDE_SESSION_ID", "unknown"),
-				toolInput))
+	// Read payload from stdin; adapter handles env var fallback and
+	// harness-specific JSON decoding.
+	raw, _ := io.ReadAll(os.Stdin)
+
+	// Allow `yolonot hook --harness <name>` to pin the adapter. Harness
+	// CLIs don't all expose a stable session-id env var (Codex, OpenCode
+	// don't), so auto-detection at hook time isn't reliable — install
+	// writes this flag into the hook command so we route to the right
+	// adapter regardless of env.
+	for i := 2; i < len(os.Args); i++ {
+		a := os.Args[i]
+		if a == "--harness" && i+1 < len(os.Args) {
+			os.Setenv("YOLONOT_HARNESS", os.Args[i+1])
+			break
+		}
+		if strings.HasPrefix(a, "--harness=") {
+			os.Setenv("YOLONOT_HARNESS", strings.TrimPrefix(a, "--harness="))
+			break
 		}
 	}
 
-	var payload HookPayload
-	if err := json.Unmarshal(input, &payload); err != nil {
+	harness := ActiveHarness()
+	if harness == nil {
 		return
 	}
+	payload, err := harness.ParseHookInput(raw)
+	if err != nil {
+		return
+	}
+	if payload.HookEventName == "" {
+		return
+	}
+
+	// Pre-check binaries (Dippy et al.) follow Claude's PreToolUse contract,
+	// so always feed them the canonical Claude JSON — never the raw stdin
+	// bytes (which could be Codex/OpenCode shape when those harnesses are
+	// active). Canonical ↔ Claude shape, so json.Marshal(payload) suffices.
+	canonicalInput, _ := json.Marshal(payload)
 
 	command, _ := payload.ToolInput["command"].(string)
 	sessionID := payload.SessionID
@@ -211,8 +299,9 @@ func cmdHook() {
 		return
 	}
 
-	// Load config once — used by pre-check, threshold, and the quiet-on-allow
-	// banner suppression. Keeps disk reads down to one per hook invocation.
+	// Load config once — used by pre-check, risk-map resolution, and the
+	// quiet-on-allow banner suppression. Keeps disk reads down to one per
+	// hook invocation.
 	config := LoadConfig()
 	quietOnAllow = config.QuietOnAllow
 
@@ -243,7 +332,7 @@ func cmdHook() {
 			reasoning += " — " + ruleMatch.Message
 		}
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "deny", Reasoning: reasoning})
-		fmt.Println(hookResponse("deny", "rule", userReason, command))
+		emitHook(hookResponse("deny", "rule", userReason, command))
 		return
 	}
 
@@ -263,7 +352,7 @@ func cmdHook() {
 		if sessionID != "" {
 			AppendLine(projSessionID, "approved", command)
 		}
-		fmt.Println(hookResponse("allow", "rule", userReason, command))
+		emitHook(hookResponse("allow", "rule", userReason, command))
 		return
 	}
 
@@ -271,7 +360,7 @@ func cmdHook() {
 	// so a prior approval bypasses a newly-added ask-cmd.
 	if sessionID != "" && ContainsLine(projSessionID, "approved", command) {
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "exact_match"})
-		fmt.Println(hookResponse("allow", "session", "previously approved this session", command))
+		emitHook(hookResponse("allow", "session", "previously approved this session", command))
 		return
 	}
 
@@ -281,13 +370,13 @@ func cmdHook() {
 	if sessionID != "" {
 		if ContainsLine(projSessionID, "denied", command) {
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "previously_rejected"})
-			fmt.Println(hookResponse("deny", "session_deny", "previously rejected this session", command))
+			emitHook(hookResponse("deny", "session_deny", "previously rejected this session", command))
 			return
 		}
 		if ContainsLine(projSessionID, "asked", command) && !ContainsLine(projSessionID, "approved", command) {
 			AppendLine(projSessionID, "denied", command)
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "asked_not_approved"})
-			fmt.Println(hookResponse("deny", "session_deny", "previously rejected this session", command))
+			emitHook(hookResponse("deny", "session_deny", "previously rejected this session", command))
 			return
 		}
 	}
@@ -307,7 +396,7 @@ func cmdHook() {
 		if sessionID != "" {
 			AppendLine(projSessionID, "asked", command)
 		}
-		fmt.Println(hookResponse("ask", "rule", userReason, command))
+		emitHook(hookResponse("ask", "rule", userReason, command))
 		return
 	}
 
@@ -335,18 +424,18 @@ func cmdHook() {
 					AppendLine(projSessionID, "approved", command)
 				}
 				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "fast_allow", Decision: "allow", Reasoning: reason})
-				fmt.Println(hookResponse("allow", "fast_allow", reason, command))
+				emitHook(hookResponse("allow", "fast_allow", reason, command))
 				return
 			}
 			continue
 		}
-		if _, reason, ok := runPreCheck(preCheck, input); ok {
+		if _, reason, ok := runPreCheck(preCheck, canonicalInput); ok {
 			if sessionID != "" {
 				AppendLine(projSessionID, "approved", command)
 			}
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "pre_check", Decision: "allow", Reasoning: reason})
 			layer := "pre_check (" + preCheckShortName(preCheck) + ")"
-			fmt.Println(hookResponse("allow", layer, reason, command))
+			emitHook(hookResponse("allow", layer, reason, command))
 			return
 		}
 	}
@@ -364,18 +453,12 @@ func cmdHook() {
 			if err == nil {
 				d := ParseDecision(text)
 				if d != nil && d.Decision == "allow" {
-					// Check confidence threshold
-					if config.ConfidenceThreshold > 0 && d.Confidence < config.ConfidenceThreshold {
-						shortReason := fmt.Sprintf("confidence %.0f%% below threshold %.0f%%", d.Confidence*100, config.ConfidenceThreshold*100)
-						fullReason := fmt.Sprintf("%s: %s", shortReason, d.Reasoning)
-						AppendLine(projSessionID, "asked", command)
-						LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "ask", Confidence: d.Confidence, Short: shortReason, Reasoning: fullReason, DurationMs: ms})
-						fmt.Println(hookResponse("ask", "session_llm", fullReason, command))
-						return
-					}
+					// The compare layer says "similar enough to an already
+					// approved command" — that approval already flowed
+					// through a risk map once. Don't re-map here.
 					AppendLine(projSessionID, "approved", command)
 					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "allow", Short: d.Short, Reasoning: d.Reasoning, DurationMs: ms})
-					fmt.Println(hookResponse("allow", "session_llm", d.Reasoning, command))
+					emitHook(hookResponse("allow", "session_llm", d.Reasoning, command))
 					return
 				}
 			}
@@ -384,28 +467,32 @@ func cmdHook() {
 
 	// Step 4: Script cache check
 	if cached := checkCache(command); cached != nil {
-		// Apply confidence threshold to cached allow — same as LLM path
-		if cached.Decision == "allow" && config.ConfidenceThreshold > 0 && cached.Confidence < config.ConfidenceThreshold {
-			shortReason := fmt.Sprintf("confidence %.0f%% below threshold %.0f%%", cached.Confidence*100, config.ConfidenceThreshold*100)
-			fullReason := fmt.Sprintf("%s: %s", shortReason, cached.Reasoning)
-			if projSessionID != "" {
-				AppendLine(projSessionID, "asked", command)
-			}
-			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "cache", Decision: "ask", Confidence: cached.Confidence, Short: shortReason, Reasoning: "(cached) " + fullReason})
-			fmt.Println(hookResponse("ask", "cache", fullReason, command))
+		// Route cached decisions through the risk map so cache + live LLM
+		// paths apply the same policy. Older cache entries without a Risk
+		// tier fall through with their original decision (no map applied).
+		finalDecision, passthrough := applyRiskMap(ActiveHarness(), cached.Decision, cached.Risk)
+		LogDecision(DecisionEntry{
+			SessionID: sessionID, Command: command, Cwd: cwd, Layer: "cache",
+			Decision: finalDecision, Risk: cached.Risk, Confidence: cached.Confidence, Short: cached.Short,
+			Reasoning: fmt.Sprintf("orig=%s → %s (cached) %s", cached.Decision, finalDecision, cached.Reasoning),
+		})
+		if passthrough {
+			emitHook("")
 			return
 		}
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "cache", Decision: cached.Decision, Confidence: cached.Confidence, Short: cached.Short, Reasoning: "(cached) " + cached.Reasoning})
-		if cached.Decision == "allow" {
+		switch finalDecision {
+		case "allow":
 			if sessionID != "" {
 				AppendLine(projSessionID, "approved", command)
 			}
-			fmt.Println(hookResponse("allow", "cache", cached.Reasoning, command))
-		} else {
+			emitHook(hookResponse("allow", "cache", cached.Reasoning, command))
+		case "deny":
+			emitHook(hookResponse("deny", "cache", cached.Reasoning, command))
+		default: // ask
 			if sessionID != "" {
 				AppendLine(projSessionID, "asked", command)
 			}
-			fmt.Println(hookResponse("ask", "cache", cached.Reasoning, command))
+			emitHook(hookResponse("ask", "cache", cached.Reasoning, command))
 		}
 		return
 	}
@@ -417,53 +504,60 @@ func cmdHook() {
 	text, err := CallLLM(cfg, SystemPrompt, userPrompt, 4096)
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
-		// LLM unavailable → go transparent, let Claude Code decide
+		// LLM unavailable → transparent passthrough. Route through the
+		// active adapter so Codex/Gemini see their native wire shape
+		// (empty stdout = host-decides), not Claude's nested envelope.
+		// Claude still gets a user-visible systemMessage banner because
+		// its adapter preserves it; non-Claude adapters return empty for
+		// a decisionless response (see harness_codex.go / harness_gemini.go
+		// FormatHookResponse).
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "LLM unavailable: " + err.Error(), DurationMs: ms})
 		r := HookResponse{}
-		r.SystemMessage = "yolonot: 🧑‍🚀 LLM unreachable, falling back to Claude Code permissions"
-		data, _ := json.Marshal(r)
-		fmt.Println(string(data))
+		r.SystemMessage = "yolonot: 🧑‍🚀 LLM unreachable, falling back to host permissions"
+		emitHook(activeHarnessFormat(r))
 		return
 	}
 
 	d := ParseDecision(text)
 	if d == nil {
-		// Parse error → go transparent, let Claude Code decide
+		// Parse error → same transparent fallback as LLM-unreachable.
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "parse error", DurationMs: ms})
 		r := HookResponse{}
-		r.SystemMessage = "yolonot: 🧑‍🚀 LLM response parse error, falling back to Claude Code permissions"
-		data, _ := json.Marshal(r)
-		fmt.Println(string(data))
+		r.SystemMessage = "yolonot: 🧑‍🚀 LLM response parse error, falling back to host permissions"
+		emitHook(activeHarnessFormat(r))
 		return
 	}
 
 	// Cache the decision if it involved a script file
 	saveCache(command, d)
 
-	// Check confidence threshold — downgrade allow to ask if below threshold
-	if d.Decision == "allow" && config.ConfidenceThreshold > 0 && d.Confidence < config.ConfidenceThreshold {
-		shortReason := fmt.Sprintf("confidence %.0f%% below threshold %.0f%%", d.Confidence*100, config.ConfidenceThreshold*100)
-		fullReason := fmt.Sprintf("%s: %s", shortReason, d.Reasoning)
-		if sessionID != "" {
-			AppendLine(projSessionID, "asked", command)
-		}
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "ask", Confidence: d.Confidence, Short: shortReason, Reasoning: fullReason, DurationMs: ms})
-		fmt.Println(hookResponse("ask", "llm", fullReason, command))
+	// Risk map: classifier gave us (decision, risk). Active harness
+	// decides the final action per its RiskMap. "passthrough" returns an
+	// empty response; the host's native permission engine takes over.
+	finalDecision, passthrough := applyRiskMap(ActiveHarness(), d.Decision, d.Risk)
+	LogDecision(DecisionEntry{
+		SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm",
+		Decision: finalDecision, Risk: d.Risk, Confidence: d.Confidence, Short: d.Short,
+		Reasoning: fmt.Sprintf("orig=%s → %s %s", d.Decision, finalDecision, d.Reasoning),
+		DurationMs: ms,
+	})
+	if passthrough {
+		emitHook("")
 		return
 	}
-
-	LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: d.Decision, Confidence: d.Confidence, Short: d.Short, Reasoning: d.Reasoning, DurationMs: ms})
-
-	if d.Decision == "allow" {
+	switch finalDecision {
+	case "allow":
 		if sessionID != "" {
 			AppendLine(projSessionID, "approved", command)
 		}
-		fmt.Println(hookResponse("allow", "llm", d.Reasoning, command))
-	} else {
+		emitHook(hookResponse("allow", "llm", d.Reasoning, command))
+	case "deny":
+		emitHook(hookResponse("deny", "llm", d.Reasoning, command))
+	default: // ask
 		if sessionID != "" {
 			AppendLine(projSessionID, "asked", command)
 		}
-		fmt.Println(hookResponse("ask", "llm", d.Reasoning, command))
+		emitHook(hookResponse("ask", "llm", d.Reasoning, command))
 	}
 }
 

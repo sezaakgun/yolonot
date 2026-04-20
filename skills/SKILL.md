@@ -8,9 +8,19 @@ user_invocable: true
 
 View and manage yolonot's session state, rules, and decision history.
 
+> **Claude Code only.** This skill ships through `~/.claude/skills/` and is invoked via Claude Code's `/yolonot` slash command. It is not installed for Codex / OpenCode / Gemini hosts — those hosts run the same `yolonot` binary, but without the TUI skill. Users on those hosts can still invoke every command shown below directly in the terminal (`yolonot status`, `yolonot check <cmd>`, …).
+
 ## COMMANDS
 
 Parse the user's input to determine which command to run. The argument after `/yolonot` determines the action.
+
+### Safety invariants — READ FIRST
+
+**Never auto-invoke `pause`, `resume`, or `reset`.** These commands disable the safety layer the user installed. The correct behavior:
+
+- If you are blocked by yolonot and want to proceed, use `/yolonot approve <cmd>` — it allows that **one specific command** for the remainder of the session. Nothing else is relaxed.
+- Only invoke `pause` / `resume` / `reset` when the user types those exact words (e.g. "pause yolonot", "reset the session"). Do not invoke them on your own initiative to work around a deny, ask, or rule match — that is a safety bypass, not a workaround.
+- Running a destructive command (kube ops, production state, irreversible writes) through pause is a failure mode. Prefer `approve` with the exact command string; if the command isn't narrow enough for approve, surface the block to the user and let them decide.
 
 ### `/yolonot` (no args) — Show menu + session summary
 
@@ -36,7 +46,7 @@ Commands:
   /yolonot suggest         — learn from history, update rules
   /yolonot check <cmd>     — dry-run pipeline test
   /yolonot stats           — show decision analytics
-  /yolonot threshold [0-100] — set/show confidence threshold
+  /yolonot risk [...]      — show/set per-harness risk tier → action policy
   /yolonot pre-check       — manage pre-checkers (fast-allow + external hooks like dippy)
   /yolonot quiet [on|off]  — silence banners for allow decisions
   /yolonot init            — create rule files for this project
@@ -44,10 +54,16 @@ Commands:
 
 ### `/yolonot pause` — Disable for this session
 
-Run `yolonot pause --current`. This creates a marker
-file that makes the hook bypass yolonot entirely for the current session —
-no rules, no LLM, no session memory. Claude Code's native permissions handle
-commands as if yolonot weren't installed.
+**ONLY invoke when the user explicitly says "pause" (or equivalent: "disable yolonot", "turn off yolonot for this session").** Do not invoke this to work around a deny/ask — use `/yolonot approve <cmd>` to unblock one specific command instead. Auto-pausing to run a blocked destructive command is a safety bypass.
+
+Run `yolonot pause --current --confirm-bypass`. The `--confirm-bypass` flag is
+a required opt-in: `yolonot pause` without it exits with an error telling you
+to use `yolonot approve <cmd>` instead. Only add `--confirm-bypass` when the
+user has explicitly asked to pause.
+
+This creates a marker file that makes the hook bypass yolonot entirely for
+the current session — no rules, no LLM, no session memory. Claude Code's
+native permissions handle commands as if yolonot weren't installed.
 
 ### `/yolonot resume` — Re-enable for this session
 
@@ -145,7 +161,7 @@ Run: `yolonot suggest`
 Read `~/.yolonot/decisions.jsonl`. Cross-reference with audit data in `~/.claude/audit/raw/*.jsonl` (last 7 days). Group commands by pattern, stripping variable parts (UUIDs, hashes, timestamps) for better grouping. Use time-weighted scoring (recent decisions count more). Skip patterns already covered by existing rules. Find:
 
 1. **False asks** — commands yolonot asked about that the user always approved (PermissionRequest events with decision=allow matching session_id). These should become allow rules.
-2. **Risky allows** — commands auto-approved by LLM with low confidence (<0.8). These might need ask rules.
+2. **Risky allows** — commands auto-approved by LLM at `moderate`/`high` risk tiers. These might need ask rules.
 3. **Repeated asks** — same command pattern asked 3+ times across sessions. Candidates for permanent rules.
 
 **Step 2: Present TUI menu**
@@ -193,13 +209,18 @@ Displays:
 - Top asked commands (rule candidates)
 - Per-project breakdown
 
-### `/yolonot threshold [0-100]` — Set confidence threshold
+### `/yolonot risk [...]` — Per-harness risk → action policy
 
-Set or show the confidence threshold for auto-allow. When set (e.g. 90), LLM allows with confidence below the threshold are downgraded to ask. 0 = disabled (default).
+Every LLM decision carries a 5-tier risk tag (`safe` / `low` / `moderate` / `high` / `critical`). Each harness ships a default tier → action map (`allow` / `ask` / `deny` / `passthrough`) that you can override per-cell. `passthrough` means yolonot emits nothing and the host's native permission engine decides.
 
 Run:
-- `yolonot threshold` — show current threshold
-- `yolonot threshold 90` — set threshold to 90
+- `yolonot risk` — show merged map for the active harness
+- `yolonot risk claude` — show for a named harness
+- `yolonot risk codex moderate deny` — override one cell
+- `yolonot risk codex reset` — drop all user overrides for a harness
+- `yolonot risk codex reset moderate` — drop one override
+
+Env vars override config at runtime: `YOLONOT_CODEX_RISK_MODERATE=deny`.
 
 ### `/yolonot pre-check [add|remove|clear] [...]` — Manage pre-checkers
 
@@ -332,8 +353,8 @@ Set up yolonot for the current project and globally.
 - All session files live in `~/.yolonot/sessions/`
 - Session files are project-scoped: `{SESSION_ID}_{PROJECT_HASH}.{approved,asked,denied}` — a command approved in project A is NOT auto-approved in project B. Pause is session-wide (not project-scoped).
 - Session similarity (Step 2) pre-filters approved commands by executable prefix before calling the LLM. If no approved commands share the same executable, the LLM similarity call is skipped entirely.
-- When the LLM is unavailable or returns unparseable output, yolonot emits a systemMessage: "yolonot: LLM unreachable, falling back to Claude Code permissions" instead of silently falling back.
-- Confidence threshold (set via `yolonot threshold`) downgrades LLM allows below the threshold to ask. 0 = disabled (default).
+- When the LLM is unavailable or returns unparseable output, yolonot emits a systemMessage: "yolonot: LLM unreachable, falling back to host permissions" instead of silently falling back.
+- Per-harness risk → action policy (set via `yolonot risk`) decides what each tier does. Defaults ship with the binary; `risk_maps` in `~/.yolonot/config.json` and `YOLONOT_<HARNESS>_RISK_<TIER>` env vars override.
 - Display commands truncated to 80 chars with `...` if longer
 - NEVER auto-modify rules without user confirmation
 - NEVER read tool_response content from audit logs (privacy)
@@ -341,6 +362,6 @@ Set up yolonot for the current project and globally.
 - For suggest cross-reference: match session_id between decisions.jsonl and audit PermissionRequest events
 - LLM response schema (returned by the configured provider, consumed by the hook):
   ```json
-  {"decision":"allow|ask","confidence":0.0-1.0,"short":"≤6-word banner","reasoning":"one sentence","compared_to":"optional"}
+  {"decision":"allow|ask","risk":"safe|low|moderate|high|critical","short":"≤6-word banner","reasoning":"one sentence","compared_to":"optional"}
   ```
-  `decision` is a 2-class label (no `deny` from the LLM — that's rule-only). `short` drives the user-facing banner; `reasoning` goes to the decision log. Unparseable output falls through to Claude Code's native permission prompt.
+  `decision` is a 2-class label; `risk` is a 5-tier categorical tag (reversibility × blast radius). The active harness's RiskMap maps tiers to final actions (allow/ask/deny/passthrough). `deny` never originates from the LLM decision field — it comes from rules or from the risk map. Legacy outputs that emit `confidence` instead of `risk` are mapped to a tier for backward compatibility. Unparseable output falls through to the host's native permission prompt.

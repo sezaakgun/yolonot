@@ -26,11 +26,12 @@ type ProviderConfig struct {
 }
 
 type Config struct {
-	Provider            ProviderConfig `json:"provider"`
-	ConfidenceThreshold float64        `json:"confidence_threshold,omitempty"` // 0 = disabled (default)
-	PreCheck            PreCheckList   `json:"pre_check,omitempty"`            // optional pre-checkers run before yolonot's pipeline; "fast-allow" is a reserved sentinel for the built-in Go bash parser, others are external hook binaries (e.g. /opt/homebrew/bin/dippy). First "allow" wins.
-	QuietOnAllow        bool           `json:"quiet_on_allow,omitempty"`       // when true, allow decisions emit no systemMessage — only ask/deny show a banner
-	LocalAllow          bool           `json:"local_allow,omitempty"`          // DEPRECATED: migrated on load into PreCheck as "fast-allow". Kept for backward-compat read only.
+	Provider     ProviderConfig               `json:"provider"`
+	Classifier   string                       `json:"classifier,omitempty"`    // empty → "llm" (default). Env var YOLONOT_CLASSIFIER overrides. Future values: "heuristic", "knn", "hybrid".
+	RiskMaps     map[string]map[string]string `json:"risk_maps,omitempty"`     // per-harness tier→action override. Outer key = harness name; inner key = risk tier; value ∈ {allow, ask, deny, passthrough}. Merged on top of each harness's shipped defaults.
+	PreCheck     PreCheckList                 `json:"pre_check,omitempty"`     // optional pre-checkers run before yolonot's pipeline; "fast-allow" is a reserved sentinel for the built-in Go bash parser, others are external hook binaries (e.g. /opt/homebrew/bin/dippy). First "allow" wins.
+	QuietOnAllow bool                         `json:"quiet_on_allow,omitempty"` // when true, allow decisions emit no systemMessage — only ask/deny show a banner
+	LocalAllow   bool                         `json:"local_allow,omitempty"`   // DEPRECATED: migrated on load into PreCheck as "fast-allow". Kept for backward-compat read only.
 }
 
 // FastAllowSentinel is the reserved entry in Config.PreCheck that dispatches
@@ -76,11 +77,6 @@ func configPath() string {
 	return filepath.Join(YolonotDir(), "config.json")
 }
 
-func settingsPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "settings.json")
-}
-
 func LoadConfig() Config {
 	data, err := os.ReadFile(configPath())
 	if err != nil {
@@ -116,187 +112,163 @@ func SaveConfig(c Config) {
 	Verbosef("wrote %s (%d bytes)", configPath(), len(data)+1)
 }
 
-func loadSettings() map[string]interface{} {
-	data, err := os.ReadFile(settingsPath())
-	if err != nil {
-		return map[string]interface{}{}
+// parseHarnessFlag scans os.Args[2:] for "--harness <name>", "--harness=<name>",
+// or "--all". Returns (harnessName, all). harnessName is empty when unset.
+func parseHarnessFlag() (string, bool) {
+	args := os.Args
+	if len(args) < 3 {
+		return "", false
 	}
-	var s map[string]interface{}
-	json.Unmarshal(data, &s)
-	return s
-}
-
-func saveSettings(s map[string]interface{}) {
-	data, _ := json.MarshalIndent(s, "", "  ")
-	os.WriteFile(settingsPath(), append(data, '\n'), 0644)
-}
-
-func binaryPath() string {
-	exe, _ := os.Executable()
-	return exe
-}
-
-func IsInstalled() bool {
-	s := loadSettings()
-	hooks, _ := s["hooks"].(map[string]interface{})
-	pre, _ := hooks["PreToolUse"].([]interface{})
-	for _, entry := range pre {
-		if e, ok := entry.(map[string]interface{}); ok {
-			if hs, ok := e["hooks"].([]interface{}); ok {
-				for _, h := range hs {
-					if hm, ok := h.(map[string]interface{}); ok {
-						if cmd, ok := hm["command"].(string); ok && strings.Contains(cmd, "yolonot") {
-							return true
-						}
-					}
-				}
-			}
+	for i := 2; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--all":
+			return "", true
+		case a == "--harness" && i+1 < len(args):
+			return args[i+1], false
+		case strings.HasPrefix(a, "--harness="):
+			return strings.TrimPrefix(a, "--harness="), false
 		}
 	}
-	return false
+	return "", false
+}
+
+// resolveInstallTargets picks which harnesses to install/uninstall into.
+//   - --harness <name> → that single adapter (errors if unknown)
+//   - --all            → every registered adapter
+//   - default          → every already-installed adapter, or if none, every
+//     detected adapter (historically "claude only" on a clean box).
+func resolveInstallTargets(purpose string) []Harness {
+	name, all := parseHarnessFlag()
+	if name != "" {
+		h := GetHarness(name)
+		if h == nil {
+			fmt.Fprintf(os.Stderr, "unknown harness: %s\nknown:", name)
+			for _, h := range Harnesses() {
+				fmt.Fprintf(os.Stderr, " %s", h.Name())
+			}
+			fmt.Fprintln(os.Stderr)
+			os.Exit(2)
+		}
+		return []Harness{h}
+	}
+	if all {
+		return Harnesses()
+	}
+	if purpose == "uninstall" {
+		var installed []Harness
+		for _, h := range Harnesses() {
+			if h.IsInstalled() {
+				installed = append(installed, h)
+			}
+		}
+		return installed
+	}
+	// Install default: any detected harness; falls back to the full registry
+	// so a first-time user still gets the historical Claude-only install.
+	var detected []Harness
+	for _, h := range Harnesses() {
+		if h.IsDetected() {
+			detected = append(detected, h)
+		}
+	}
+	if len(detected) == 0 {
+		return Harnesses()
+	}
+	return detected
 }
 
 func cmdInstall() {
-	if IsInstalled() {
-		// Update: remove old hooks, reinstall with current settings
-		Verbosef("existing install detected — removing old hooks from %s", settingsPath())
-		removeHooks()
+	targets := resolveInstallTargets("install")
+	if len(targets) == 0 {
+		fmt.Fprintln(os.Stderr, "no harnesses registered")
+		os.Exit(2)
+	}
+
+	updating := false
+	for _, h := range targets {
+		if h.IsInstalled() {
+			updating = true
+			break
+		}
+	}
+	if updating {
 		fmt.Println("Updating yolonot hooks...")
 	}
 
-	s := loadSettings()
-	hooks, _ := s["hooks"].(map[string]interface{})
-	if hooks == nil {
-		hooks = map[string]interface{}{}
-		s["hooks"] = hooks
+	bp := binaryPath()
+	for _, h := range targets {
+		if err := h.Install(bp); err != nil {
+			fmt.Fprintf(os.Stderr, "install failed for %s: %v\n", h.Name(), err)
+			os.Exit(1)
+		}
 	}
 
-	bp := binaryPath() + " hook"
-
-	preHook := map[string]interface{}{"type": "command", "command": bp, "timeout": 60.0}
-	postHook := map[string]interface{}{"type": "command", "command": bp, "timeout": 60.0}
-
-	// PreToolUse: add to existing Bash entry or create before catch-all
-	addHookToEvent(hooks, "PreToolUse", "Bash", preHook)
-	// PostToolUse: add to existing Bash entry or create at start
-	addHookToEvent(hooks, "PostToolUse", "Bash", postHook)
-
-	saveSettings(s)
-	Verbosef("wrote %s (Bash matcher for PreToolUse + PostToolUse, timeout 60s)", settingsPath())
-
-	// Create data directories
 	os.MkdirAll(filepath.Join(YolonotDir(), "sessions"), 0755)
 	os.MkdirAll(filepath.Join(YolonotDir(), "cache"), 0755)
 	Verbosef("ensured %s and %s",
 		filepath.Join(YolonotDir(), "sessions"),
 		filepath.Join(YolonotDir(), "cache"))
 
-	// Install skill
-	installSkill()
+	var skillPaths []string
+	for _, h := range targets {
+		path, err := h.InstallSkill()
+		if err != nil {
+			Verbosef("skill install for %s failed: %v", h.Name(), err)
+			continue
+		}
+		if path != "" {
+			skillPaths = append(skillPaths, path)
+		}
+	}
 
 	fmt.Println("yolonot installed.")
-	fmt.Printf("  Hook command → %s\n", bp)
+	fmt.Printf("  Hook command → %s hook\n", bp)
 	fmt.Printf("  Data dir     → %s\n", YolonotDir())
+	for _, h := range targets {
+		fmt.Printf("  Harness      → %s (%s)\n", h.Name(), h.SettingsPath())
+	}
+	for _, p := range skillPaths {
+		fmt.Printf("  Skill        → %s\n", p)
+	}
+
+	// Per-harness caveats: Gemini needs --yolo, Codex/OpenCode don't have
+	// an "ask" primitive, etc. Each adapter owns what it surfaces here.
+	for _, h := range targets {
+		notes := h.PostInstallNotes()
+		if len(notes) == 0 {
+			continue
+		}
+		fmt.Println()
+		fmt.Printf("Note (%s):\n", h.Name())
+		for _, n := range notes {
+			fmt.Printf("  • %s\n", n)
+		}
+	}
+
 	fmt.Println()
 	fmt.Println("Run 'yolonot init' to create rule files.")
 	fmt.Println("Run 'yolonot provider' to configure LLM.")
-	fmt.Println("Restart Claude Code to activate.")
-}
-
-func installSkill() {
-	home, _ := os.UserHomeDir()
-	skillDir := filepath.Join(home, ".claude", "skills", "yolonot")
-	skillDst := filepath.Join(skillDir, "SKILL.md")
-
-	os.MkdirAll(skillDir, 0755)
-	os.WriteFile(skillDst, embeddedSkillMD, 0644)
-	Verbosef("wrote SKILL.md to %s (%d bytes)", skillDst, len(embeddedSkillMD))
-	fmt.Printf("  Skill      → %s\n", skillDir)
-}
-
-func addHookToEvent(hooks map[string]interface{}, event, matcher string, hook map[string]interface{}) {
-	entries, _ := hooks[event].([]interface{})
-
-	// Try to add to existing entry with same matcher
-	for _, entry := range entries {
-		if e, ok := entry.(map[string]interface{}); ok {
-			if m, _ := e["matcher"].(string); m == matcher {
-				hs, _ := e["hooks"].([]interface{})
-				e["hooks"] = append(hs, hook)
-				return
-			}
-		}
-	}
-
-	// Insert before catch-all (.*) or append
-	newEntry := map[string]interface{}{
-		"matcher": matcher,
-		"hooks":   []interface{}{hook},
-	}
-	insertIdx := len(entries)
-	for i, entry := range entries {
-		if e, ok := entry.(map[string]interface{}); ok {
-			if m, _ := e["matcher"].(string); m == ".*" {
-				insertIdx = i
-				break
-			}
-		}
-	}
-	// Insert at position
-	entries = append(entries, nil)
-	copy(entries[insertIdx+1:], entries[insertIdx:])
-	entries[insertIdx] = newEntry
-	hooks[event] = entries
-}
-
-// removeHooks strips all yolonot hooks from settings.json, preserving other hooks.
-func removeHooks() {
-	s := loadSettings()
-	hooks, _ := s["hooks"].(map[string]interface{})
-
-	for _, event := range []string{"PreToolUse", "PostToolUse"} {
-		entries, _ := hooks[event].([]interface{})
-		var newEntries []interface{}
-		for _, entry := range entries {
-			if e, ok := entry.(map[string]interface{}); ok {
-				hs, _ := e["hooks"].([]interface{})
-				var remaining []interface{}
-				for _, h := range hs {
-					if hm, ok := h.(map[string]interface{}); ok {
-						if cmd, _ := hm["command"].(string); strings.Contains(cmd, "yolonot") {
-							continue
-						}
-					}
-					remaining = append(remaining, h)
-				}
-				if len(remaining) > 0 {
-					e["hooks"] = remaining
-					newEntries = append(newEntries, e)
-				}
-			}
-		}
-		hooks[event] = newEntries
-	}
-
-	saveSettings(s)
+	fmt.Println("Restart your AI coding CLI to activate.")
 }
 
 func cmdUninstall() {
-	if !IsInstalled() {
+	targets := resolveInstallTargets("uninstall")
+	if len(targets) == 0 {
 		fmt.Println("yolonot is not installed.")
 		return
 	}
 
-	Verbosef("stripping yolonot hooks from %s", settingsPath())
-	removeHooks()
+	for _, h := range targets {
+		if err := h.Uninstall(); err != nil {
+			fmt.Fprintf(os.Stderr, "uninstall failed for %s: %v\n", h.Name(), err)
+		}
+		if err := h.UninstallSkill(); err != nil {
+			Verbosef("skill uninstall for %s failed: %v", h.Name(), err)
+		}
+	}
 
-	// Remove skill
-	home, _ := os.UserHomeDir()
-	skillDir := filepath.Join(home, ".claude", "skills", "yolonot")
-	Verbosef("removing skill dir %s", skillDir)
-	os.RemoveAll(skillDir)
-
-	fmt.Println("yolonot uninstalled. Restart Claude Code to deactivate.")
+	fmt.Println("yolonot uninstalled. Restart your AI coding CLI to deactivate.")
 	fmt.Printf("Data preserved at %s — delete manually if wanted.\n", YolonotDir())
 }
 
@@ -897,7 +869,7 @@ func cmdRulesTrace() {
 }
 
 func cmdStatus() {
-	sessionID := os.Getenv("CLAUDE_SESSION_ID")
+	sessionID := GetSessionIDFromEnv()
 	if sessionID == "" {
 		sessionID = FindSessionID()
 	}
@@ -1355,42 +1327,111 @@ func cmdQuiet(args []string) {
 	}
 }
 
-func cmdThreshold(args []string) {
-	cfg := LoadConfig()
-
+// cmdRisk shows or updates the per-harness risk→action map.
+//
+//	yolonot risk                        → print merged map for active harness
+//	yolonot risk <harness>              → print merged map for a named harness
+//	yolonot risk <harness> <tier> <act> → override one cell
+//	yolonot risk <harness> reset        → drop all user overrides for harness
+//	yolonot risk <harness> reset <tier> → drop one user override
+//
+// Actions: allow, ask, deny, passthrough. Tiers: safe, low, moderate, high,
+// critical. Env vars (YOLONOT_<HARNESS>_RISK_<TIER>=<action>) override
+// both config and defaults at runtime; they are shown in the listing but
+// cannot be set via this command.
+func cmdRisk(args []string) {
 	if len(args) == 0 {
-		// Show current
-		if cfg.ConfidenceThreshold == 0 {
-			fmt.Println("Confidence threshold: disabled (all LLM allows pass through)")
-		} else {
-			fmt.Printf("Confidence threshold: %.0f%%\n", cfg.ConfidenceThreshold*100)
-			fmt.Println("Commands allowed below this confidence will be asked instead.")
+		h := ActiveHarness()
+		if h == nil {
+			fmt.Fprintln(os.Stderr, "No active harness detected.")
+			return
 		}
-		fmt.Println("\nUsage: yolonot threshold <0-100>")
-		fmt.Println("  0   = disabled (default)")
-		fmt.Println("  90  = only auto-allow when LLM is 90%+ confident")
-		fmt.Println("  95  = strict — auto-allow only very confident decisions")
+		printRiskMap(h)
 		return
 	}
 
-	// Parse value
-	var val float64
-	n, _ := fmt.Sscanf(args[0], "%f", &val)
-	if n != 1 {
-		fmt.Fprintln(os.Stderr, "Invalid value. Usage: yolonot threshold <0-100>")
-		return
-	}
-	if val < 0 || val > 100 {
-		fmt.Fprintln(os.Stderr, "Threshold must be between 0 and 100")
+	harnessName := args[0]
+	h := GetHarness(harnessName)
+	if h == nil {
+		fmt.Fprintf(os.Stderr, "Unknown harness %q. Known: ", harnessName)
+		names := []string{}
+		for _, hh := range Harnesses() {
+			names = append(names, hh.Name())
+		}
+		fmt.Fprintln(os.Stderr, strings.Join(names, ", "))
 		return
 	}
 
-	cfg.ConfidenceThreshold = val / 100.0
+	if len(args) == 1 {
+		printRiskMap(h)
+		return
+	}
+
+	if args[1] == "reset" {
+		cfg := LoadConfig()
+		if len(args) == 2 {
+			delete(cfg.RiskMaps, h.Name())
+			SaveConfig(cfg)
+			fmt.Printf("Reset all risk overrides for %s.\n", h.Name())
+			return
+		}
+		tier := args[2]
+		if cfg.RiskMaps != nil {
+			delete(cfg.RiskMaps[h.Name()], tier)
+			if len(cfg.RiskMaps[h.Name()]) == 0 {
+				delete(cfg.RiskMaps, h.Name())
+			}
+		}
+		SaveConfig(cfg)
+		fmt.Printf("Reset %s/%s to default.\n", h.Name(), tier)
+		return
+	}
+
+	if len(args) < 3 {
+		fmt.Fprintln(os.Stderr, "Usage: yolonot risk <harness> <tier> <action>")
+		return
+	}
+	tier, action := args[1], args[2]
+	if !isValidRisk(tier) {
+		fmt.Fprintf(os.Stderr, "Invalid tier %q. Valid: %s\n", tier, strings.Join(allRiskTiers, ", "))
+		return
+	}
+	if !isValidAction(action) {
+		fmt.Fprintf(os.Stderr, "Invalid action %q. Valid: allow, ask, deny, passthrough\n", action)
+		return
+	}
+	cfg := LoadConfig()
+	if cfg.RiskMaps == nil {
+		cfg.RiskMaps = map[string]map[string]string{}
+	}
+	if cfg.RiskMaps[h.Name()] == nil {
+		cfg.RiskMaps[h.Name()] = map[string]string{}
+	}
+	cfg.RiskMaps[h.Name()][tier] = action
 	SaveConfig(cfg)
+	fmt.Printf("%s/%s → %s\n", h.Name(), tier, action)
+}
 
-	if val == 0 {
-		fmt.Println("Confidence threshold disabled.")
-	} else {
-		fmt.Printf("Confidence threshold set to %.0f%%.\n", val)
+func printRiskMap(h Harness) {
+	defaults := h.RiskMap()
+	effective := ResolveRiskMap(h)
+	cfg := LoadConfig()
+	overrides := cfg.RiskMaps[h.Name()]
+	fmt.Printf("Risk map for harness %q:\n", h.Name())
+	fmt.Printf("  %-9s  %-12s  %s\n", "tier", "action", "source")
+	for _, tier := range allRiskTiers {
+		source := "default"
+		if _, ok := overrides[tier]; ok {
+			source = "config"
+		}
+		envKey := "YOLONOT_" + strings.ToUpper(h.Name()) + "_RISK_" + strings.ToUpper(tier)
+		if os.Getenv(envKey) != "" {
+			source = "env " + envKey
+		}
+		action := effective[tier]
+		if source == "default" {
+			action = defaults[tier]
+		}
+		fmt.Printf("  %-9s  %-12s  %s\n", tier, action, source)
 	}
 }
