@@ -374,6 +374,16 @@ func cmdHook() {
 			return
 		}
 		if ContainsLine(projSessionID, "asked", command) && !ContainsLine(projSessionID, "approved", command) {
+			// Before inferring rejection, check if the command was approved
+			// as a wrapped variant (e.g. rtk rewrote `curl X` → `rtk curl X`
+			// between our ask and actual execution). Record the plain form
+			// so future checks are an exact match.
+			if ApprovedAsWrappedVariant(projSessionID, command) {
+				AppendLine(projSessionID, "approved", command)
+				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "wrapped_variant"})
+				emitHook(hookResponse("allow", "session", "previously approved as wrapped command this session", command))
+				return
+			}
 			AppendLine(projSessionID, "denied", command)
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "asked_not_approved"})
 			emitHook(hookResponse("deny", "session_deny", "previously rejected this session", command))

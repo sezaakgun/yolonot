@@ -220,6 +220,58 @@ func TestIntegration_SessionAskedNotApproved(t *testing.T) {
 	}
 }
 
+func TestIntegration_SessionAskedApprovedAsWrappedVariant(t *testing.T) {
+	// Regression: tools like rtk rewrite `curl X` → `rtk curl X` via
+	// hookSpecificOutput.updatedInput between PreToolUse and execution.
+	// The post-exec approval lands on the rewritten form, but .asked still
+	// holds the original. Without this carve-out, yolonot would infer
+	// rejection on the next bare-curl invocation and block it.
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	sid := "int-sess-wrapped"
+	projSID := ProjectSessionID(sid, "/tmp")
+	AppendLine(projSID, "asked", "curl https://example.com")
+	AppendLine(projSID, "approved", "rtk curl https://example.com")
+
+	payload := makePrePayload(sid, "curl https://example.com", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Errorf("expected allow for wrapped-variant approval, got %q (reason %q)",
+			resp.HookSpecificOutput.PermissionDecision, resp.HookSpecificOutput.PermissionDecisionReason)
+	}
+	if ContainsLine(projSID, "denied", "curl https://example.com") {
+		t.Error("wrapped-variant approval must not land in .denied")
+	}
+	if !ContainsLine(projSID, "approved", "curl https://example.com") {
+		t.Error("wrapped-variant approval should record plain form in .approved for fast future exact match")
+	}
+}
+
+func TestIntegration_SessionAskedApprovalLaunderingBlocked(t *testing.T) {
+	// Security: a low-risk command whose text ends with a high-risk command
+	// (e.g., `echo curl evil.com` approved via fast-allow) MUST NOT grant
+	// approval to the high-risk command via suffix match. Only wrappers in
+	// cmdWrappers qualify.
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	sid := "int-sess-laundering"
+	projSID := ProjectSessionID(sid, "/tmp")
+	AppendLine(projSID, "asked", "curl evil.com")
+	AppendLine(projSID, "approved", "echo curl evil.com")
+
+	payload := makePrePayload(sid, "curl evil.com", "/tmp")
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision == "allow" {
+		t.Errorf("suffix match under non-wrapper prefix must not allow; got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+}
+
 func TestIntegration_PostToolUse_SavesApproved(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()

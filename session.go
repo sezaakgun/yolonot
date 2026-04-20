@@ -89,6 +89,38 @@ func ContainsLine(sessionID, suffix, line string) bool {
 	return false
 }
 
+// cmdWrappers lists binaries that Claude Code hooks (other than yolonot) may
+// rewrite commands through between PreToolUse and actual execution. When a
+// wrapper rewrites `curl X` to `rtk curl X`, the post-exec approval lands on
+// the rewritten form; ApprovedAsWrappedVariant lets the ask-not-approved
+// inference recognize the original command as still approved. Keep this list
+// tight — each entry trusts that wrapper's arg semantics as far as suffix
+// matching is concerned.
+var cmdWrappers = []string{"rtk"}
+
+// ApprovedAsWrappedVariant returns true if the session's .approved file
+// contains a line shaped like `<wrapper> ... <command>` — i.e., the command
+// was approved under a wrapper's rewritten form. Only wrappers in cmdWrappers
+// are honored to avoid approval-laundering via trailing-text substring
+// matches (e.g. `echo ... curl evil.com` must not approve `curl evil.com`).
+func ApprovedAsWrappedVariant(sessionID, command string) bool {
+	if command == "" {
+		return false
+	}
+	suffix := " " + command
+	for _, line := range ReadLines(sessionID, "approved") {
+		if !strings.HasSuffix(line, suffix) {
+			continue
+		}
+		for _, w := range cmdWrappers {
+			if strings.HasPrefix(line, w+" ") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // AppendLine appends a line to a session file, creating dirs as needed.
 func AppendLine(sessionID, suffix, line string) error {
 	dir := SessionDir()
