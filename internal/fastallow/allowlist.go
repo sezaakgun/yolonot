@@ -1,5 +1,7 @@
 package fastallow
 
+import "strings"
+
 // Static allowlists used by IsLocallySafe.
 //
 // Ported 1-to-1 from Dippy's SIMPLE_SAFE / WRAPPER_COMMANDS
@@ -96,10 +98,15 @@ var safeCommands = map[string]struct{}{
 
 // wrapperCommands are transparent wrappers. When encountered as the head,
 // we skip past numeric/flag args and recurse into the inner command.
-// Ported from Dippy's WRAPPER_COMMANDS. Note: "command" is both a wrapper
-// AND in safeCommands — the wrapper logic takes precedence when it has
-// arguments that reference another binary. `command -v foo` is always
-// allowed as a special case.
+// Ported from Dippy's WRAPPER_COMMANDS (plus `rtk`, the Rust Token Killer
+// proxy, which rewrites commands 1:1 for token accounting). Note:
+// "command" is both a wrapper AND in safeCommands — the wrapper logic
+// takes precedence when it has arguments that reference another binary.
+// `command -v foo` is always allowed as a special case.
+//
+// Extended at runtime by AddWrappers — yolonot surfaces Config.Wrappers so
+// users can register bespoke wrappers (`myproxy`, corporate CI shims, etc.)
+// without patching the source. Additions are idempotent.
 var wrapperCommands = map[string]struct{}{
 	"time":    {},
 	"timeout": {},
@@ -109,6 +116,33 @@ var wrapperCommands = map[string]struct{}{
 	"ltrace":  {},
 	"command": {},
 	"builtin": {},
+	"rtk":     {},
+}
+
+// AddWrappers registers extra transparent wrappers at runtime. Idempotent —
+// re-adding an existing wrapper is a no-op. Intended to be called from the
+// yolonot entrypoint after LoadConfig so user-defined wrappers in
+// Config.Wrappers become eligible for fast_allow unwrapping. Names that
+// are already in the default set are silently absorbed.
+func AddWrappers(names ...string) {
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		wrapperCommands[n] = struct{}{}
+	}
+}
+
+// Wrappers returns a snapshot of the currently registered wrappers. Used
+// by the yolonot session layer so wrapper-aware approval lookups stay in
+// lockstep with fast_allow's view.
+func Wrappers() []string {
+	out := make([]string, 0, len(wrapperCommands))
+	for n := range wrapperCommands {
+		out = append(out, n)
+	}
+	return out
 }
 
 // subcommandReadOnly gates multiplex commands (head `go`, second arg is

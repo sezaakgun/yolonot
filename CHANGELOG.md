@@ -5,6 +5,27 @@ All notable changes to yolonot are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] — 2026-04-21
+
+### Added
+
+- **Unified wrapper list across fast_allow + session.** Transparent command
+  wrappers (`rtk`, `time`, `timeout`, `nice`, `nohup`, `strace`, `ltrace`,
+  `command`, `builtin`) now live in a single source of truth
+  (`fastallow.Wrappers()`). Users can extend the list via a new
+  `"wrappers": [...]` field in `~/.yolonot/config.json` — additive, never
+  replacing defaults. `rtk` moved into the default fast_allow wrapper set
+  so `rtk ls` unwraps to `ls` and hits the fast-allow path instead of
+  falling through to the LLM.
+- **Symmetric session wrapper matching.** New
+  `MatchesLineOrWrappedVariant` replaces the backward-only
+  `ApprovedAsWrappedVariant`. Session `approved` / `denied` lookups now
+  recognise wrapper equivalence in both directions: `rtk ls` ↔ `ls`,
+  `nohup curl X` ↔ `curl X`. Approval laundering via non-wrapper prefixes
+  (`echo curl evil.com`) is still rejected — only heads in the wrapper
+  list qualify. On a wrapped-variant match, the current command form is
+  recorded so the next invocation hits the fast exact-match path.
+
 ## [0.11.1] — 2026-04-21
 
 ### Fixed

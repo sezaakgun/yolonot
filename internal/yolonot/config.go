@@ -32,6 +32,7 @@ type Config struct {
 	PreCheck     PreCheckList                 `json:"pre_check,omitempty"`     // optional pre-checkers run before yolonot's pipeline; "fast-allow" is a reserved sentinel for the built-in Go bash parser, others are external hook binaries (e.g. /opt/homebrew/bin/dippy). First "allow" wins.
 	QuietOnAllow bool                         `json:"quiet_on_allow,omitempty"` // when true, allow decisions emit no systemMessage — only ask/deny show a banner
 	LocalAllow   bool                         `json:"local_allow,omitempty"`   // DEPRECATED: migrated on load into PreCheck as "fast-allow". Kept for backward-compat read only.
+	Wrappers     []string                     `json:"wrappers,omitempty"`       // user-defined transparent command wrappers (e.g. ["mycli","corp-shim"]). Extend the built-in set (time/timeout/nice/nohup/strace/ltrace/command/builtin/rtk) — never replace it. Applied to both fast_allow unwrapping and session-approval cross-form lookup.
 }
 
 // FastAllowSentinel is the reserved entry in Config.PreCheck that dispatches

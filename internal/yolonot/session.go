@@ -8,8 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sezaakgun/yolonot/internal/fastallow"
 )
 
 // ProjectSessionID returns a session key scoped to the project directory.
@@ -89,36 +92,113 @@ func ContainsLine(sessionID, suffix, line string) bool {
 	return false
 }
 
-// cmdWrappers lists binaries that Claude Code hooks (other than yolonot) may
-// rewrite commands through between PreToolUse and actual execution. When a
-// wrapper rewrites `curl X` to `rtk curl X`, the post-exec approval lands on
-// the rewritten form; ApprovedAsWrappedVariant lets the ask-not-approved
-// inference recognize the original command as still approved. Keep this list
-// tight — each entry trusts that wrapper's arg semantics as far as suffix
-// matching is concerned.
-var cmdWrappers = []string{"rtk"}
+// SessionWrappers returns the current list of recognized transparent
+// command wrappers — the single source of truth shared with fast_allow.
+// Reads from fastallow.Wrappers (which starts with the Dippy-derived
+// defaults plus rtk and is extended at hook startup by
+// fastallow.AddWrappers(Config.Wrappers...)). Keeping one list means a
+// user-registered wrapper is honoured by both fast_allow unwrapping AND
+// session-approval cross-form lookup, without two parallel configs.
+func SessionWrappers() []string {
+	return fastallow.Wrappers()
+}
 
-// ApprovedAsWrappedVariant returns true if the session's .approved file
-// contains a line shaped like `<wrapper> ... <command>` — i.e., the command
-// was approved under a wrapper's rewritten form. Only wrappers in cmdWrappers
-// are honored to avoid approval-laundering via trailing-text substring
-// matches (e.g. `echo ... curl evil.com` must not approve `curl evil.com`).
-func ApprovedAsWrappedVariant(sessionID, command string) bool {
+// UnwrapCommand strips a known wrapper prefix off a command string and
+// returns the inner command. Returns empty if the head is not a recognized
+// wrapper or if there is no inner command left. Skips numeric args (for
+// `timeout 30 ls` → `ls`) and flag tokens (for `nice -n 5 ls` → `ls`).
+// A bare `--` terminates flag skipping and the rest is taken literally.
+// Shell tokenisation is naive (whitespace split) — good enough for the
+// wrapped-variant heuristic, which only cares about the head/inner shape.
+func UnwrapCommand(command string, wrappers []string) string {
+	toks := strings.Fields(command)
+	if len(toks) < 2 {
+		return ""
+	}
+	head := toks[0]
+	known := false
+	for _, w := range wrappers {
+		if w == head {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return ""
+	}
+	rest := toks[1:]
+	for len(rest) > 0 {
+		t := rest[0]
+		if t == "--" {
+			rest = rest[1:]
+			break
+		}
+		if strings.HasPrefix(t, "-") {
+			rest = rest[1:]
+			continue
+		}
+		if _, err := strconv.ParseFloat(t, 64); err == nil {
+			rest = rest[1:]
+			continue
+		}
+		break
+	}
+	if len(rest) == 0 {
+		return ""
+	}
+	return strings.Join(rest, " ")
+}
+
+// MatchesLineOrWrappedVariant returns true when `command` matches a line
+// in the session file, considering wrapper equivalence in both directions:
+//
+//  1. Exact match.
+//  2. Forward unwrap: `command` is wrapped (e.g. `rtk ls`), strip the
+//     wrapper and look up the inner form (`ls`).
+//  3. Backward wrap: `command` is plain (e.g. `curl x`), and the stored
+//     line is a wrapped variant whose unwrapped form equals `command`.
+//
+// Only wrappers in SessionWrappers() are honoured, bounding the trust
+// boundary — untrusted text ending in " curl evil.com" cannot launder an
+// approval because the head won't be in the wrapper list.
+//
+// Replaces the older ApprovedAsWrappedVariant (backward-only). The
+// symmetric version closes the gap where a user approves `ls` plain and
+// the agent subsequently runs `rtk ls` — previously missed by exact
+// match, now matches via forward unwrap.
+func MatchesLineOrWrappedVariant(sessionID, suffix, command string) bool {
 	if command == "" {
 		return false
 	}
-	suffix := " " + command
-	for _, line := range ReadLines(sessionID, "approved") {
-		if !strings.HasSuffix(line, suffix) {
+	if ContainsLine(sessionID, suffix, command) {
+		return true
+	}
+	wrappers := SessionWrappers()
+	if inner := UnwrapCommand(command, wrappers); inner != "" {
+		if ContainsLine(sessionID, suffix, inner) {
+			return true
+		}
+	}
+	suffixMatch := " " + command
+	for _, line := range ReadLines(sessionID, suffix) {
+		if !strings.HasSuffix(line, suffixMatch) {
 			continue
 		}
-		for _, w := range cmdWrappers {
+		for _, w := range wrappers {
 			if strings.HasPrefix(line, w+" ") {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// ApprovedAsWrappedVariant is the legacy backward-only lookup. Kept as a
+// thin shim over MatchesLineOrWrappedVariant so existing call sites in
+// hook.go and tests keep compiling, but new code should call the symmetric
+// helper directly.
+func ApprovedAsWrappedVariant(sessionID, command string) bool {
+	return MatchesLineOrWrappedVariant(sessionID, "approved", command)
 }
 
 // AppendLine appends a line to a session file, creating dirs as needed.

@@ -306,6 +306,9 @@ func cmdHook() {
 	// hook invocation.
 	config := LoadConfig()
 	quietOnAllow = config.QuietOnAllow
+	// Register user-defined wrappers (Config.Wrappers) with fast_allow so
+	// `mycli ls` unwraps to `ls`. Idempotent — safe to call every hook.
+	fastallow.AddWrappers(config.Wrappers...)
 
 	// User rules reflect the user's *current* intent, so they take priority
 	// over session memory — with one deliberate exception:
@@ -358,19 +361,31 @@ func cmdHook() {
 		return
 	}
 
-	// Step 0.5: Session exact match → allow. Placed here (before ask rule)
-	// so a prior approval bypasses a newly-added ask-cmd.
-	if sessionID != "" && ContainsLine(projSessionID, "approved", command) {
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "exact_match"})
+	// Step 0.5: Session match → allow. Wrapper-aware lookup: matches if
+	// `command` was previously approved exactly, OR is a wrapped variant of
+	// an approved plain command (`rtk ls` against approved `ls`), OR is the
+	// plain form of an approved wrapped command (`ls` against approved
+	// `rtk ls`). See MatchesLineOrWrappedVariant + SessionWrappers. When
+	// the match lands via wrapper equivalence we also record the current
+	// form so the next invocation hits the fast exact-match path.
+	if sessionID != "" && MatchesLineOrWrappedVariant(projSessionID, "approved", command) {
+		source := "exact_match"
+		if !ContainsLine(projSessionID, "approved", command) {
+			AppendLine(projSessionID, "approved", command)
+			source = "wrapped_variant"
+		}
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: source})
 		emitHook(hookResponse("allow", "session", "previously approved this session", command))
 		return
 	}
 
 	// Step 0.55: Session deny. If the user previously rejected this exact
-	// command (or was asked about it and didn't approve), honor that before
-	// falling into an ask-rule that would just re-prompt forever.
+	// command (or a wrapped variant), honor that before falling into an
+	// ask-rule that would just re-prompt forever. Symmetric wrapper lookup
+	// keeps `rtk curl evil` denied when plain `curl evil` was denied, and
+	// vice versa.
 	if sessionID != "" {
-		if ContainsLine(projSessionID, "denied", command) {
+		if MatchesLineOrWrappedVariant(projSessionID, "denied", command) {
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "previously_rejected"})
 			emitHook(hookResponse("deny", "session_deny", "previously rejected this session", command))
 			return

@@ -42,7 +42,9 @@ func cmdCheck(command string) {
 	// External binaries are NOT invoked during `yolonot check` — they may
 	// have side effects. But the fast-allow sentinel is pure and cheap, so
 	// we DO evaluate it inline and show the actual verdict.
-	if preChecks := LoadConfig().PreCheck; len(preChecks) > 0 {
+	checkCfg := LoadConfig()
+	fastallow.AddWrappers(checkCfg.Wrappers...)
+	if preChecks := checkCfg.PreCheck; len(preChecks) > 0 {
 		fmt.Printf("  [%d] Pre-check hooks: %d configured\n", step, len(preChecks))
 		fastAllowHit := false
 		for _, pc := range preChecks {
