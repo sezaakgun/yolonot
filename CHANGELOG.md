@@ -5,6 +5,19 @@ All notable changes to yolonot are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] — 2026-04-21
+
+### Fixed
+
+- **Cache GitHub latest-release lookup.** `checkForUpdate` (invoked on
+  every bare `yolonot` status display) now caches the result at
+  `~/.yolonot/update_check.json` with a 24h TTL. Without the cache, a user
+  running the CLI more than 60 times per hour exhausts GitHub's
+  unauthenticated rate limit and sees "GitHub API rate-limited this IP"
+  on every invocation. Network/rate-limit errors cache an empty version
+  so we back off for the full TTL instead of re-hammering the API.
+  `yolonot upgrade` still bypasses the cache for explicit checks.
+
 ## [0.11.0] — 2026-04-21
 
 ### Added
