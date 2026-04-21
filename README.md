@@ -6,7 +6,7 @@
 
 <p align="center">
   Smart auto-mode for AI coding assistants. The safe alternative to <code>--dangerously-skip-permissions</code>.<br>
-  Built for Claude Code. Also works with Codex CLI, OpenCode, and Gemini CLI.
+  Built for Claude Code. Also works with Codex CLI, OpenCode, Gemini CLI, and Cursor.
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 
 yolonot sits between your AI coding assistant and your shell. It uses an LLM to classify every Bash command as **safe** (allow) or **needs-review** (ask), with session memory so approved commands don't ask twice and rejected commands stay blocked. Deny rules give you absolute blocks nothing can override.
 
-> **Claude Code first.** yolonot was designed for Claude Code and that's where it gets the richest UX (full allow/ask/deny). Codex CLI, OpenCode, and Gemini CLI adapters ship in-tree but have upstream hook-API limitations — see [docs/harnesses.md](docs/harnesses.md) for each host's caveats.
+> **Claude Code first.** yolonot was designed for Claude Code and that's where it gets the richest UX (full allow/ask/deny). Cursor, Codex CLI, OpenCode, and Gemini CLI adapters ship in-tree but have upstream hook-API limitations — see [docs/harnesses.md](docs/harnesses.md) for each host's caveats.
 
 > **⚠ LLMs are not deterministic.** yolonot's classifier is a probabilistic safety net, not a guarantee. Models hallucinate, miss context, and can be tricked by adversarial prompts. Use yolonot at your discretion: keep your own judgment in the loop, write **deny rules** for anything you truly never want run (rules beat the LLM, always), and don't treat it as a substitute for reviewing what your AI assistant is doing. If yolonot allows a destructive command, **you** are still the one who installed it on your machine.
 

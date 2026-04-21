@@ -5,6 +5,23 @@ All notable changes to yolonot are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-04-21
+
+### Added
+
+- **Cursor adapter.** New harness adapter for Cursor / `cursor-agent` CLI
+  (Cursor 1.7+). Installs into `~/.cursor/hooks.json` under
+  `beforeShellExecution` / `afterShellExecution`. Install with
+  `yolonot install --harness cursor` or via `yolonot install --all`. The
+  same `hooks.json` governs the `cursor-agent` CLI, so no separate install.
+  Session id arrives on stdin as `conversation_id`; override with
+  `YOLONOT_CURSOR_SESSION_ID` for shell CLI commands.
+  **Caveat:** Cursor's schema accepts `ask` but does not enforce it (no TUI
+  prompt fires and the hook is re-invoked before the user can respond).
+  yolonot treats Cursor as deny-only, same class as Codex/OpenCode —
+  moderate-risk commands passthrough to Cursor's own permission UI;
+  high/critical escalate to deny. Tune via `yolonot risk cursor`.
+
 ## [0.10.0] — 2026-04-20
 
 ### Security — classifier-bypass fixes (SECURITY)

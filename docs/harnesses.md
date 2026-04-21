@@ -5,6 +5,7 @@ yolonot was built for Claude Code but also ships adapters for other bash-capable
 | Harness | `ask` prompt support | Notes |
 |---------|----------------------|-------|
 | **Claude Code** (default) | full 3-state (allow/ask/deny) | Native hook protocol. |
+| **Cursor** | deny only | Schema accepts `ask` but Cursor does not enforce it — no TUI prompt, and asked-not-approved pins the command as session_deny. Moderate-risk commands fall through to Cursor's own permission UI; high/critical still hard-deny. Same hooks.json covers the `cursor-agent` CLI. |
 | **Codex CLI** | deny only | Upstream hook API has no user-prompt primitive. Moderate-risk commands fall through to Codex's own permission engine (yolonot goes transparent); high/critical still hard-deny. |
 | **OpenCode** | deny only | Plugin hook `tool.execute.before` is throw-to-block or return-to-allow. yolonot maps moderate-risk to allow since empty stdout is treated as allow; high/critical still hard-deny. |
 | **Gemini CLI** | full 3-state — **with caveat** (see below) | Needs `--yolo` for `allow` to take effect. |
@@ -16,6 +17,7 @@ yolonot install --harness claude      # Claude Code only
 yolonot install --harness codex       # Codex CLI only
 yolonot install --harness opencode    # OpenCode only
 yolonot install --harness gemini      # Gemini CLI only
+yolonot install --harness cursor      # Cursor only
 yolonot install --all                 # every registered adapter
 ```
 
@@ -34,6 +36,7 @@ YOLONOT_HARNESS=claude claude
 YOLONOT_HARNESS=codex codex
 YOLONOT_HARNESS=opencode opencode
 YOLONOT_HARNESS=gemini gemini --yolo
+YOLONOT_HARNESS=cursor cursor-agent
 ```
 
 Resolution order:
@@ -74,3 +77,23 @@ Or persist it in `~/.gemini/settings.json`:
 ```
 
 **Without `--yolo`, yolonot still runs as an extra security layer** — `ask` and `deny` decisions are fully honored, so yolonot can force prompts and hard-block dangerous commands that Gemini would otherwise run without asking. It just can't suppress Gemini's own prompts for commands it auto-allows.
+
+## Cursor
+
+Cursor (1.7+) installs into `~/.cursor/hooks.json` under `beforeShellExecution` / `afterShellExecution`. The same file is read by the `cursor-agent` CLI, so no separate install step.
+
+Cursor's hook schema documents three decisions (`allow`/`ask`/`deny`) but only `deny` is enforced today ("ask is accepted by the schema but not enforced" per Cursor's docs). Live testing confirmed Cursor does not surface a TUI prompt on `ask`, and the hook is re-invoked before the user can respond — which pins the command as `session_deny` via yolonot's asked-not-approved heuristic. We therefore treat Cursor as **deny-only**, same class as Codex / OpenCode:
+
+- `allow` — empty stdout, command runs.
+- `ask` — empty stdout (passthrough). Cursor's own permission UI decides. Tune with the [risk map](risk-tiers.md).
+- `deny` — flat `{"permission":"deny","user_message":…,"agent_message":…}`. Banner shown to both user and agent so the model can self-correct.
+
+```bash
+yolonot risk cursor                    # show current map
+yolonot risk cursor moderate deny      # turn moderate into hard deny
+yolonot risk cursor moderate passthrough   # let Cursor's own permission engine decide (default)
+```
+
+Restart Cursor (or start a new chat) after `yolonot install --harness cursor` so the agent re-reads the file.
+
+Session id arrives on stdin as `conversation_id`. Cursor does not export a session env var, so set `YOLONOT_CURSOR_SESSION_ID` if you need CLI commands (`yolonot pause`, `status`, etc.) to target a specific Cursor session from a shell.
