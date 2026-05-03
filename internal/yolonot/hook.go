@@ -531,27 +531,22 @@ func cmdHook() {
 	text, err := CallLLM(cfg, SystemPrompt, userPrompt, 4096)
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
-		// LLM unavailable → transparent passthrough. Route through the
-		// active adapter so Codex/Gemini see their native wire shape
-		// (empty stdout = host-decides), not Claude's nested envelope.
-		// Claude still gets a user-visible systemMessage banner because
-		// its adapter preserves it; non-Claude adapters return empty for
-		// a decisionless response (see harness_codex.go / harness_gemini.go
-		// FormatHookResponse).
+		// LLM unavailable → silent passthrough on every adapter. A
+		// bare HookResponse{} marshals to an envelope with empty
+		// hookEventName/permissionDecision strings, which Claude Code
+		// rejects as schema-invalid ("(root): Invalid input"). Emit
+		// nothing instead so the host's native permission engine
+		// decides. Diagnostic preserved on disk via LogDecision.
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "LLM unavailable: " + err.Error(), DurationMs: ms})
-		r := HookResponse{}
-		r.SystemMessage = "yolonot: 🧑‍🚀 LLM unreachable, falling back to host permissions"
-		emitHook(activeHarnessFormat(r))
+		emitHook("")
 		return
 	}
 
 	d := ParseDecision(text)
 	if d == nil {
-		// Parse error → same transparent fallback as LLM-unreachable.
+		// Parse error → same silent passthrough as LLM-unreachable.
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "parse error", DurationMs: ms})
-		r := HookResponse{}
-		r.SystemMessage = "yolonot: 🧑‍🚀 LLM response parse error, falling back to host permissions"
-		emitHook(activeHarnessFormat(r))
+		emitHook("")
 		return
 	}
 

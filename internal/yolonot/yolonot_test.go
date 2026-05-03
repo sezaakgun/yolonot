@@ -2710,20 +2710,10 @@ func TestCmdHookLLMUnavailable(t *testing.T) {
 	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-test-3","cwd":"%s","tool_input":{"command":"some-unknown-cmd"}}`, projectDir)
 	out := runHookWithPayload(t, payload)
 
-	// LLM unavailable → systemMessage warning, no permissionDecision
-	out = strings.TrimSpace(out)
-	if out == "" {
-		t.Fatal("LLM unavailable should emit systemMessage, got empty output")
-	}
-	var r HookResponse
-	if err := json.Unmarshal([]byte(out), &r); err != nil {
-		t.Fatalf("invalid JSON output: %v", err)
-	}
-	if !strings.Contains(r.SystemMessage, "LLM unreachable") {
-		t.Errorf("systemMessage should contain 'LLM unreachable', got: %s", r.SystemMessage)
-	}
-	if r.HookSpecificOutput.PermissionDecision != "" {
-		t.Errorf("should have no permissionDecision, got: %s", r.HookSpecificOutput.PermissionDecision)
+	// LLM unavailable → silent passthrough (empty stdout). Claude Code
+	// rejects bare envelopes with empty enums; defer to host permissions.
+	if trimmed := strings.TrimSpace(out); trimmed != "" {
+		t.Errorf("LLM unavailable should emit empty stdout, got: %s", trimmed)
 	}
 }
 
@@ -2752,20 +2742,9 @@ func TestCmdHookLLMParseError(t *testing.T) {
 	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-test-4","cwd":"%s","tool_input":{"command":"ambiguous-cmd"}}`, projectDir)
 	out := runHookWithPayload(t, payload)
 
-	// Parse error → systemMessage warning, no permissionDecision
-	out = strings.TrimSpace(out)
-	if out == "" {
-		t.Fatal("parse error should emit systemMessage, got empty output")
-	}
-	var r HookResponse
-	if err := json.Unmarshal([]byte(out), &r); err != nil {
-		t.Fatalf("invalid JSON output: %v", err)
-	}
-	if !strings.Contains(r.SystemMessage, "parse error") {
-		t.Errorf("systemMessage should contain 'parse error', got: %s", r.SystemMessage)
-	}
-	if r.HookSpecificOutput.PermissionDecision != "" {
-		t.Errorf("should have no permissionDecision, got: %s", r.HookSpecificOutput.PermissionDecision)
+	// Parse error → silent passthrough (empty stdout).
+	if trimmed := strings.TrimSpace(out); trimmed != "" {
+		t.Errorf("parse error should emit empty stdout, got: %s", trimmed)
 	}
 }
 
@@ -2803,19 +2782,11 @@ func TestCmdHookLLMDownRulesStillWork(t *testing.T) {
 		t.Errorf("allow rule should still work when LLM is down, got: %s", out)
 	}
 
-	// Unknown command with no rule → systemMessage warning (LLM would decide but it's down)
+	// Unknown command with no rule and LLM down → silent passthrough.
 	payload = fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-down-3","cwd":"%s","tool_input":{"command":"some-unknown-cmd"}}`, projectDir)
 	out = strings.TrimSpace(runHookWithPayload(t, payload))
-	if out == "" {
-		t.Errorf("unknown cmd with LLM down should emit systemMessage, got empty")
-	} else {
-		var r HookResponse
-		if err := json.Unmarshal([]byte(out), &r); err != nil {
-			t.Fatalf("invalid JSON: %v", err)
-		}
-		if !strings.Contains(r.SystemMessage, "LLM unreachable") {
-			t.Errorf("systemMessage should contain 'LLM unreachable', got: %s", r.SystemMessage)
-		}
+	if out != "" {
+		t.Errorf("unknown cmd with LLM down should emit empty stdout, got: %s", out)
 	}
 }
 
@@ -3234,19 +3205,9 @@ func TestCmdHookLLMTimeout(t *testing.T) {
 	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-timeout","cwd":"%s","tool_input":{"command":"some-slow-cmd"}}`, projectDir)
 	out := strings.TrimSpace(runHookWithPayload(t, payload))
 
-	// Timeout -> systemMessage warning, no permissionDecision
-	if out == "" {
-		t.Fatal("LLM timeout should emit systemMessage, got empty output")
-	}
-	var r HookResponse
-	if err := json.Unmarshal([]byte(out), &r); err != nil {
-		t.Fatalf("invalid JSON output: %v", err)
-	}
-	if !strings.Contains(r.SystemMessage, "LLM unreachable") {
-		t.Errorf("systemMessage should contain 'LLM unreachable', got: %s", r.SystemMessage)
-	}
-	if r.HookSpecificOutput.PermissionDecision != "" {
-		t.Errorf("should have no permissionDecision, got: %s", r.HookSpecificOutput.PermissionDecision)
+	// Timeout -> silent passthrough (empty stdout).
+	if out != "" {
+		t.Errorf("LLM timeout should emit empty stdout, got: %s", out)
 	}
 }
 
