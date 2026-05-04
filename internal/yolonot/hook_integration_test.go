@@ -385,20 +385,68 @@ func TestIntegration_LLM_Unavailable(t *testing.T) {
 	payload := makePrePayload("int-llm-unavail", "some-unknown-command --flag", cleanDir)
 	out := runHookWithStruct(t, payload)
 
-	// LLM error => no permissionDecision, systemMessage with fallback notice
-	trimmed := strings.TrimSpace(out)
-	if trimmed == "" {
-		t.Fatal("expected JSON response with systemMessage, got empty output")
-	}
+	// LLM error => decisionless envelope with hookEventName populated
+	// from payload + a systemMessage banner. Schema-valid for CC
+	// (hookEventName literal match, permissionDecision omitted via
+	// omitempty so host permissions decide).
 	var resp HookResponse
-	if err := json.Unmarshal([]byte(trimmed), &resp); err != nil {
-		t.Fatalf("failed to parse hook response JSON: %v", err)
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &resp); err != nil {
+		t.Fatalf("expected JSON envelope on LLM failure, got %q (err: %v)", out, err)
+	}
+	if resp.HookSpecificOutput.HookEventName != "PreToolUse" {
+		t.Errorf("hookEventName: got %q, want PreToolUse", resp.HookSpecificOutput.HookEventName)
 	}
 	if resp.HookSpecificOutput.PermissionDecision != "" {
-		t.Errorf("expected no permissionDecision on LLM failure, got %q", resp.HookSpecificOutput.PermissionDecision)
+		t.Errorf("permissionDecision should be empty on LLM failure, got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
 	if !strings.Contains(resp.SystemMessage, "LLM unreachable") {
-		t.Errorf("expected systemMessage to contain 'LLM unreachable', got %q", resp.SystemMessage)
+		t.Errorf("systemMessage should mention LLM unreachable, got %q", resp.SystemMessage)
+	}
+	if strings.Contains(out, `"permissionDecision":""`) {
+		t.Errorf("marshalled JSON must omit empty permissionDecision (Zod enum rejects \"\"), got %q", out)
+	}
+}
+
+func TestIntegration_LLM_ParseError(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	// Mock server returns HTTP 200 with malformed JSON body — CallLLM
+	// succeeds but ParseDecision returns nil.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"content":"this is not a decision json"}}]}`))
+	}))
+	defer srv.Close()
+
+	writeGlobalRules(t, home, "# no rules\n")
+	cfg := Config{Provider: ProviderConfig{URL: srv.URL, Model: "test-model", Timeout: 5}}
+	SaveConfig(cfg)
+
+	cleanDir := filepath.Join(home, "cleanproject")
+	os.MkdirAll(cleanDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(cleanDir)
+	defer os.Chdir(origCwd)
+
+	payload := makePrePayload("int-llm-parse", "some-unknown-command --flag", cleanDir)
+	out := runHookWithStruct(t, payload)
+
+	var resp HookResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &resp); err != nil {
+		t.Fatalf("expected JSON envelope on LLM parse error, got %q (err: %v)", out, err)
+	}
+	if resp.HookSpecificOutput.HookEventName != "PreToolUse" {
+		t.Errorf("hookEventName: got %q, want PreToolUse", resp.HookSpecificOutput.HookEventName)
+	}
+	if resp.HookSpecificOutput.PermissionDecision != "" {
+		t.Errorf("permissionDecision should be empty on parse error, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+	if !strings.Contains(resp.SystemMessage, "parse error") {
+		t.Errorf("systemMessage should mention parse error, got %q", resp.SystemMessage)
+	}
+	if strings.Contains(out, `"permissionDecision":""`) {
+		t.Errorf("marshalled JSON must omit empty permissionDecision, got %q", out)
 	}
 }
 
