@@ -160,6 +160,21 @@ func parseHarnessFlag() (string, bool) {
 	return "", false
 }
 
+// hasFlag reports whether a bare flag (e.g. "--skill-only") appears anywhere
+// in os.Args[2:]. Used by install/uninstall for boolean modifiers.
+func hasFlag(name string) bool {
+	args := os.Args
+	if len(args) < 3 {
+		return false
+	}
+	for i := 2; i < len(args); i++ {
+		if args[i] == name {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveInstallTargets picks which harnesses to install/uninstall into.
 //   - --harness <name> → that single adapter (errors if unknown)
 //   - --all            → every registered adapter
@@ -210,6 +225,12 @@ func cmdInstall() {
 	if len(targets) == 0 {
 		fmt.Fprintln(os.Stderr, "no harnesses registered")
 		os.Exit(2)
+	}
+
+	skillOnly := hasFlag("--skill-only")
+	if skillOnly {
+		cmdInstallSkillOnly(targets)
+		return
 	}
 
 	updating := false
@@ -274,9 +295,52 @@ func cmdInstall() {
 	}
 
 	fmt.Println()
-	fmt.Println("Run 'yolonot init' to create rule files.")
-	fmt.Println("Run 'yolonot provider' to configure LLM.")
-	fmt.Println("Restart your AI coding CLI to activate.")
+	if isFirstRun() {
+		fmt.Println("First-time setup? Run 'yolonot setup' to seed rules + configure LLM provider.")
+		fmt.Println("Already wired up? Restart your AI coding CLI to activate.")
+	} else {
+		fmt.Println("Restart your AI coding CLI to activate.")
+	}
+}
+
+// isFirstRun returns true when the user looks like they've never finished
+// onboarding: no global rules file and no LLM provider configured. Used to
+// decide whether `install` should nudge toward `setup`.
+func isFirstRun() bool {
+	if _, err := os.Stat(filepath.Join(YolonotDir(), "rules")); err == nil {
+		return false
+	}
+	if cfg := LoadConfig(); cfg.Provider.Model != "" {
+		return false
+	}
+	return true
+}
+
+// cmdInstallSkillOnly refreshes just the harness skill bundles (e.g. Claude's
+// SKILL.md) without touching hooks, settings, or data dirs. Useful after a
+// yolonot upgrade when the binary already has fresh hooks but the embedded
+// SKILL.md changed.
+func cmdInstallSkillOnly(targets []Harness) {
+	var written []string
+	for _, h := range targets {
+		path, err := h.InstallSkill()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "skill install failed for %s: %v\n", h.Name(), err)
+			os.Exit(1)
+		}
+		if path != "" {
+			written = append(written, fmt.Sprintf("%s → %s", h.Name(), path))
+		}
+	}
+	if len(written) == 0 {
+		fmt.Println("No harness in scope ships a skill bundle. Nothing to do.")
+		fmt.Println("(Skills currently apply to Claude only.)")
+		return
+	}
+	fmt.Println("Skill bundle refreshed.")
+	for _, w := range written {
+		fmt.Printf("  %s\n", w)
+	}
 }
 
 func cmdUninstall() {

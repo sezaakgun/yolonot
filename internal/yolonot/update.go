@@ -194,7 +194,45 @@ func cmdUpgrade() {
 	}
 
 	fmt.Printf("\nUpgraded to %s.\n", latest)
-	fmt.Println("Hooks and skill were not modified.")
-	fmt.Println("If this release's notes require it, run 'yolonot install' manually.")
+
+	refreshed := refreshSkillsForInstalled()
+	switch {
+	case len(refreshed) == 1:
+		fmt.Printf("Skill refreshed: %s\n", refreshed[0])
+	case len(refreshed) > 1:
+		fmt.Println("Skills refreshed:")
+		for _, r := range refreshed {
+			fmt.Printf("  %s\n", r)
+		}
+	}
+	fmt.Println("Hooks left untouched (your settings.json is yours).")
+	fmt.Println("If this release's notes require new hook wiring, run 'yolonot install' manually.")
 	fmt.Println("Restart Claude Code to load the new binary.")
+}
+
+// refreshSkillsForInstalled re-writes SKILL.md (or equivalent) for every
+// harness that's currently installed. Skill content is bundled inside the
+// yolonot binary, so an `upgrade` would otherwise leave stale skills on disk.
+// Hook wiring (settings.json) is intentionally NOT touched — that's user
+// config and requires an explicit `yolonot install`.
+//
+// Returns "harness → path" lines for each successful refresh. Per-harness
+// errors are logged via Verbosef and do not abort the upgrade.
+func refreshSkillsForInstalled() []string {
+	var out []string
+	for _, h := range Harnesses() {
+		if !h.IsInstalled() {
+			continue
+		}
+		path, err := h.InstallSkill()
+		if err != nil {
+			Verbosef("skill refresh for %s failed: %v", h.Name(), err)
+			continue
+		}
+		if path == "" {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s → %s", h.Name(), path))
+	}
+	return out
 }

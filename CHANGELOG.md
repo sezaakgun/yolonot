@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-05-07
+
+### Added
+
+- **`yolonot upgrade` auto-refreshes skill bundles.** After a successful
+  `go install`, every installed harness has its `SKILL.md` (or equivalent)
+  re-written from the new binary's embedded copy. Hooks/`settings.json`
+  are intentionally not touched — that remains a deliberate `yolonot install`.
+- **`yolonot install --skill-only`** (hidden flag): refresh skill files
+  without touching hook wiring or data dirs. Useful for SKILL.md iteration.
+
+### Changed
+
+- `yolonot install` post-text now nudges first-time users (no
+  `~/.yolonot/rules` and no provider configured) toward `yolonot setup`
+  instead of telling everyone to run `init` and `provider` separately.
+
 ## [0.13.0] — 2026-05-07
 
 ### Added
