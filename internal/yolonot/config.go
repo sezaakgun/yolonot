@@ -33,6 +33,21 @@ type Config struct {
 	QuietOnAllow bool                         `json:"quiet_on_allow,omitempty"` // when true, allow decisions emit no systemMessage — only ask/deny show a banner
 	LocalAllow   bool                         `json:"local_allow,omitempty"`   // DEPRECATED: migrated on load into PreCheck as "fast-allow". Kept for backward-compat read only.
 	Wrappers     []string                     `json:"wrappers,omitempty"`       // user-defined transparent command wrappers (e.g. ["mycli","corp-shim"]). Extend the built-in set (time/timeout/nice/nohup/strace/ltrace/command/builtin/rtk) — never replace it. Applied to both fast_allow unwrapping and session-approval cross-form lookup.
+
+	// Profile = global named risk policy bundle. Resolves to a built-in
+	// (fast/balanced/strict/paranoid) or a CustomProfiles entry. Empty →
+	// DefaultProfileName. Translated per-harness in ResolveRiskMap.
+	Profile string `json:"profile,omitempty"`
+
+	// ProfileOverride lets users pin a different profile per harness.
+	// Outer key = harness name (claude, codex, ...); value = profile name.
+	ProfileOverride map[string]string `json:"profile_override,omitempty"`
+
+	// CustomProfiles holds user-defined named profiles. Outer key = profile
+	// name; inner = tier→action (canonical: allow|ask|deny). Validated via
+	// ValidateCustomProfile at create time. Names must not collide with
+	// built-ins.
+	CustomProfiles map[string]map[string]string `json:"custom_profiles,omitempty"`
 }
 
 // FastAllowSentinel is the reserved entry in Config.PreCheck that dispatches
@@ -1433,9 +1448,47 @@ func printRiskMap(h Harness) {
 	cfg := LoadConfig()
 	overrides := cfg.RiskMaps[h.Name()]
 	fmt.Printf("Risk map for harness %q:\n", h.Name())
+
+	// Header: which profile is active for this harness, including env / session pins.
+	active := ResolveActiveProfile(cfg, h)
+	if active != nil {
+		envHarnessKey := "YOLONOT_" + strings.ToUpper(h.Name()) + "_PROFILE"
+		sid := currentSessionID(h)
+		switch {
+		case sid != "" && readSessionProfile(sid) != "":
+			fmt.Printf("  Profile: %s (mid-session pin, %s)\n\n", active.Name, shortSession(sid))
+		case os.Getenv(envHarnessKey) != "":
+			fmt.Printf("  Profile: %s (env %s, this session only)\n\n", active.Name, envHarnessKey)
+		case os.Getenv("YOLONOT_PROFILE") != "":
+			fmt.Printf("  Profile: %s (env YOLONOT_PROFILE, this session only)\n\n", active.Name)
+		default:
+			globalName := cfg.Profile
+			if globalName == "" {
+				globalName = DefaultProfileName
+			}
+			if v, ok := cfg.ProfileOverride[h.Name()]; ok && v != "" && v != globalName {
+				fmt.Printf("  Profile: %s (global) → %s (override)\n\n", globalName, v)
+			} else {
+				fmt.Printf("  Profile: %s\n\n", active.Name)
+			}
+		}
+	}
+
+	// Pre-compute the profile-translated layer to label provenance accurately.
+	var profileLayer map[string]string
+	if active != nil {
+		profileLayer = TranslateProfile(active.Map, h)
+	}
+
 	fmt.Printf("  %-9s  %-12s  %s\n", "tier", "action", "source")
 	for _, tier := range allRiskTiers {
 		source := "default"
+		shippedDefault := defaults[tier]
+		if profileLayer != nil {
+			if v, ok := profileLayer[tier]; ok && v != shippedDefault {
+				source = "profile=" + active.Name
+			}
+		}
 		if _, ok := overrides[tier]; ok {
 			source = "config"
 		}
@@ -1443,10 +1496,6 @@ func printRiskMap(h Harness) {
 		if os.Getenv(envKey) != "" {
 			source = "env " + envKey
 		}
-		action := effective[tier]
-		if source == "default" {
-			action = defaults[tier]
-		}
-		fmt.Printf("  %-9s  %-12s  %s\n", tier, action, source)
+		fmt.Printf("  %-9s  %-12s  %s\n", tier, effective[tier], source)
 	}
 }

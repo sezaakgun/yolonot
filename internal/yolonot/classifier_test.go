@@ -25,7 +25,19 @@ func TestApplyRiskMap_EscalateOnly(t *testing.T) {
 }
 
 func TestApplyRiskMap_Passthrough(t *testing.T) {
-	h := &fakeHarness{riskMap: map[string]string{RiskModerate: ActionPassthrough}}
+	// Use Config.RiskMaps to inject passthrough so this test stays
+	// isolated from profile-layer changes (profiles use canonical
+	// allow/ask/deny; RiskMaps overrides win over profile translation).
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	h := &fakeHarness{riskMap: map[string]string{}}
+	RegisterHarness(h)
+	defer unregisterHarness(h)
+
+	SaveConfig(Config{RiskMaps: map[string]map[string]string{
+		h.Name(): {RiskModerate: ActionPassthrough},
+	}})
+
 	final, pass := applyRiskMap(h, "allow", RiskModerate)
 	if !pass {
 		t.Fatal("passthrough action should set pass=true")
@@ -36,7 +48,19 @@ func TestApplyRiskMap_Passthrough(t *testing.T) {
 }
 
 func TestApplyRiskMap_DenyEscalatesAllow(t *testing.T) {
-	h := &fakeHarness{riskMap: map[string]string{RiskCritical: ActionDeny}}
+	// Inject deny via Config.RiskMaps so the test stays orthogonal to the
+	// profile layer (balanced now matches Claude/Gemini default ask, so
+	// the harness-default deny would lose to the profile cell).
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	h := &fakeHarness{riskMap: map[string]string{}}
+	RegisterHarness(h)
+	defer unregisterHarness(h)
+
+	SaveConfig(Config{RiskMaps: map[string]map[string]string{
+		h.Name(): {RiskCritical: ActionDeny},
+	}})
+
 	final, _ := applyRiskMap(h, "allow", RiskCritical)
 	if final != "deny" {
 		t.Errorf("deny action should escalate allow → deny, got %q", final)

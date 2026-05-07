@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,7 +45,29 @@ func SessionDir() string {
 }
 
 func sessionPath(sessionID, suffix string) string {
+	if !IsValidSessionID(sessionID) {
+		return ""
+	}
 	return filepath.Join(SessionDir(), sessionID+"."+suffix)
+}
+
+// validSessionIDPattern allows the IDs harnesses actually emit (UUIDs, hex,
+// our own SESSION_ID_HASH form) and the synthetic IDs tests use. Rejects
+// path separators, dot-dot, and any non-token character so a hostile
+// --session-id or environment variable can't escape the sessions/ dir.
+var validSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
+// IsValidSessionID reports whether id is safe to embed in a session-file
+// path. Empty IDs are rejected. Strings containing "/", "\\", or ".." are
+// rejected. Used by sessionPath, pauseFile, and the profile-pin helpers.
+func IsValidSessionID(id string) bool {
+	if id == "" {
+		return false
+	}
+	if strings.Contains(id, "..") {
+		return false
+	}
+	return validSessionIDPattern.MatchString(id)
 }
 
 // ReadLines reads a session file, deduplicates, and preserves order.
@@ -225,7 +248,11 @@ func CleanOldSessions() {
 	cutoff := time.Now().Add(-24 * time.Hour)
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasSuffix(name, ".approved") || strings.HasSuffix(name, ".asked") || strings.HasSuffix(name, ".denied") {
+		if strings.HasSuffix(name, ".approved") ||
+			strings.HasSuffix(name, ".asked") ||
+			strings.HasSuffix(name, ".denied") ||
+			strings.HasSuffix(name, ".paused") ||
+			strings.HasSuffix(name, ".profile") {
 			info, err := e.Info()
 			if err != nil {
 				continue
