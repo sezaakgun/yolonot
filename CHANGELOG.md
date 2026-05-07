@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-05-07
+
 ### Added
 
 - **Risk profiles.** New `yolonot profile` command picks a named tier→action
@@ -29,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a marker to `~/.yolonot/sessions/<id>.profile`, applying to the current
   Claude Code session without restart. Beats env + config; auto-cleared
   when the session ends. Reset with `yolonot profile reset --session`.
+  `--session` self-resolves to the most-recent session when invoked from
+  a shell without `CLAUDE_SESSION_ID` exported. `--session-id <id>` alone
+  also implies session pin in `profile use|reset`.
+- `yolonot profile` (bare) now prints full command reference inline so
+  `create`/`delete`/`--session` are discoverable without docs.
 
 ### Changed
 
