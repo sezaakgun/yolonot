@@ -436,7 +436,23 @@ func printActiveProfile() {
 	}
 
 	fmt.Println()
-	fmt.Println("Run `yolonot profile list` to see available profiles.")
+	fmt.Println("Built-in profiles: fast, balanced, strict, paranoid")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  yolonot profile list                          List all profiles + tier maps")
+	fmt.Println("  yolonot profile show <name>                   Show one profile")
+	fmt.Println("  yolonot profile use <name>                    Set global profile")
+	fmt.Println("  yolonot profile use <name> --harness=<h>      Per-harness override")
+	fmt.Println("  yolonot profile use <name> --session          Pin to current session only")
+	fmt.Println("  yolonot profile reset [--session|--harness=<h>]")
+	fmt.Println()
+	fmt.Println("Custom profiles:")
+	fmt.Println("  yolonot profile create <name> --base=<existing> [--high=deny ...]")
+	fmt.Println("  yolonot profile create <name> --safe=allow --low=allow \\")
+	fmt.Println("      --moderate=ask --high=deny --critical=deny")
+	fmt.Println("  yolonot profile delete <name>")
+	fmt.Println()
+	fmt.Println("Env pins (this shell only): YOLONOT_PROFILE=fast | YOLONOT_<HARNESS>_PROFILE=fast")
 }
 
 func cmdProfileList() {
@@ -497,10 +513,18 @@ func cmdProfileUse(args []string) {
 		os.Exit(1)
 	}
 	if session {
+		// --session implies "current session". Resolution: explicit
+		// --session-id wins, then env (CLAUDE_SESSION_ID etc), then most
+		// recent session file. The fallback matches user intent — when
+		// invoked from inside Claude Code the env var isn't exported to
+		// the user shell, so requiring --current would be a UX trap.
 		sid := resolveSessionID(args)
 		if sid == "" {
-			fmt.Fprintln(os.Stderr, "Error: --session requires an active session.")
-			fmt.Fprintln(os.Stderr, "Pass --current, --session-id <id>, or set CLAUDE_SESSION_ID.")
+			sid = FindSessionID()
+		}
+		if sid == "" {
+			fmt.Fprintln(os.Stderr, "Error: --session requires an active session, but none found.")
+			fmt.Fprintln(os.Stderr, "Run a command through Claude Code first so a session file exists, or pass --session-id <id>.")
 			os.Exit(1)
 		}
 		if err := writeSessionProfile(sid, name); err != nil {
@@ -541,7 +565,10 @@ func cmdProfileReset(args []string) {
 	if session {
 		sid := resolveSessionID(args)
 		if sid == "" {
-			fmt.Fprintln(os.Stderr, "Error: --session requires an active session (use --current, --session-id, or CLAUDE_SESSION_ID).")
+			sid = FindSessionID()
+		}
+		if sid == "" {
+			fmt.Fprintln(os.Stderr, "Error: --session requires an active session, but none found.")
 			os.Exit(1)
 		}
 		if err := clearSessionProfile(sid); err != nil {
@@ -670,10 +697,11 @@ func cmdProfileDelete(args []string) {
 }
 
 // parseProfileNameHarnessSession extracts the first positional arg as
-// `name`, plus optional `--harness=<h>` and `--session` flags.
-// Session-related arg flags (--session-id=<id>, --current) are
-// intentionally ignored here — resolveSessionID handles them downstream
-// so the same args slice can be passed through.
+// `name`, plus optional `--harness=<h>` and `--session` flags. Presence
+// of `--session-id <id>` (or `--session-id=<id>`) or `--current` also
+// implies session=true so `yolonot profile use fast --session-id abc`
+// means "pin to that session" without needing both flags.
+// resolveSessionID downstream reads the id itself from the same args.
 func parseProfileNameHarnessSession(args []string) (name, harness string, session bool) {
 	skipNext := false
 	for i, a := range args {
@@ -695,8 +723,8 @@ func parseProfileNameHarnessSession(args []string) (name, harness string, sessio
 			session = true
 			continue
 		case strings.HasPrefix(a, "--session-id=") || a == "--session-id" || a == "--current":
-			// resolveSessionID consumes these — ignore here so they don't
-			// land in `name`.
+			// Session-id / --current implies session pin context.
+			session = true
 			if a == "--session-id" {
 				skipNext = true
 			}

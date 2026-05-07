@@ -277,17 +277,31 @@ Profiles bundle tier→action decisions. Built-ins: `fast` (allow everything rev
 - `yolonot profile list` — list built-in + custom profiles
 - `yolonot profile show <name>` — show one profile's tier map
 
-**Mutation — print, do not run.** When the user wants to change profile, print the exact command. Default to `--session` for "now I want fast" / "switch to strict" requests inside a running Claude session, since that's the only change that takes effect mid-session without restart.
+**Mutation — print, do not run.** When the user wants to change profile, print the exact command. Default to a session pin for "now I want fast" / "switch to strict" requests inside a running Claude session, since that's the only change that takes effect mid-session without restart.
 
-Examples to print:
+**Resolve the session id BEFORE printing** so the user gets a copy-pasteable command that doesn't depend on env vars in their shell. Run (read-only):
+
+```bash
+echo "${CLAUDE_SESSION_ID:-$(ls -t ~/.yolonot/sessions/*.approved ~/.yolonot/sessions/*.asked ~/.yolonot/sessions/*.denied 2>/dev/null | head -1 | xargs basename 2>/dev/null | sed 's/\.[^.]*$//')}"
+```
+
+Substitute the resolved id into the printed command via `--session-id`. Example:
 
 ```
 Run this when you're ready:
 
-    yolonot profile use fast --session
+    yolonot profile use fast --session-id abc123_d8b9e2c1
 
-What it does: pins `fast` profile for THIS Claude session only. Auto-clears when session ends. Reset early with `yolonot profile reset --session`.
+What it does: pins `fast` profile for session abc123_d8b9e2c1 only. Auto-clears when session ends. Reset: yolonot profile reset --session-id abc123_d8b9e2c1
 ```
+
+If the session id can't be resolved (no session files yet), fall back to:
+
+```
+    yolonot profile use fast --session
+```
+
+(the binary self-resolves to the most-recent session, but printing the id explicitly makes it transparent to the user which session is being modified).
 
 ```
 Run this when you're ready:
