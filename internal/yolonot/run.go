@@ -94,6 +94,8 @@ func Run() {
 		os.Exit(2)
 	case "risk":
 		cmdRisk(os.Args[2:])
+	case "profile":
+		cmdProfile(os.Args[2:])
 	case "pre-check", "precheck":
 		cmdPreCheck(os.Args[2:])
 	case "quiet":
@@ -165,6 +167,16 @@ func cmdDefault() {
 	fmt.Printf("  Version:  %s\n", Version)
 	fmt.Printf("  Provider: %s\n", provider)
 	fmt.Printf("  Data:     %s\n", YolonotDir())
+	{
+		profileName := config.Profile
+		if profileName == "" {
+			profileName = DefaultProfileName + " (default)"
+		}
+		if len(config.ProfileOverride) > 0 {
+			profileName += fmt.Sprintf(" (+%d harness override(s))", len(config.ProfileOverride))
+		}
+		fmt.Printf("  Profile:  %s\n", profileName)
+	}
 	if n := len(config.PreCheck); n > 0 {
 		if n == 1 {
 			fmt.Printf("  PreCheck: %s\n", config.PreCheck[0])
@@ -206,6 +218,7 @@ func cmdDefault() {
 	fmt.Println("  stats       Show analytics from decision history")
 	fmt.Println("  check       Dry-run: test what the pipeline would decide for a command")
 	fmt.Println("  suggest     Analyze history, suggest permanent rules")
+	fmt.Println("  profile     Pick a named risk policy (fast/balanced/strict/paranoid + custom)")
 	fmt.Println("  risk        Show/set per-harness risk tier → action policy")
 	fmt.Println("  pre-check   Manage pre-checkers (fast-allow + external hooks like dippy)")
 	fmt.Println("  quiet       Silence banners for allow decisions (only show ask/deny)")

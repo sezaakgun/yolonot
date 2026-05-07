@@ -7,14 +7,19 @@ import (
 	"strings"
 )
 
-// pauseFile returns the path to the pause marker for a session.
+// pauseFile returns the path to the pause marker for a session. Returns
+// empty for invalid IDs so a hostile --session-id can't escape the
+// sessions/ dir via path traversal.
 func pauseFile(sessionID string) string {
+	if !IsValidSessionID(sessionID) {
+		return ""
+	}
 	return filepath.Join(YolonotDir(), "sessions", sessionID+".paused")
 }
 
 // isPaused returns true if yolonot is paused for the given session.
 func isPaused(sessionID string) bool {
-	if sessionID == "" {
+	if !IsValidSessionID(sessionID) {
 		return false
 	}
 	_, err := os.Stat(pauseFile(sessionID))
@@ -80,8 +85,13 @@ func cmdPause(args []string) {
 		return
 	}
 
+	pf := pauseFile(sid)
+	if pf == "" {
+		fmt.Printf("Error: invalid session id %q\n", sid)
+		return
+	}
 	os.MkdirAll(filepath.Join(YolonotDir(), "sessions"), 0755)
-	if err := os.WriteFile(pauseFile(sid), []byte{}, 0644); err != nil {
+	if err := os.WriteFile(pf, []byte{}, 0644); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
@@ -111,7 +121,12 @@ func cmdResume(args []string) {
 		return
 	}
 
-	if err := os.Remove(pauseFile(sid)); err != nil {
+	pf := pauseFile(sid)
+	if pf == "" {
+		fmt.Printf("Error: invalid session id %q\n", sid)
+		return
+	}
+	if err := os.Remove(pf); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}

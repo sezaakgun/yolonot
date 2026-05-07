@@ -62,6 +62,7 @@ That's it. Every Bash command now runs through [the pipeline](docs/how-it-works.
 | `.yolonot` rule files — format, walk-up, messages, redirects, sensitive files | [docs/rules.md](docs/rules.md) |
 | Pre-check hooks — `fast-allow` internals, Dippy integration, security model | [docs/pre-check.md](docs/pre-check.md) |
 | Risk tiers — per-harness action policy, overrides | [docs/risk-tiers.md](docs/risk-tiers.md) |
+| Risk profiles — `fast`/`balanced`/`strict`/`paranoid` + custom | [docs/risk-profiles.md](docs/risk-profiles.md) |
 | LLM providers — matrix, env vars, response schema | [docs/providers.md](docs/providers.md) |
 | Harnesses — install flags, runtime pinning, per-host caveats | [docs/harnesses.md](docs/harnesses.md) |
 | Analytics — `yolonot log`, `stats`, `suggest`, quiet mode | [docs/analytics.md](docs/analytics.md) |

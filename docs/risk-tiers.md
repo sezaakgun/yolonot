@@ -15,6 +15,19 @@ Every LLM decision carries a risk tier — `safe`, `low`, `moderate`, `high`, `c
 - On ask-capable harnesses (Claude, Gemini), the LLM layer never denies by default — `deny` stays rule-origin only.
 - Codex / OpenCode have no `ask` primitive in their hook APIs, so `deny` is the only way to block there. See [harnesses.md](harnesses.md) for the upstream limitations.
 
+## Profiles (recommended starting point)
+
+Most users should pick a [risk profile](risk-profiles.md) instead of editing tiers cell-by-cell:
+
+```bash
+yolonot profile use fast        # allow everything reversible; deny prod-breaking only
+yolonot profile use balanced    # default; ask on moderate+
+yolonot profile use strict      # ask earlier, hard-deny on high+
+yolonot profile use paranoid    # ask on safe; deny moderate+
+```
+
+Profiles set the baseline; per-cell overrides below still win.
+
 ## Overrides
 
 ```bash

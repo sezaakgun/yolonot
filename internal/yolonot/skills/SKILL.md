@@ -22,6 +22,28 @@ Parse the user's input to determine which command to run. The argument after `/y
 - Only invoke `pause` / `resume` / `reset` when the user types those exact words (e.g. "pause yolonot", "reset the session"). Do not invoke them on your own initiative to work around a deny, ask, or rule match — that is a safety bypass, not a workaround.
 - Running a destructive command (kube ops, production state, irreversible writes) through pause is a failure mode. Prefer `approve` with the exact command string; if the command isn't narrow enough for approve, surface the block to the user and let them decide.
 
+### Execution policy — mutations print, reads run
+
+The skill is split into two classes of commands. Match exactly:
+
+**Run directly (read-only):** `status`, `log`, `rules`, `stats`, `check`, `profile` (no args / `list` / `show`), `risk` (show forms), `pre-check` (list), `quiet` (no args).
+
+**Print the command, do NOT execute (mutating / safety-sensitive):** `pause`, `resume`, `reset`, `approve`, `deny`, `profile use|reset|create|delete`, `risk <h> <tier> <action>` and `risk <h> reset`, `pre-check add|remove|clear`, `quiet on|off`, `suggest`, `init`, `setup`, `install`, `uninstall`, `provider`, `upgrade`.
+
+For mutations, format the response as:
+
+```
+Run this when you're ready:
+
+    yolonot profile use fast --session
+
+What it does: pins the `fast` profile to this Claude session only. Clears when the session ends.
+```
+
+Show the exact, copy-pasteable command and a one-line explanation of effect + reversibility. Never wrap it in `bash -lc`, never silently invoke it, never assume you can re-run it later. If the user follows up with "go ahead" / "run it" / "yes" — only then execute.
+
+This protects the user from agent-driven config drift: the user typed `/yolonot profile use fast`, but the *act of changing config* should still be deliberate and visible.
+
 ### `/yolonot` (no args) — Show menu + session summary
 
 Show a brief session summary followed by available commands:
@@ -46,6 +68,7 @@ Commands:
   /yolonot suggest         — learn from history, update rules
   /yolonot check <cmd>     — dry-run pipeline test
   /yolonot stats           — show decision analytics
+  /yolonot profile [...]   — pick risk profile (fast/balanced/strict/paranoid + custom)
   /yolonot risk [...]      — show/set per-harness risk tier → action policy
   /yolonot pre-check       — manage pre-checkers (fast-allow + external hooks like dippy)
   /yolonot quiet [on|off]  — silence banners for allow decisions
@@ -54,21 +77,31 @@ Commands:
 
 ### `/yolonot pause` — Disable for this session
 
-**ONLY invoke when the user explicitly says "pause" (or equivalent: "disable yolonot", "turn off yolonot for this session").** Do not invoke this to work around a deny/ask — use `/yolonot approve <cmd>` to unblock one specific command instead. Auto-pausing to run a blocked destructive command is a safety bypass.
+**Mutation — print, do not run.** This command disables the safety layer; the user must execute it themselves.
 
-Run `yolonot pause --current --confirm-bypass`. The `--confirm-bypass` flag is
-a required opt-in: `yolonot pause` without it exits with an error telling you
-to use `yolonot approve <cmd>` instead. Only add `--confirm-bypass` when the
-user has explicitly asked to pause.
+Print:
 
-This creates a marker file that makes the hook bypass yolonot entirely for
-the current session — no rules, no LLM, no session memory. Claude Code's
-native permissions handle commands as if yolonot weren't installed.
+```
+Run this when you're ready:
+
+    yolonot pause --current --confirm-bypass
+
+What it does: total bypass of yolonot for this session — no rules, no LLM, no session memory. Reversible with `yolonot resume --current`.
+```
+
+Only print the command when the user explicitly says "pause" / "disable yolonot" / "turn off yolonot for this session". Never print it to work around a deny/ask — use `/yolonot approve <cmd>` for that.
 
 ### `/yolonot resume` — Re-enable for this session
 
-Run `yolonot resume --current`. Removes the pause
-marker, yolonot takes effect again.
+**Mutation — print, do not run.** Print:
+
+```
+Run this when you're ready:
+
+    yolonot resume --current
+
+What it does: removes the pause marker, yolonot active again for this session.
+```
 
 ### `/yolonot status` — Full session state
 
@@ -99,25 +132,41 @@ If all files are empty/missing: "No decisions recorded for this session yet."
 
 ### `/yolonot approve <command>` — Move command to approved
 
-1. Find the command in `.asked` or `.denied` files (partial match is OK)
-2. Remove it from `.denied` if present
-3. Add it to `.approved`
-4. Confirm: "Moved to approved: {command}"
+**Mutation — print, do not run.** Locate the exact command (or pattern) in the session files first if needed for context, then print:
 
-If command not found in any file, add it to `.approved` directly and confirm.
+```
+Run this when you're ready:
+
+    yolonot approve "<command>"
+
+What it does: adds the command to this session's approved list — yolonot will allow it without re-asking. Scoped to this session + project.
+```
 
 ### `/yolonot deny <command>` — Move command to denied
 
-1. Find the command in `.asked` or `.approved` files (partial match is OK)
-2. Remove it from `.approved` if present
-3. Add it to `.denied`
-4. Confirm: "Moved to denied: {command}"
+**Mutation — print, do not run.** Print:
+
+```
+Run this when you're ready:
+
+    yolonot deny "<command>"
+
+What it does: pins the command to this session's denied list. Reversible via `/yolonot approve`.
+```
 
 ### `/yolonot reset` — Clear session files
 
-1. Ask for confirmation: "This will clear all approved/denied/asked lists for this session. Continue?"
-2. If confirmed, delete all session files for current session ID
-3. Confirm: "Session state cleared."
+**Mutation — print, do not run.** Print:
+
+```
+Run this when you're ready:
+
+    yolonot reset --current
+
+What it does: clears approved/asked/denied lists for this session. Decision log (`~/.yolonot/decisions.jsonl`) is preserved.
+```
+
+Only print when the user explicitly types "reset". Never print to work around a deny.
 
 ### `/yolonot log` — Show recent decisions
 
@@ -152,9 +201,19 @@ Global rules (~/.yolonot):
 
 ### `/yolonot suggest` — Learn from history, update rules
 
-Analyze decision history and interactively promote patterns to permanent rules. Uses TUI menus for selection and applies smart pattern grouping.
+**Mutation — print, do not run.** `suggest` writes to `~/.yolonot/rules` and project `.yolonot` files; the user must run it themselves so the interactive TUI runs in their terminal.
 
-Run: `yolonot suggest`
+Print:
+
+```
+Run this when you're ready:
+
+    yolonot suggest
+
+What it does: analyzes decision history, opens an interactive TUI to promote patterns to permanent allow/ask rules. Writes to `~/.yolonot` and/or project `.yolonot`.
+```
+
+Below is what `suggest` does — explanatory only, do NOT execute the analysis yourself:
 
 **Step 1: Analyze decisions**
 
@@ -209,29 +268,88 @@ Displays:
 - Top asked commands (rule candidates)
 - Per-project breakdown
 
+### `/yolonot profile [...]` — Pick a named risk policy
+
+Profiles bundle tier→action decisions. Built-ins: `fast` (allow everything reversible, deny only prod-breaking — no ask prompts), `balanced` (default), `strict`, `paranoid`.
+
+**Read-only — run directly:**
+- `yolonot profile` — show active profile + overrides
+- `yolonot profile list` — list built-in + custom profiles
+- `yolonot profile show <name>` — show one profile's tier map
+
+**Mutation — print, do not run.** When the user wants to change profile, print the exact command. Default to a session pin for "now I want fast" / "switch to strict" requests inside a running Claude session, since that's the only change that takes effect mid-session without restart.
+
+**Resolve the session id BEFORE printing** so the user gets a copy-pasteable command that doesn't depend on env vars in their shell. Run (read-only):
+
+```bash
+echo "${CLAUDE_SESSION_ID:-$(ls -t ~/.yolonot/sessions/*.approved ~/.yolonot/sessions/*.asked ~/.yolonot/sessions/*.denied 2>/dev/null | head -1 | xargs basename 2>/dev/null | sed 's/\.[^.]*$//')}"
+```
+
+Substitute the resolved id into the printed command via `--session-id`. Example:
+
+```
+Run this when you're ready:
+
+    yolonot profile use fast --session-id abc123_d8b9e2c1
+
+What it does: pins `fast` profile for session abc123_d8b9e2c1 only. Auto-clears when session ends. Reset: yolonot profile reset --session-id abc123_d8b9e2c1
+```
+
+If the session id can't be resolved (no session files yet), fall back to:
+
+```
+    yolonot profile use fast --session
+```
+
+(the binary self-resolves to the most-recent session, but printing the id explicitly makes it transparent to the user which session is being modified).
+
+```
+Run this when you're ready:
+
+    yolonot profile use strict
+
+What it does: sets `strict` as the persistent global profile. Affects all future sessions. Override per-harness with `--harness=<h>`. Reset with `yolonot profile reset`.
+```
+
+Other mutating forms (also print, don't run): `yolonot profile create <name> --base=<existing>`, `yolonot profile delete <name>`, `yolonot profile reset [--session|--harness=<h>]`.
+
+Env pins (per-session, dies with shell): `YOLONOT_PROFILE=fast` global, `YOLONOT_<HARNESS>_PROFILE=fast` per-harness — print as a one-line shell prefix when the user wants a one-shot launch.
+
 ### `/yolonot risk [...]` — Per-harness risk → action policy
 
-Every LLM decision carries a 5-tier risk tag (`safe` / `low` / `moderate` / `high` / `critical`). Each harness ships a default tier → action map (`allow` / `ask` / `deny` / `passthrough`) that you can override per-cell. `passthrough` means yolonot emits nothing and the host's native permission engine decides.
+Every LLM decision carries a 5-tier risk tag (`safe` / `low` / `moderate` / `high` / `critical`). Each harness ships a default tier → action map (`allow` / `ask` / `deny` / `passthrough`) that you can override per-cell.
 
-Run:
-- `yolonot risk` — show merged map for the active harness
-- `yolonot risk claude` — show for a named harness
-- `yolonot risk codex moderate deny` — override one cell
-- `yolonot risk codex reset` — drop all user overrides for a harness
-- `yolonot risk codex reset moderate` — drop one override
+**Read-only — run directly:** `yolonot risk` (active harness), `yolonot risk <harness>` (named).
 
-Env vars override config at runtime: `YOLONOT_CODEX_RISK_MODERATE=deny`.
+**Mutation — print, do not run.** Print the override or reset command for the user:
+
+```
+Run this when you're ready:
+
+    yolonot risk codex moderate deny
+
+What it does: pins codex/moderate → deny in `~/.yolonot/config.json`, beating the active profile at that one cell. Reset with `yolonot risk codex reset moderate`.
+```
+
+Env vars override config at runtime: `YOLONOT_CODEX_RISK_MODERATE=deny` (single shell session only).
 
 ### `/yolonot pre-check [add|remove|clear] [...]` — Manage pre-checkers
 
 The pre-check list is yolonot's ordered fast-path layer. Entries can be the reserved `fast-allow` sentinel (built-in Go bash parser, no subprocess) or external hook binaries (e.g. dippy). First `allow` wins; anything else falls through. Added by default at `yolonot setup`: `fast-allow` at the head of the list.
 
-Run:
-- `yolonot pre-check` — list configured entries (in execution order)
-- `yolonot pre-check add fast-allow` — enable the built-in bash parser
-- `yolonot pre-check add /opt/homebrew/bin/dippy` — append an external hook
-- `yolonot pre-check remove <n|fast-allow|path>` — remove by 1-based index or exact entry
-- `yolonot pre-check clear` — disable all
+**Read-only — run directly:** `yolonot pre-check` (lists entries in execution order).
+
+**Mutation — print, do not run.** Print the add/remove/clear command for the user:
+
+```
+Run this when you're ready:
+
+    yolonot pre-check add fast-allow
+
+What it does: enables the built-in bash parser as a pre-check. Skips LLM calls for syntactically safe commands. Remove with `yolonot pre-check remove fast-allow`.
+```
+
+Other mutating forms: `yolonot pre-check add /opt/homebrew/bin/dippy`, `yolonot pre-check remove <n|fast-allow|path>`, `yolonot pre-check clear`.
 
 External hooks receive the standard Claude Code PreToolUse JSON on stdin and must return a standard hook response on stdout. Only `permissionDecision: "allow"` short-circuits; `ask`/`deny`/empty/timeout/error all fall through. Pre-check runs after yolonot's deny rules but before session memory, rules, cache, and the LLM — a yolonot deny rule always beats a pre-check allow.
 
@@ -262,18 +380,37 @@ allow-redirect ./build/**
 
 ### `/yolonot quiet [on|off]` — Silence allow banners
 
-Toggle whether yolonot emits a `systemMessage` banner for allow decisions. When `on`, only ask/deny decisions show a banner — allows pass through silently. When `off` (default), every decision shows `yolonot: 🧑‍🚀 <reason>`.
+Toggle whether yolonot emits a `systemMessage` banner for allow decisions. When `on`, only ask/deny decisions show a banner — allows pass through silently.
 
-Run:
-- `yolonot quiet` — show current state
-- `yolonot quiet on` — silence allow banners
-- `yolonot quiet off` — restore default
+**Read-only — run directly:** `yolonot quiet` (show current state).
+
+**Mutation — print, do not run.** Print:
+
+```
+Run this when you're ready:
+
+    yolonot quiet on
+
+What it does: silences the systemMessage banner for `allow` decisions. Reverse with `yolonot quiet off`.
+```
 
 Only affects the user-facing banner. `permissionDecision` + `permissionDecisionReason` + the decision log are unchanged.
 
 ### `/yolonot init` — Create rule files
 
-Set up yolonot for the current project and globally.
+**Mutation — print, do not run.** `init` creates / writes config and rule files; the user runs it.
+
+Print:
+
+```
+Run this when you're ready:
+
+    yolonot init
+
+What it does: creates `~/.yolonot` (global rules) and `.yolonot` (project rules) with sensible defaults if missing. Skips files that already exist.
+```
+
+Below is the exact behavior of `init` — explanatory only:
 
 1. Check what exists:
    - `~/.yolonot` (global rules file)

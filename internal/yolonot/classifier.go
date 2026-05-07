@@ -105,8 +105,10 @@ func Classifiers() []Classifier { return registeredClassifiers }
 // ResolveRiskMap returns the effective tier→action mapping for a harness.
 // Layers, highest precedence last:
 //  1. Shipped defaults from the harness's RiskMap().
-//  2. ~/.yolonot/config.json "risk_maps" override for that harness.
-//  3. YOLONOT_<HARNESS>_RISK_<TIER>=<action> env vars (per-session).
+//  2. Active profile (per-harness override or global), translated through
+//     the harness's ask-fallback rules.
+//  3. ~/.yolonot/config.json "risk_maps" override for that harness.
+//  4. YOLONOT_<HARNESS>_RISK_<TIER>=<action> env vars (per-session).
 //
 // Values are validated against the {allow, ask, deny, passthrough} set and
 // dropped with a Verbosef log line if unknown — defensive against typos in
@@ -121,6 +123,11 @@ func ResolveRiskMap(h Harness) map[string]string {
 		out[k] = v
 	}
 	cfg := LoadConfig()
+	if profile := ResolveActiveProfile(cfg, h); profile != nil {
+		for tier, action := range TranslateProfile(profile.Map, h) {
+			out[tier] = action
+		}
+	}
 	if cfg.RiskMaps != nil {
 		if overrides, ok := cfg.RiskMaps[h.Name()]; ok {
 			for tier, action := range overrides {

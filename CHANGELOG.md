@@ -5,6 +5,53 @@ All notable changes to yolonot are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.13.0] — 2026-05-07
+
+### Added
+
+- **Risk profiles.** New `yolonot profile` command picks a named tier→action
+  bundle in one shot instead of editing cells via `yolonot risk`. Built-ins:
+  `fast` (allow everything reversible, deny only prod-breaking/irreversible —
+  no ask prompts), `balanced` (default; matches prior shipped behavior),
+  `strict`, `paranoid`. Custom profiles supported via
+  `yolonot profile create <name> --base=<existing> [--<tier>=<action>...]`.
+  Per-harness override available with `--harness=<h>`.
+- Profiles use the canonical `{allow, ask, deny}` action set; harnesses
+  without a real `ask` primitive (Codex, Cursor, OpenCode) translate at apply
+  time so each harness's safety floor stays intact.
+- `yolonot risk` output now shows the active profile per harness and
+  labels per-cell provenance as `default | profile=<name> | config | env`.
+- `yolonot` default status block now prints the active profile.
+- **Per-session profile env pins.** `YOLONOT_PROFILE=<name>` (global) and
+  `YOLONOT_<HARNESS>_PROFILE=<name>` (per-harness) override config for a
+  single shell session. `yolonot profile` and `yolonot risk` surface them.
+- **Mid-session profile pin.** `yolonot profile use <name> --session` writes
+  a marker to `~/.yolonot/sessions/<id>.profile`, applying to the current
+  Claude Code session without restart. Beats env + config; auto-cleared
+  when the session ends. Reset with `yolonot profile reset --session`.
+  `--session` self-resolves to the most-recent session when invoked from
+  a shell without `CLAUDE_SESSION_ID` exported. `--session-id <id>` alone
+  also implies session pin in `profile use|reset`.
+- `yolonot profile` (bare) now prints full command reference inline so
+  `create`/`delete`/`--session` are discoverable without docs.
+
+### Changed
+
+- `ResolveRiskMap` now layers the active profile between harness defaults
+  and `risk_maps` config overrides. Existing per-cell overrides keep
+  winning. Default profile is `balanced` and is locked by
+  `TestBalancedProfile_MatchesClaudeGeminiDefaults` to match Claude/Gemini
+  shipped defaults exactly — no behavior change for users on a default
+  config. See [docs/risk-profiles.md](docs/risk-profiles.md).
+- `CleanOldSessions` now sweeps `.profile` and `.paused` markers along with
+  `.approved`/`.asked`/`.denied`. Pin files no longer leak past 24h.
+- All session-file path builders (`sessionPath`, `pauseFile`,
+  `sessionProfilePath`) now reject session IDs containing `..`, `/`, `\`,
+  or non-token characters via `IsValidSessionID`. Closes a path-traversal
+  class in `--session-id <hostile>` and harness env vars.
+
 ## [0.12.0] — 2026-04-21
 
 ### Added
