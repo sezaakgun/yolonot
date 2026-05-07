@@ -2710,20 +2710,25 @@ func TestCmdHookLLMUnavailable(t *testing.T) {
 	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-test-3","cwd":"%s","tool_input":{"command":"some-unknown-cmd"}}`, projectDir)
 	out := runHookWithPayload(t, payload)
 
-	// LLM unavailable → systemMessage warning, no permissionDecision
-	out = strings.TrimSpace(out)
-	if out == "" {
-		t.Fatal("LLM unavailable should emit systemMessage, got empty output")
+	// LLM unavailable → decisionless envelope with hookEventName populated
+	// from payload + a banner systemMessage. omitempty drops the empty
+	// permissionDecision so CC's Zod enum check passes and the host
+	// engine decides.
+	var resp HookResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &resp); err != nil {
+		t.Fatalf("expected JSON envelope, got %q (err: %v)", out, err)
 	}
-	var r HookResponse
-	if err := json.Unmarshal([]byte(out), &r); err != nil {
-		t.Fatalf("invalid JSON output: %v", err)
+	if resp.HookSpecificOutput.HookEventName != "PreToolUse" {
+		t.Errorf("hookEventName: got %q, want PreToolUse", resp.HookSpecificOutput.HookEventName)
 	}
-	if !strings.Contains(r.SystemMessage, "LLM unreachable") {
-		t.Errorf("systemMessage should contain 'LLM unreachable', got: %s", r.SystemMessage)
+	if resp.HookSpecificOutput.PermissionDecision != "" {
+		t.Errorf("permissionDecision should be empty, got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
-	if r.HookSpecificOutput.PermissionDecision != "" {
-		t.Errorf("should have no permissionDecision, got: %s", r.HookSpecificOutput.PermissionDecision)
+	if !strings.Contains(resp.SystemMessage, "LLM unreachable") {
+		t.Errorf("systemMessage should mention LLM unreachable, got %q", resp.SystemMessage)
+	}
+	if strings.Contains(out, `"permissionDecision":""`) {
+		t.Errorf("marshalled JSON must omit empty permissionDecision, got %q", out)
 	}
 }
 
@@ -2752,20 +2757,23 @@ func TestCmdHookLLMParseError(t *testing.T) {
 	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-test-4","cwd":"%s","tool_input":{"command":"ambiguous-cmd"}}`, projectDir)
 	out := runHookWithPayload(t, payload)
 
-	// Parse error → systemMessage warning, no permissionDecision
-	out = strings.TrimSpace(out)
-	if out == "" {
-		t.Fatal("parse error should emit systemMessage, got empty output")
+	// Parse error → same envelope shape as LLM-unreachable, with a
+	// parse-specific banner.
+	var resp HookResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &resp); err != nil {
+		t.Fatalf("expected JSON envelope, got %q (err: %v)", out, err)
 	}
-	var r HookResponse
-	if err := json.Unmarshal([]byte(out), &r); err != nil {
-		t.Fatalf("invalid JSON output: %v", err)
+	if resp.HookSpecificOutput.HookEventName != "PreToolUse" {
+		t.Errorf("hookEventName: got %q, want PreToolUse", resp.HookSpecificOutput.HookEventName)
 	}
-	if !strings.Contains(r.SystemMessage, "parse error") {
-		t.Errorf("systemMessage should contain 'parse error', got: %s", r.SystemMessage)
+	if resp.HookSpecificOutput.PermissionDecision != "" {
+		t.Errorf("permissionDecision should be empty, got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
-	if r.HookSpecificOutput.PermissionDecision != "" {
-		t.Errorf("should have no permissionDecision, got: %s", r.HookSpecificOutput.PermissionDecision)
+	if !strings.Contains(resp.SystemMessage, "parse error") {
+		t.Errorf("systemMessage should mention parse error, got %q", resp.SystemMessage)
+	}
+	if strings.Contains(out, `"permissionDecision":""`) {
+		t.Errorf("marshalled JSON must omit empty permissionDecision, got %q", out)
 	}
 }
 
@@ -2803,19 +2811,26 @@ func TestCmdHookLLMDownRulesStillWork(t *testing.T) {
 		t.Errorf("allow rule should still work when LLM is down, got: %s", out)
 	}
 
-	// Unknown command with no rule → systemMessage warning (LLM would decide but it's down)
+	// Unknown command with no rule and LLM down → decisionless envelope
+	// with banner. omitempty drops empty permissionDecision so host
+	// engine decides.
 	payload = fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-down-3","cwd":"%s","tool_input":{"command":"some-unknown-cmd"}}`, projectDir)
 	out = strings.TrimSpace(runHookWithPayload(t, payload))
-	if out == "" {
-		t.Errorf("unknown cmd with LLM down should emit systemMessage, got empty")
-	} else {
-		var r HookResponse
-		if err := json.Unmarshal([]byte(out), &r); err != nil {
-			t.Fatalf("invalid JSON: %v", err)
-		}
-		if !strings.Contains(r.SystemMessage, "LLM unreachable") {
-			t.Errorf("systemMessage should contain 'LLM unreachable', got: %s", r.SystemMessage)
-		}
+	var resp HookResponse
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("expected JSON envelope, got %q (err: %v)", out, err)
+	}
+	if resp.HookSpecificOutput.HookEventName != "PreToolUse" {
+		t.Errorf("hookEventName: got %q, want PreToolUse", resp.HookSpecificOutput.HookEventName)
+	}
+	if resp.HookSpecificOutput.PermissionDecision != "" {
+		t.Errorf("unknown cmd with LLM down should not emit a decision, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+	if !strings.Contains(resp.SystemMessage, "LLM unreachable") {
+		t.Errorf("systemMessage should mention LLM unreachable, got %q", resp.SystemMessage)
+	}
+	if strings.Contains(out, `"permissionDecision":""`) {
+		t.Errorf("marshalled JSON must omit empty permissionDecision, got %q", out)
 	}
 }
 
@@ -3234,19 +3249,23 @@ func TestCmdHookLLMTimeout(t *testing.T) {
 	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"llm-timeout","cwd":"%s","tool_input":{"command":"some-slow-cmd"}}`, projectDir)
 	out := strings.TrimSpace(runHookWithPayload(t, payload))
 
-	// Timeout -> systemMessage warning, no permissionDecision
-	if out == "" {
-		t.Fatal("LLM timeout should emit systemMessage, got empty output")
+	// Timeout goes through the err != nil branch → decisionless envelope
+	// with LLM-unreachable banner.
+	var resp HookResponse
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("expected JSON envelope on timeout, got %q (err: %v)", out, err)
 	}
-	var r HookResponse
-	if err := json.Unmarshal([]byte(out), &r); err != nil {
-		t.Fatalf("invalid JSON output: %v", err)
+	if resp.HookSpecificOutput.HookEventName != "PreToolUse" {
+		t.Errorf("hookEventName: got %q, want PreToolUse", resp.HookSpecificOutput.HookEventName)
 	}
-	if !strings.Contains(r.SystemMessage, "LLM unreachable") {
-		t.Errorf("systemMessage should contain 'LLM unreachable', got: %s", r.SystemMessage)
+	if resp.HookSpecificOutput.PermissionDecision != "" {
+		t.Errorf("permissionDecision should be empty on timeout, got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
-	if r.HookSpecificOutput.PermissionDecision != "" {
-		t.Errorf("should have no permissionDecision, got: %s", r.HookSpecificOutput.PermissionDecision)
+	if !strings.Contains(resp.SystemMessage, "LLM unreachable") {
+		t.Errorf("systemMessage should mention LLM unreachable, got %q", resp.SystemMessage)
+	}
+	if strings.Contains(out, `"permissionDecision":""`) {
+		t.Errorf("marshalled JSON must omit empty permissionDecision, got %q", out)
 	}
 }
 

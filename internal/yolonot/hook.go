@@ -29,8 +29,8 @@ type HookPayload struct {
 type HookResponse struct {
 	HookSpecificOutput struct {
 		HookEventName            string `json:"hookEventName"`
-		PermissionDecision       string `json:"permissionDecision"`
-		PermissionDecisionReason string `json:"permissionDecisionReason"`
+		PermissionDecision       string `json:"permissionDecision,omitempty"`
+		PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"`
 	} `json:"hookSpecificOutput"`
 	SystemMessage string `json:"systemMessage,omitempty"`
 }
@@ -531,15 +531,17 @@ func cmdHook() {
 	text, err := CallLLM(cfg, SystemPrompt, userPrompt, 4096)
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
-		// LLM unavailable → transparent passthrough. Route through the
-		// active adapter so Codex/Gemini see their native wire shape
-		// (empty stdout = host-decides), not Claude's nested envelope.
-		// Claude still gets a user-visible systemMessage banner because
-		// its adapter preserves it; non-Claude adapters return empty for
-		// a decisionless response (see harness_codex.go / harness_gemini.go
-		// FormatHookResponse).
+		// LLM unavailable → emit decisionless envelope with the
+		// incoming hookEventName so Claude Code's schema accepts it
+		// (literal match on hookEventName, permissionDecision omitted
+		// via omitempty so CC defers to host permissions). The
+		// systemMessage banner surfaces the failure in the user's
+		// terminal. Codex/Cursor/Gemini adapters short-circuit on
+		// empty PermissionDecision and emit "" — banner is Claude/
+		// OpenCode-only by design.
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "LLM unavailable: " + err.Error(), DurationMs: ms})
 		r := HookResponse{}
+		r.HookSpecificOutput.HookEventName = payload.HookEventName
 		r.SystemMessage = "yolonot: 🧑‍🚀 LLM unreachable, falling back to host permissions"
 		emitHook(activeHarnessFormat(r))
 		return
@@ -547,9 +549,11 @@ func cmdHook() {
 
 	d := ParseDecision(text)
 	if d == nil {
-		// Parse error → same transparent fallback as LLM-unreachable.
+		// Parse error → same envelope shape as LLM-unreachable, with
+		// a parse-specific banner.
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "parse error", DurationMs: ms})
 		r := HookResponse{}
+		r.HookSpecificOutput.HookEventName = payload.HookEventName
 		r.SystemMessage = "yolonot: 🧑‍🚀 LLM response parse error, falling back to host permissions"
 		emitHook(activeHarnessFormat(r))
 		return
