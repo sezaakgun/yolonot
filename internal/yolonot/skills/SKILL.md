@@ -378,6 +378,36 @@ allow-redirect ./build/**
 
 **Walk-up discovery.** yolonot loads `.yolonot` from cwd upward, stopping at `$HOME`. Closer files win first-match. Commit a repo-root `.yolonot` with team defaults; let subdirs loosen as needed.
 
+### Classifier hints — `context`, `allow-hint`, `ask-hint`
+
+`.yolonot` files also accept prose hints that get injected into the LLM classifier's system prompt. Unlike rules, hints are **not pattern-matched** — the model reads them verbatim and uses them to classify commands the rules don't cover.
+
+```
+context     "cvp service runs in namespace staging (non-prod) and api (prod)"
+allow-hint  "kubectl read/exec/edit on namespace staging is routine"
+ask-hint    "any kubectl write against namespace api requires confirmation"
+```
+
+Hints stack across the walk-up chain (no first-match — union) and merge with classifier hints in `~/.yolonot/config.json` (`classifier.context` / `classifier.allow_hints` / `classifier.ask_hints`). Inspect the resolved merged set with `yolonot classifier config` (read-only); audit for ambiguity / redundancy with `yolonot classifier review`. See `docs/llm-customization.md` for the full schema and the `$defaults` sentinel.
+
+**Skill behavior — hints are AI-suggest-only.** When the user asks the assistant to "add a hint" / "tell yolonot about this namespace" / similar, the assistant must:
+
+1. Ask scope (project `.yolonot` vs `~/.yolonot/config.json`) and type (`context` / `allow-hint` / `ask-hint`). No silent default.
+2. **Print** the line(s) for the user to append. Mutation — do not run.
+
+```
+Append to .yolonot:
+
+    allow-hint  "kubectl read/exec on namespace staging is routine"
+
+What it does: nudges the LLM classifier toward `allow` on commands matching this
+description. Reversible — delete the line.
+```
+
+Never invoke `Edit`, `Write`, `tee >>`, or `echo >>` against `.yolonot`, `~/.yolonot/rules`, or `~/.yolonot/config.json`. Read-only inspection (`yolonot classifier config`, `yolonot classifier review`) may be invoked directly.
+
+A first-class `yolonot hint add|remove|list` binary surface and an interactive `yolonot init` (interview for namespace/service/env when infra dirs detected) are tracked separately — see project issues.
+
 ### `/yolonot quiet [on|off]` — Silence allow banners
 
 Toggle whether yolonot emits a `systemMessage` banner for allow decisions. When `on`, only ask/deny decisions show a banner — allows pass through silently.

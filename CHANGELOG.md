@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-05-11
+
+### Added
+
+- **Skill docs for classifier hints.** `internal/yolonot/skills/SKILL.md`
+  now documents the `context` / `allow-hint` / `ask-hint` directives,
+  walk-up union semantics, and `~/.yolonot/config.json` merge. Codifies
+  the AI-suggest-only behavior pattern: when the user asks the
+  assistant to add a hint, the assistant prompts for scope + type and
+  prints the line to append — never edits `.yolonot` /
+  `~/.yolonot/config.json` directly. First-class binary
+  `yolonot hint add|remove|list` and interactive `yolonot init`
+  interview tracked separately (issue #6).
+
 ## [0.15.0] — 2026-05-11
 
 ### Added
