@@ -137,7 +137,13 @@ func cmdCheck(command string) {
 
 	userPrompt := BuildAnalyzePrompt(command)
 	start := time.Now()
-	text, err := CallLLM(cfg, SystemPrompt, userPrompt, 4096)
+	// Use the same augmented system prompt the real hook path uses
+	// (LLMClassifier.Classify). Without this, `yolonot check` would
+	// show different decisions from what Claude Code actually gets,
+	// since user hints from ~/.yolonot/config.json + .yolonot walk-up
+	// would be invisible to the dry-run.
+	sysPrompt := BuildSystemPrompt(LoadConfig().Classifier, LoadHints())
+	text, err := CallLLM(cfg, sysPrompt, userPrompt, 4096)
 	ms := time.Since(start).Milliseconds()
 
 	if err != nil {

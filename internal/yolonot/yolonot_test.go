@@ -3049,6 +3049,11 @@ func TestCmdProviderInteractiveRequiresTerminal(t *testing.T) {
 
 // --- cmdEvolve (non-interactive: skip all) ---
 
+// Multiplex-tool buckets are keyed by "<tool> <verb>" so destructive and
+// read-only ops on the same tool never share a suggest bucket. Updated
+// from the old "<tool> <subcmd> <resource>" expectation when normalize
+// was rewritten — see commit "fix(suggest): bucket multiplex tools by
+// verb, not first 3 tokens".
 func TestNormalizeCommand_Simple(t *testing.T) {
 	got := normalizeCommand("kubectl get pods")
 	if got != "kubectl get pods" {
@@ -3057,10 +3062,82 @@ func TestNormalizeCommand_Simple(t *testing.T) {
 }
 
 func TestNormalizeCommand_StripsUUIDs(t *testing.T) {
+	// kubectl is multiplex — verb+resource captured, ID stripped.
 	got := normalizeCommand("kubectl delete job abc123def456 -n dev")
-	// abc123def456 is 12 hex chars, matches [0-9a-f]{8,}
 	if got != "kubectl delete job" {
 		t.Errorf("expected 'kubectl delete job', got '%s'", got)
+	}
+}
+
+// TestNormalizeCommand_MultiplexSkipsFlags is the bug fix from this
+// commit: kubectl with --context flag previously normalized to
+// "kubectl --context prod-X" because the verb sat past the 3-token
+// horizon. Two commands with the same context but opposite risk
+// (delete vs get) would land in the same bucket and any allow-cmd
+// rule would auto-allow destructive ops. Now they split cleanly.
+func TestNormalizeCommand_MultiplexSkipsFlags(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"kubectl --context prod-X -n dev delete deployment app", "kubectl delete deployment"},
+		{"kubectl --context prod-X -n dev get pods", "kubectl get pods"},
+		{"kubectl -n prod exec pod -- sh", "kubectl exec pod"},
+		{"aws --profile prod ec2 describe-instances", "aws ec2 describe-instances"},
+		{"aws --region eu-west-1 s3 ls", "aws s3 ls"},
+		{"docker -H tcp://x run --rm image", "docker run"},
+		{"gh pr comment 123 --body lgtm", "gh pr comment"},
+		{"git -c user.email=x commit -m msg", "git commit"},
+	}
+	for _, tc := range cases {
+		got := normalizeCommand(tc.in)
+		if got != tc.want {
+			t.Errorf("normalizeCommand(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestNormalizeCommand_NonMultiplexUnchanged keeps the old 3-token
+// fallback verified for commands that aren't multiplex tools. `rm`,
+// `cat`, `echo` are single-verb so the first-3 behavior is correct.
+func TestNormalizeCommand_NonMultiplexUnchanged(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"rm /tmp/cache-1234567890", "rm /tmp/cache-1234567890"},
+		{"cat /etc/hosts", "cat /etc/hosts"},
+		{"echo hello world", "echo hello world"},
+		{"./release.sh --env dev", "./release.sh --env dev"},
+	}
+	for _, tc := range cases {
+		got := normalizeCommand(tc.in)
+		if got != tc.want {
+			t.Errorf("normalizeCommand(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestNormalizeCommand_StripsWrapper covers the sudo/rtk/time prefix
+// stripping — without it, every `rtk kubectl delete pod` would bucket
+// under "rtk kubectl delete" instead of "kubectl delete", fragmenting
+// suggest output for users who run commands via wrappers.
+func TestNormalizeCommand_StripsWrapper(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"rtk kubectl get pods", "kubectl get pods"},
+		{"sudo kubectl delete pod foo", "kubectl delete pod"},
+		{"time go test ./...", "go test ./..."},
+		{"FOO=bar kubectl get pods", "kubectl get pods"},
+		{"nohup curl https://example.com", "curl https://example.com"},
+	}
+	for _, tc := range cases {
+		got := normalizeCommand(tc.in)
+		if got != tc.want {
+			t.Errorf("normalizeCommand(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -3175,7 +3252,7 @@ func TestEvolve_EmptyLog(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()
 
-	out := captureStdout(func() { cmdEvolve() })
+	out := captureStdout(func() { cmdEvolve(nil) })
 	if !strings.Contains(out, "No decision log") {
 		t.Errorf("should say no decisions for empty log, got: %s", out)
 	}

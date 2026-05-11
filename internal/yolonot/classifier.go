@@ -182,8 +182,8 @@ func ActiveClassifier() Classifier {
 		}
 	}
 	cfg := LoadConfig()
-	if cfg.Classifier != "" {
-		if c := GetClassifier(cfg.Classifier); c != nil {
+	if cfg.Classifier.Impl != "" {
+		if c := GetClassifier(cfg.Classifier.Impl); c != nil {
 			return c
 		}
 	}

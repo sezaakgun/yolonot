@@ -80,7 +80,7 @@ func Run() {
 		}
 		cmdLog(n)
 	case "suggest":
-		cmdEvolve()
+		cmdEvolve(os.Args[2:])
 	case "uninstall":
 		cmdUninstall()
 	case "pause":
@@ -98,6 +98,8 @@ func Run() {
 		cmdProfile(os.Args[2:])
 	case "pre-check", "precheck":
 		cmdPreCheck(os.Args[2:])
+	case "classifier":
+		cmdClassifier(os.Args[2:])
 	case "quiet":
 		cmdQuiet(os.Args[2:])
 	case "local-allow", "localallow":
@@ -131,7 +133,7 @@ func Run() {
 		}
 		cmdEval(opts)
 	case "evolve":
-		cmdEvolve()
+		cmdEvolve(os.Args[2:])
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
@@ -221,6 +223,7 @@ func cmdDefault() {
 	fmt.Println("  profile     Pick a named risk policy (fast/balanced/strict/paranoid + custom)")
 	fmt.Println("  risk        Show/set per-harness risk tier → action policy")
 	fmt.Println("  pre-check   Manage pre-checkers (fast-allow + external hooks like dippy)")
+	fmt.Println("  classifier  Inspect/review LLM classifier prompt customization")
 	fmt.Println("  quiet       Silence banners for allow decisions (only show ask/deny)")
 	fmt.Println("  pause       Disable yolonot for current session (total bypass)")
 	fmt.Println("  resume      Re-enable yolonot for current session")

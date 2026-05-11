@@ -49,6 +49,25 @@ allow-cmd git status   "read-only inspection"
 
 Without a message, the model sees `"yolonot: 🧑‍🚀 rule *rm -rf /*"` (generic). With one, it sees the actual reason. Embedded quotes escape with `\"`. The leading quote must be preceded by whitespace, so patterns like `*"quoted"*` are preserved intact.
 
+## Classifier hints (`context`, `allow-hint`, `ask-hint`)
+
+The same `.yolonot` file accepts prose hints that get injected into the
+LLM classifier's system prompt. Unlike rules, hints are not
+pattern-matched — the model reads them verbatim and uses them to decide
+how to classify commands the rules don't cover.
+
+```
+context     "this repo deploys to ECS cluster yourorg-services in eu-west-1"
+allow-hint  "Writing to ./build/ and ./dist/ is part of every test run"
+ask-hint    "Never modify files under infra/k8s/prod/ without confirmation"
+```
+
+Hints stack across the walk-up chain (no first-match) and merge with the
+personal global config in `~/.yolonot/config.json`. See
+[docs/llm-customization.md](llm-customization.md) for the full schema,
+the `$defaults` sentinel, and the inspection commands
+(`yolonot classifier defaults | config | review`).
+
 ## `allow-redirect` — pre-approved write targets
 
 Output redirects normally force a command out of the `fast-allow` path into the LLM (on the assumption that `> anywhere` is dangerous). Declare known-safe write targets with `allow-redirect`:

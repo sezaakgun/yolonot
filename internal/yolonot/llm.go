@@ -67,6 +67,7 @@ func isLoopbackHost(host string) bool {
 // maps tier → final action via its RiskMap.
 const SystemPrompt = `You are a command safety classifier. Evaluate in this EXACT order:
 Output ONLY JSON: {"decision":"allow|ask","risk":"safe|low|moderate|high|critical","short":"6 words or fewer","reasoning":"one line"}
+The "risk" field is REQUIRED on every response. If decision="allow" you MUST still emit risk (safe or low). If decision="ask" you MUST still emit risk (any of the five tiers). Never omit risk, even on shortcut allow paths.
 The "short" field is a human-readable label shown in the user's terminal banner (e.g. "read-only kubectl get", "destructive prod mutation"). Keep it under 60 chars, no punctuation at the end. The "reasoning" field is the full explanation for logs.
 
 Risk tier — pick ONE, based on REVERSIBILITY and BLAST RADIUS, not on how confident you feel:
@@ -131,7 +132,136 @@ STEP 3 — Is this sensitive or dangerous? If yes → ASK.
     Running unfamiliar binaries
 
 STEP 4 — If none of the above matched → ASK.
-When in doubt, ask. False allow is worse than false ask.`
+When in doubt, ask. False allow is worse than false ask.
+
+TIER REFINEMENT — apply after picking a tier above:
+  Tests, builds, lints, and package installs are tier=low even when the user sees no diff — they write caches, artifacts, lockfiles, fetch network deps. Examples: pytest, go test, npm test, cargo test, make build, golangci-lint, npm install, pip install, docker build.
+  Chained commands (&&, ||, ;, |) take the tier of the MOST DANGEROUS stage, not the first. "kubectl get && kubectl delete deployment api" is at the tier of "kubectl delete deployment", not "kubectl get".
+  Scope multipliers escalate the tier by one level. --all, -r / --recursive, label selectors (-l), and xargs chains turn a high-tier verb into critical, a moderate verb into high. "kubectl delete pod foo" is high; "kubectl delete pods --all" or "kubectl get pods | xargs kubectl delete" is critical.`
+
+// DefaultsSentinel is the literal token recognized inside ClassifierConfig
+// hint slices to splice in yolonot's built-in lists. Today the built-in
+// lists are empty (the base SystemPrompt already encodes safety rules), so
+// the sentinel is a no-op preserved for forward-compat parity with Claude
+// Code's autoMode contract — users who omit it take full ownership of the
+// list, users who include it will continue to inherit anything we ship in
+// the future without editing their config.
+const DefaultsSentinel = "$defaults"
+
+// builtinClassifierContext, builtinClassifierAllowHints,
+// builtinClassifierAskHints are the lists the $defaults sentinel expands
+// to inside ClassifierConfig hint slices.
+//
+// Design rules these defaults follow:
+//
+//  1. Complementary to SystemPrompt, not duplicative. The base prompt
+//     already encodes the risk taxonomy, the read-only-is-safe principle,
+//     and named DANGEROUS / SENSITIVE examples. Defaults here cover what
+//     it does not — trust framing for "what counts as external", scoping
+//     for ambiguous file/IAM/cloud verbs, and the pre-existing-vs-generated
+//     distinction for destructive ops.
+//  2. Generic. No org names, no domains, no path prefixes specific to a
+//     real environment. Users overlay per-project specifics via
+//     `~/.yolonot/config.json` and walk-up `.yolonot` files; the defaults
+//     have to make sense in any repo.
+//  3. yolonot-vocabulary. Phrased in the ask/allow language yolonot's LLM
+//     actually emits — never "soft_deny" or "block", which the model
+//     would have to re-translate.
+//  4. Tight. Each entry is one sentence. The full default set adds well
+//     under 1KB to the system prompt; extra tokens are paid on every
+//     classification call.
+var (
+	builtinClassifierContext = []string{
+		"Trust the current working directory and the enclosing git repository as the user's primary workspace; treat writes inside it as routine local activity, not exfiltration.",
+		"Trust the configured remotes of the current git repository (origin, upstream, and any remote URL the repo already pushes to) as the user's intended source-control destinations.",
+		"Treat anything outside those two trust anchors — unfamiliar domains, IP literals, third-party paste targets, raw IPs in URLs — as external until the user's configuration says otherwise.",
+	}
+	builtinClassifierAllowHints = []string{
+		"Installing dependencies declared in this project's lock files or manifests (package.json + lockfile, requirements.txt, go.mod, Cargo.toml, Gemfile, pyproject.toml, composer.json) is routine — these run installer scripts but the user has effectively pre-approved them by checking the manifest in.",
+		"Read-only HTTP requests (curl/wget with GET or HEAD, no body, no -X POST/PUT/PATCH/DELETE, no -d/--data, no upload flags) are allowed; treat them as data-fetch, not exfiltration.",
+		"Pushing to a feature branch the user is currently on, or to a branch name created during this session, is allowed; only pushes to shared protected branches (main, master, release/*, prod/*) raise the bar.",
+		"Reading project config that contains credentials (.env, .npmrc, .docker/config.json) is allowed when the credentials are obviously about to be sent to the API they belong to (the matching SDK, registry, or CLI). Reading them to print, copy elsewhere, or pipe to an unrelated command is not.",
+	}
+	builtinClassifierAskHints = []string{
+		"Granting or modifying IAM, RBAC, or source-control permissions (aws iam, gcloud iam, kubectl create rolebinding, gh repo collaborator, gh api with permission payloads) requires confirmation regardless of the target name — escalation is the highest-leverage destructive action available.",
+		"Mass deletion on cloud storage (aws s3 rm with --recursive or wildcards, gcloud storage rm -r, gsutil -m rm, az storage blob delete-batch) requires confirmation even on buckets that look ephemeral; bucket names lie.",
+		"Modifying files under directories whose path contains prod, production, live, mainnet, or shared (Terraform modules, Pulumi stacks, Kubernetes overlays, Ansible inventory) requires confirmation; these are operating-environment changes regardless of which CLI invokes them.",
+		"Irreversibly destroying files that existed before this session (rm/mv/git rm of source files the user did not create in this conversation; git checkout -- on dirty tracked files; git reset --hard) requires confirmation. Cleaning up build artifacts, caches, node_modules, __pycache__, .pytest_cache, dist/, target/, and similar generated paths does not.",
+		"Force-pushing (git push --force, --force-with-lease against a branch the user does not currently own) requires confirmation even on feature branches; lost commits are not recoverable from yolonot's vantage point.",
+		"Downloading and executing code in a single step (curl ... | sh, wget ... | bash, eval \"$(curl ...)\", source <(curl ...), iex (irm ...), pipx run from non-PyPI URLs) requires confirmation; the script's contents are not visible to the user before execution.",
+	}
+)
+
+// expandDefaults replaces every $defaults sentinel in input with the
+// supplied built-in list, preserving the user's surrounding entries. Other
+// entries (including the empty string) pass through unchanged so callers
+// don't need to filter before invoking.
+func expandDefaults(input, builtin []string) []string {
+	if len(input) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(input)+len(builtin))
+	for _, s := range input {
+		if s == DefaultsSentinel {
+			out = append(out, builtin...)
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// BuildSystemPrompt returns the system prompt that should be sent to the
+// LLM classifier for this invocation. With empty cfg and empty walkup it
+// returns SystemPrompt verbatim — a load-bearing backward-compat
+// invariant covered by TestBuildSystemPromptDefaultByteEqual.
+//
+// When the user has supplied any context/allow/ask hints (via
+// ~/.yolonot/config.json or .yolonot walk-up files), they are appended in
+// labeled sections after the base prompt so the model can tell what's
+// project-specific from what shipped in yolonot. The $defaults sentinel
+// is expanded before assembly.
+func BuildSystemPrompt(cfg ClassifierConfig, walkup WalkupHints) string {
+	context := append([]string{}, expandDefaults(cfg.Context, builtinClassifierContext)...)
+	context = append(context, walkup.Context...)
+	allow := append([]string{}, expandDefaults(cfg.AllowHints, builtinClassifierAllowHints)...)
+	allow = append(allow, walkup.AllowHints...)
+	ask := append([]string{}, expandDefaults(cfg.AskHints, builtinClassifierAskHints)...)
+	ask = append(ask, walkup.AskHints...)
+
+	if len(context) == 0 && len(allow) == 0 && len(ask) == 0 {
+		return SystemPrompt
+	}
+
+	var b strings.Builder
+	b.WriteString(SystemPrompt)
+	if len(context) > 0 {
+		b.WriteString("\n\nProject context (from this user's configuration; treat as trusted background):\n")
+		for _, s := range context {
+			b.WriteString("- ")
+			b.WriteString(s)
+			b.WriteString("\n")
+		}
+	}
+	if len(allow) > 0 {
+		b.WriteString("\nProject allow hints (lean toward allow when these clearly apply):\n")
+		for _, s := range allow {
+			b.WriteString("- ")
+			b.WriteString(s)
+			b.WriteString("\n")
+		}
+	}
+	if len(ask) > 0 {
+		b.WriteString("\nProject ask hints (lean toward ask when these clearly apply, regardless of how routine the command looks):\n")
+		for _, s := range ask {
+			b.WriteString("- ")
+			b.WriteString(s)
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\nUser message overrides allow hints when the user has explicitly and specifically asked for the action that an ask hint would otherwise flag.")
+	return strings.TrimRight(b.String(), "\n")
+}
 
 // ComparePrompt is used for session similarity checking.
 const ComparePrompt = `You compare a new command against previously approved commands.
@@ -555,7 +685,8 @@ func (*LLMClassifier) Classify(_ context.Context, cmd string, _ ClassifyMeta) (R
 	if cfg.URL == "" || cfg.Model == "" {
 		return RiskResult{Backend: "llm"}, fmt.Errorf("llm not configured")
 	}
-	raw, err := CallLLM(cfg, SystemPrompt, BuildAnalyzePrompt(cmd), 300)
+	sysPrompt := BuildSystemPrompt(LoadConfig().Classifier, LoadHints())
+	raw, err := CallLLM(cfg, sysPrompt, BuildAnalyzePrompt(cmd), 300)
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
 		return RiskResult{Backend: "llm", LatencyMs: ms}, err

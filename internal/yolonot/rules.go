@@ -19,6 +19,34 @@ type Rule struct {
 	Message string // optional, shown to the AI via permissionDecisionReason
 }
 
+// Hint is a prose directive that gets injected into the LLM classifier's
+// system prompt. Unlike Rule, hints are not pattern-matched — they are read
+// verbatim by the model, the same way Claude Code's autoMode treats
+// environment / allow / soft_deny entries.
+//
+// Type is one of:
+//   - "context"     — describes trusted infrastructure (repos, buckets, domains)
+//   - "allow-hint"  — nudges the classifier toward `allow` on routine patterns
+//   - "ask-hint"    — nudges the classifier toward `ask` on environment-specific risks
+//
+// Hints stack across the .yolonot walk-up chain — every file's entries are
+// concatenated in walk-up order (closest-to-cwd first), so a project's hints
+// extend rather than override a parent's. There is no first-match semantics
+// for hints; the LLM reads the union.
+type Hint struct {
+	Type string
+	Text string
+}
+
+// WalkupHints groups hints by type as collected from the .yolonot walk-up
+// chain. Returned by LoadHints; consumed by BuildSystemPrompt to assemble
+// the system prompt sent to the classifier.
+type WalkupHints struct {
+	Context    []string
+	AllowHints []string
+	AskHints   []string
+}
+
 type RuleMatch struct {
 	Action  string
 	Pattern string
@@ -42,6 +70,100 @@ func LoadRules() []Rule {
 		rules = append(rules, loadRulesFromFile(path)...)
 	}
 	return rules
+}
+
+// LoadHints reads classifier hints from the same .yolonot walk-up chain as
+// LoadRules. Unlike rules, hints stack across every file in the chain — the
+// LLM gets the union as part of its system prompt, with closer-to-cwd files
+// listed first so per-project context appears before per-team or per-user.
+func LoadHints() WalkupHints {
+	paths := yolonotConfigSearchPaths()
+
+	var out WalkupHints
+	for _, path := range paths {
+		for _, h := range loadHintsFromFile(path) {
+			switch h.Type {
+			case "context":
+				out.Context = append(out.Context, h.Text)
+			case "allow-hint":
+				out.AllowHints = append(out.AllowHints, h.Text)
+			case "ask-hint":
+				out.AskHints = append(out.AskHints, h.Text)
+			}
+		}
+	}
+	return out
+}
+
+// loadHintsFromFile parses a single .yolonot file and returns any prose
+// hints it declares. Format mirrors the rule format but the body is a
+// quoted string instead of a glob pattern:
+//
+//	context     "trusted infra: github.com/yourorg/*, *.example.com"
+//	allow-hint  "kubectl get on prod-* namespaces is read-only"
+//	ask-hint    "never modify files under infra/terraform/prod/"
+//
+// Empty bodies and unquoted bodies are silently skipped — the parser is
+// permissive on malformed lines for the same reason loadRulesFromFile is:
+// shared rule files mix both kinds and an unfamiliar directive must not
+// cause the whole file to fail to load.
+func loadHintsFromFile(path string) []Hint {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var hints []Hint
+	scanner := bufio.NewScanner(f)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		directive := parts[0]
+		body := strings.TrimSpace(parts[1])
+		switch directive {
+		case "context", "allow-hint", "ask-hint":
+		default:
+			continue
+		}
+		text := unquoteHintBody(body)
+		if text == "" {
+			// A recognized hint directive with an unparseable body is
+			// almost always a quoting mistake (`allow-hint kubectl get
+			// is fine` without quotes). Silent skip would mean "why is
+			// my hint not working?" support volume; warn loudly with
+			// path:line:directive so users can locate and fix it. Same
+			// pattern as loadRulesFromFile's redirect warning.
+			fmt.Fprintf(os.Stderr,
+				"yolonot: %s:%d: %s body must be a double-quoted string; line ignored\n",
+				path, lineNum, directive)
+			continue
+		}
+		hints = append(hints, Hint{Type: directive, Text: text})
+	}
+	return hints
+}
+
+// unquoteHintBody strips the surrounding quotes from a hint body and
+// resolves \" escapes. Returns "" if the body isn't a single quoted string.
+// We deliberately don't tolerate unquoted bodies — prose is allowed to
+// contain spaces, hashes, and other characters that would otherwise need
+// shell-style escaping; quoting keeps the parser unambiguous.
+func unquoteHintBody(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return ""
+	}
+	inner := s[1 : len(s)-1]
+	return strings.ReplaceAll(inner, `\"`, `"`)
 }
 
 // yolonotConfigSearchPaths returns the ordered list of .yolonot paths that

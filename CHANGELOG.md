@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Classifier prompt customization.** New `classifier.context` /
+  `classifier.allow_hints` / `classifier.ask_hints` config block lets users
+  inject prose into the LLM classifier's system prompt — trusted infra,
+  routine-but-flagged patterns, environment-specific risks. Mirrors Claude
+  Code's `autoMode` shape (with `ask_hints` instead of `soft_deny` since
+  yolonot's LLM emits `ask`, not `deny`). Includes the `$defaults`
+  sentinel for splicing yolonot's built-in entries.
+- **Built-in classifier defaults.** Generic, org-agnostic entries shipped
+  in each list (3 context, 4 allow, 6 ask) — trust framing, scoping for
+  IAM and mass cloud-deletion verbs, pre-existing-vs-generated file
+  distinction, force-push and curl-pipe-shell coverage. Complements rather
+  than duplicates the base SystemPrompt. Printed via
+  `yolonot classifier defaults`. Inheritable via `"$defaults"` in user
+  hint lists.
+- **`.yolonot` walk-up DSL** picks up `context "..."`,
+  `allow-hint "..."`, `ask-hint "..."` directives alongside existing
+  rules. Hints stack across the chain; same git-repo-root trust boundary
+  as rules.
+- **`yolonot classifier`** command: `defaults` (built-in prompt + empty
+  default lists as JSON), `config` (effective merged hints, `$defaults`
+  expanded, plus the actual system prompt that will be sent), `review`
+  (LLM-driven audit of custom hints).
+- **`yolonot eval --with-hints`** flag opts the eval suite into using
+  `BuildSystemPrompt(LoadConfig().Classifier, LoadHints())` instead of
+  the raw `SystemPrompt` const. Off by default for reproducibility — the
+  shipped suite scores stay machine-independent unless you ask
+  otherwise. Useful for A/B testing whether a hint change actually
+  improves classification.
+- **`yolonot eval --metric risk`** grades the LLM's policy-neutral risk
+  tier (`safe`/`low`/`moderate`/`high`/`critical`) against each case's
+  `expected_risk` field instead of the `allow`/`ask` decision. Policy
+  layers (profile, RiskMap, harness) don't affect this metric, so it
+  isolates prompt-quality signal. Cases without `expected_risk` are
+  skipped with a count; brownfield suites are skipped entirely.
+- See [docs/llm-customization.md](docs/llm-customization.md) for the full
+  schema, examples, and security notes.
+
+### Changed
+
+- **`yolonot suggest` bucketing for multiplex tools.** `normalizeCommand`
+  now recognizes multiplex CLIs (`kubectl`, `docker`, `aws`, `gcloud`,
+  `helm`, `git`, `npm`, `gh`, `terraform`, …) and buckets by
+  `<tool> <verb> [<resource>]` instead of the first 3 tokens. Previously
+  commands like `kubectl --context prod-X delete deployment app` and
+  `kubectl --context prod-X get pods` bucketed together under
+  `kubectl --context prod-X`, where any glob rule would either
+  auto-allow destructive ops or block legitimate reads. Now they split
+  into `kubectl delete deployment` and `kubectl get pods`, each with
+  appropriate rule suggestions. Also strips transparent wrappers
+  (`sudo`, `rtk`, `time`, `nohup`, ENV-prefix) so wrapper-prefixed runs
+  don't fragment buckets.
+- **`yolonot suggest` now offers hint suggestions.** Two new TUI
+  options propose `allow-hint`/`ask-hint` prose for the pattern in
+  addition to the existing `allow-cmd`/`deny-cmd`/`ask-cmd` globs.
+  Useful for buckets where a glob would be too broad or too narrow —
+  prose describes risk-class boundaries that the LLM can interpret.
+- `Config.Classifier` is now an object; the legacy string form
+  (`"classifier": "llm"`) still loads and round-trips as a string, so
+  existing configs are unaffected. With no hints set, the system prompt
+  sent to the model is byte-equal to prior releases — locked in by test.
+
+
 ## [0.14.0] — 2026-05-07
 
 ### Added

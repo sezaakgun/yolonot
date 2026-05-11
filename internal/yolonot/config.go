@@ -27,7 +27,7 @@ type ProviderConfig struct {
 
 type Config struct {
 	Provider     ProviderConfig               `json:"provider"`
-	Classifier   string                       `json:"classifier,omitempty"`    // empty → "llm" (default). Env var YOLONOT_CLASSIFIER overrides. Future values: "heuristic", "knn", "hybrid".
+	Classifier   ClassifierConfig             `json:"classifier,omitempty"`    // backend choice + LLM prompt customization (context / allow_hints / ask_hints). Accepts legacy string form ("llm") for backward compat. Env var YOLONOT_CLASSIFIER overrides backend selection.
 	RiskMaps     map[string]map[string]string `json:"risk_maps,omitempty"`     // per-harness tier→action override. Outer key = harness name; inner key = risk tier; value ∈ {allow, ask, deny, passthrough}. Merged on top of each harness's shipped defaults.
 	PreCheck     PreCheckList                 `json:"pre_check,omitempty"`     // optional pre-checkers run before yolonot's pipeline; "fast-allow" is a reserved sentinel for the built-in Go bash parser, others are external hook binaries (e.g. /opt/homebrew/bin/dippy). First "allow" wins.
 	QuietOnAllow bool                         `json:"quiet_on_allow,omitempty"` // when true, allow decisions emit no systemMessage — only ask/deny show a banner
@@ -48,6 +48,69 @@ type Config struct {
 	// ValidateCustomProfile at create time. Names must not collide with
 	// built-ins.
 	CustomProfiles map[string]map[string]string `json:"custom_profiles,omitempty"`
+}
+
+// ClassifierConfig holds the classifier backend choice plus prose tuning that
+// gets injected into the LLM system prompt. JSON parses two shapes for
+// backward compatibility:
+//
+//	"classifier": "llm"                                 // legacy string form
+//	"classifier": {"impl": "llm", "context": [...] }    // new object form
+//
+// The legacy form maps to {Impl: "llm"} with empty hint slices, so older
+// configs and older tests keep working byte-for-byte.
+//
+// Hint slices accept the literal string "$defaults" as a sentinel that is
+// spliced in place of yolonot's built-in lists when the system prompt is
+// assembled (today the built-in lists are empty; the sentinel is reserved for
+// forward-compat parity with Claude Code's autoMode contract). Omitting the
+// sentinel takes full ownership of the list.
+type ClassifierConfig struct {
+	Impl       string   `json:"impl,omitempty"`        // "llm" (default), "heuristic", "knn", ...
+	Context    []string `json:"context,omitempty"`     // prose describing trusted infra (repos, buckets, domains)
+	AllowHints []string `json:"allow_hints,omitempty"` // prose nudging classifier toward allow on routine patterns
+	AskHints   []string `json:"ask_hints,omitempty"`   // prose nudging classifier toward ask on environment-specific risks
+}
+
+// UnmarshalJSON accepts either a JSON string ("llm") or a JSON object,
+// preserving compatibility with configs written by every prior yolonot
+// version that shipped `classifier: <string>`.
+func (c *ClassifierConfig) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return fmt.Errorf("classifier: %w", err)
+		}
+		c.Impl = s
+		return nil
+	}
+	// Use a type alias so the recursive call doesn't re-enter this method.
+	type raw ClassifierConfig
+	var r raw
+	if err := json.Unmarshal(data, &r); err != nil {
+		return fmt.Errorf("classifier: expected string or object")
+	}
+	*c = ClassifierConfig(r)
+	return nil
+}
+
+// MarshalJSON keeps the legacy string form on disk when only Impl is set
+// (i.e. no prose tuning). This means an existing config that loaded as
+// "classifier": "llm" round-trips unchanged through Save — important so we
+// don't silently rewrite every user's config the first time they upgrade.
+func (c ClassifierConfig) MarshalJSON() ([]byte, error) {
+	if len(c.Context) == 0 && len(c.AllowHints) == 0 && len(c.AskHints) == 0 {
+		if c.Impl == "" {
+			return []byte(`""`), nil
+		}
+		return json.Marshal(c.Impl)
+	}
+	type raw ClassifierConfig
+	return json.Marshal(raw(c))
 }
 
 // FastAllowSentinel is the reserved entry in Config.PreCheck that dispatches
@@ -1023,11 +1086,56 @@ func cmdStatus() {
 // such variable parts get grouped together.
 var idTokenRe = regexp.MustCompile(`^[0-9a-f]{8,}$|^\d{10,}$`)
 
+// multiplexTools are commands where the subcommand verb (get/delete/apply/...)
+// is the actual risk signal, not the head command. For these, normalize to
+// "<tool> <verb>" by skipping flags and their values between the head and
+// the first positional token. Without this, suggest buckets `kubectl get`
+// and `kubectl delete` together under "kubectl --context X" and any
+// allow/deny rule becomes catastrophic.
+var multiplexTools = map[string]bool{
+	"kubectl": true, "k": true,
+	"docker": true, "podman": true,
+	"helm":      true,
+	"aws":       true, "gcloud": true, "az": true,
+	"git":       true,
+	"npm":       true, "pnpm": true, "yarn": true, "bun": true,
+	"pip":       true, "pip3": true, "uv": true,
+	"cargo":     true, "go": true,
+	"brew":      true,
+	"terraform": true, "tf": true, "pulumi": true,
+	"ansible":   true, "ansible-playbook": true,
+	"gh":        true,
+	"systemctl": true, "service": true,
+}
+
 func normalizeCommand(cmd string) string {
 	tokens := strings.Fields(cmd)
 	if len(tokens) == 0 {
 		return ""
 	}
+	head := tokens[0]
+	// Strip a leading process-wrapper if present (sudo, rtk, time, nohup,
+	// nice, ENV=value). These aren't the real head command — the next
+	// non-wrapper token is.
+	for len(tokens) > 1 && isProcessWrapper(head) {
+		tokens = tokens[1:]
+		head = tokens[0]
+	}
+
+	// Multiplex tools: walk past flags + flag values until the first
+	// positional token, which is the subcommand verb. Bucket by
+	// "<tool> <verb>" regardless of intervening --context, -n, --profile,
+	// etc. Result: "kubectl get" and "kubectl delete" never share a bucket.
+	if multiplexTools[head] && len(tokens) > 1 {
+		if verb := extractSubcommandVerb(tokens[1:]); verb != "" {
+			return head + " " + verb
+		}
+		return head
+	}
+
+	// Non-multiplex tools: preserve the existing 3-token fallback with
+	// ID-token stripping. Catches simple cases like `rm /tmp/foo`,
+	// `cat /etc/hosts`, where the entire command shape is the signal.
 	if len(tokens) > 3 {
 		tokens = tokens[:3]
 	}
@@ -1042,6 +1150,63 @@ func normalizeCommand(cmd string) string {
 		return tokens[0]
 	}
 	return strings.Join(cleaned, " ")
+}
+
+// isProcessWrapper reports whether tok is a transparent wrapper command
+// that doesn't change the risk profile of what follows. Mirrors (a subset
+// of) the fast-allow wrappers list; only the ones likely to appear in
+// suggest history.
+func isProcessWrapper(tok string) bool {
+	if strings.Contains(tok, "=") {
+		return true // ENV=value sh script.sh — assignment prefix
+	}
+	switch tok {
+	case "sudo", "rtk", "time", "nohup", "nice", "command", "builtin":
+		return true
+	}
+	return false
+}
+
+// extractSubcommandVerb returns up to two positional tokens after a
+// multiplex tool, joined by space, skipping flags and their values.
+// Returns "" if no positional token exists. Logic:
+//
+//   - "-X=value" or "--X=value" → skip (inline value, single token)
+//   - "-X" or "--X" → skip; if next token doesn't start with "-" assume
+//     it's the flag's value and skip that too
+//   - first positional → start of verb; second positional if present is
+//     joined ("docker compose down", "kubectl get pods", "aws s3 ls")
+//
+// Two positionals is the sweet spot: enough granularity to split
+// `kubectl delete pod` from `kubectl delete deployment` (very different
+// blast radius), without dragging in IDs and resource names that vary
+// per invocation and would fragment buckets.
+//
+// Imperfect for boolean flags like `--all` or `-f` that genuinely take
+// no value — we may consume an extra positional. Acceptable: rare in
+// multiplex-tool usage and the failure mode is "verb is one token
+// shorter than ideal", not wrong-bucket.
+func extractSubcommandVerb(args []string) string {
+	var verbs []string
+	for i := 0; i < len(args); i++ {
+		tok := args[i]
+		if !strings.HasPrefix(tok, "-") {
+			verbs = append(verbs, tok)
+			if len(verbs) >= 2 {
+				break
+			}
+			continue
+		}
+		if strings.Contains(tok, "=") {
+			continue // inline value, single token
+		}
+		// Long or short flag without inline value: consume next token
+		// as its value if it doesn't look like another flag.
+		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+		}
+	}
+	return strings.Join(verbs, " ")
 }
 
 // timeWeight returns a weight for a decision based on how recent it is.
@@ -1165,7 +1330,26 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 	return findings
 }
 
-func cmdEvolve() {
+func cmdEvolve(args []string) {
+	// --basic disables LLM-driven suggestions and falls back to the
+	// statistics-only flow. We default smart-on because the
+	// template-only output ("hint allow → ... on <add scope>") is
+	// almost never what the user wants, but offline users + CI need
+	// an opt-out.
+	basic := false
+	for _, a := range args {
+		switch a {
+		case "--basic":
+			basic = true
+		case "--help", "-h":
+			fmt.Println("Usage: yolonot suggest [--basic]")
+			fmt.Println()
+			fmt.Println("  --basic   Skip LLM-driven action recommendation; show only the")
+			fmt.Println("            statistics-derived hint/rule templates.")
+			return
+		}
+	}
+
 	entries := ReadRecentDecisions(10000) // read all
 	if len(entries) == 0 {
 		fmt.Println("No decision log found. Use yolonot for a while first.")
@@ -1182,8 +1366,20 @@ func cmdEvolve() {
 
 	fmt.Printf("SUGGEST: Analyzed %d decisions\n\n", len(entries))
 
+	// Smart-suggest cache: persisted across runs so a tuning session
+	// doesn't re-pay LLM cost for already-judged patterns. Loaded
+	// once, written eagerly per new judgment in cachedOrSmart.
+	cache := loadSuggestCache()
+	smartEnabled := !basic && GetLLMConfig().URL != "" && GetLLMConfig().Model != ""
+
 	var changes []evolveChange
 
+	// Labeled loop so `break suggestLoop` inside the nested action switch
+	// reliably aborts the session. Without the label, `break` only exits
+	// the switch, leaving the for-loop to silently advance to the next
+	// finding when the user cancels a scope picker. Cancellation is the
+	// session-end signal here, never a "skip just this one".
+suggestLoop:
 	for i, f := range findings {
 		// Print finding with examples
 		fmt.Printf("[%d/%d] \"%s\" -- %s\n", i+1, len(findings), f.Pattern, f.Desc)
@@ -1199,50 +1395,147 @@ func cmdEvolve() {
 		}
 		fmt.Println()
 
-		// TUI action selection
-		items := []string{
-			fmt.Sprintf("allow -- allow-cmd %s*", f.Pattern),
-			fmt.Sprintf("deny  -- deny-cmd *%s*", f.Pattern),
-			fmt.Sprintf("ask   -- ask-cmd *%s*", f.Pattern),
+		// Smart-suggest: ask the LLM to read the examples and propose a
+		// specific recommendation. Inserts at position 0 with prefilled
+		// prose so user just hits Enter to accept. Falls through
+		// silently if --basic or no provider.
+		var smart SmartSuggestion
+		hasSmart := false
+		if smartEnabled {
+			smart, hasSmart = cachedOrSmart(f, &cache)
+		}
+
+		// TUI action selection. Hint options come first because vague
+		// buckets (kubectl/aws/git, where the same prefix covers both
+		// destructive and read-only ops) are common and a glob rule is
+		// usually the wrong fix — auto-allow would catch the
+		// destructive sibling on next match. Hints are prose that the
+		// LLM reads, so they can describe risk-class boundaries that a
+		// glob can't.
+		baseItems := []string{
+			fmt.Sprintf("hint allow → allow-hint \"%s on <add scope> is routine\"", f.Pattern),
+			fmt.Sprintf("hint ask   → ask-hint \"%s mutating ops always confirm\"", f.Pattern),
+			fmt.Sprintf("rule allow → allow-cmd %s*  (risk: matches destructive siblings)", f.Pattern),
+			fmt.Sprintf("rule deny  → deny-cmd *%s*  (risk: blocks legit siblings)", f.Pattern),
+			fmt.Sprintf("rule ask   → ask-cmd *%s*", f.Pattern),
 			"skip",
+		}
+		var items []string
+		smartOffset := 0
+		if hasSmart && smart.Action != "skip" {
+			label := fmt.Sprintf("✦ recommended: %s → %s", smart.Action, truncateForDisplay(smart.Text, 60))
+			if smart.Reason != "" {
+				label += fmt.Sprintf("  (%s)", truncateForDisplay(smart.Reason, 50))
+			}
+			items = append(items, label)
+			smartOffset = 1
+		}
+		items = append(items, baseItems...)
+
+		defaultIdx := len(items) - 1 // skip
+		if hasSmart && smart.Action != "skip" {
+			defaultIdx = 0 // prefer recommendation
 		}
 		idx := tuiSelect(
 			fmt.Sprintf("\"%s\" (%s)", f.Pattern, f.Desc),
-			items, 3) // default to skip
+			items, defaultIdx)
 
 		if idx < 0 {
-			break // cancelled
+			break suggestLoop // cancelled
 		}
 
-		var rule string
-		defScopeIdx := 0 // project
+		// Map the chosen index back through the smart-offset. If user
+		// picked option 0 with smart enabled, treat as "apply
+		// recommendation"; otherwise subtract offset and route to the
+		// existing baseItems handlers.
+		if smartOffset == 1 && idx == 0 {
+			scope := pickEvolveScopeWithDefault(smart.Action)
+			if scope == "" {
+				break suggestLoop
+			}
+			rule := smartActionToRule(smart)
+			if rule == "" {
+				continue
+			}
+			changes = append(changes, evolveChange{Rule: rule, Scope: scope})
+			continue
+		}
+		idx -= smartOffset
+
+		// Branch: hint vs glob rule. Both end up as text appended to a
+		// file at the chosen scope; the difference is which file
+		// section / format the user picks.
 		switch idx {
-		case 0:
-			rule = fmt.Sprintf("allow-cmd %s*", f.Pattern)
-		case 1:
-			rule = fmt.Sprintf("deny-cmd *%s*", f.Pattern)
-			defScopeIdx = 1 // global
-		case 2:
-			rule = fmt.Sprintf("ask-cmd *%s*", f.Pattern)
-			defScopeIdx = 1 // global
+		case 0: // hint allow
+			defText := fmt.Sprintf("%s is read-only routine", f.Pattern)
+			text := tuiInput("allow-hint prose", defText, defText)
+			if text == "" {
+				continue
+			}
+			scopeIdx := tuiSelect("Scope (where to save the hint)", []string{
+				"project (.yolonot)",
+				"global (~/.yolonot/rules)",
+			}, 0)
+			if scopeIdx < 0 {
+				break suggestLoop
+			}
+			scope := "p"
+			if scopeIdx == 1 {
+				scope = "g"
+			}
+			changes = append(changes, evolveChange{
+				Rule:  fmt.Sprintf("allow-hint %q", text),
+				Scope: scope,
+			})
+		case 1: // hint ask
+			defText := fmt.Sprintf("%s mutating operations always require confirmation", f.Pattern)
+			text := tuiInput("ask-hint prose", defText, defText)
+			if text == "" {
+				continue
+			}
+			scopeIdx := tuiSelect("Scope (where to save the hint)", []string{
+				"project (.yolonot)",
+				"global (~/.yolonot/rules)",
+			}, 0)
+			if scopeIdx < 0 {
+				break suggestLoop
+			}
+			scope := "p"
+			if scopeIdx == 1 {
+				scope = "g"
+			}
+			changes = append(changes, evolveChange{
+				Rule:  fmt.Sprintf("ask-hint %q", text),
+				Scope: scope,
+			})
+		case 2, 3, 4: // glob rules (existing behavior)
+			var rule string
+			defScopeIdx := 0
+			switch idx {
+			case 2:
+				rule = fmt.Sprintf("allow-cmd %s*", f.Pattern)
+			case 3:
+				rule = fmt.Sprintf("deny-cmd *%s*", f.Pattern)
+				defScopeIdx = 1
+			case 4:
+				rule = fmt.Sprintf("ask-cmd *%s*", f.Pattern)
+				defScopeIdx = 1
+			}
+			scopeIdx := tuiSelect("Scope", []string{
+				"project (.yolonot)",
+				"global (~/.yolonot/rules)",
+			}, defScopeIdx)
+			if scopeIdx < 0 {
+				break suggestLoop
+			}
+			scope := "p"
+			if scopeIdx == 1 {
+				scope = "g"
+			}
+			changes = append(changes, evolveChange{rule, scope})
 		default:
 			continue // skip
 		}
-
-		scopeIdx := tuiSelect("Scope", []string{
-			"project (.yolonot)",
-			"global (~/.yolonot/rules)",
-		}, defScopeIdx)
-
-		if scopeIdx < 0 {
-			break // cancelled
-		}
-
-		scope := "p"
-		if scopeIdx == 1 {
-			scope = "g"
-		}
-		changes = append(changes, evolveChange{rule, scope})
 	}
 
 	if len(changes) == 0 {

@@ -339,11 +339,23 @@ func fmtPct(v float64) string {
 	return fmt.Sprintf("%.1f%%", v*100)
 }
 
-func printComparisonTable(allMetrics map[string]EvalMetrics, suiteType string, modelOrder []string) {
-	labels := []string{"allow", "ask"}
-	if suiteType == "greenfield" {
-		labels = []string{"allow", "deny", "ask"}
+// labelsForReport picks which class labels to show in summary tables and
+// confusion matrices. Decision-mode greenfield uses {allow, deny, ask};
+// risk-mode uses the canonical 5-tier risk taxonomy; brownfield is
+// always {allow, ask} (similarity is binary). Centralized so all
+// printers stay in sync.
+func labelsForReport(suiteType, metric string) []string {
+	if metric == "risk" {
+		return append([]string{}, allRiskTiers...)
 	}
+	if suiteType == "greenfield" {
+		return []string{"allow", "deny", "ask"}
+	}
+	return []string{"allow", "ask"}
+}
+
+func printComparisonTable(allMetrics map[string]EvalMetrics, suiteType, metric string, modelOrder []string) {
+	labels := labelsForReport(suiteType, metric)
 
 	fmt.Printf("\n%s\n", strings.Repeat("=", 100))
 	fmt.Printf("  %s EVALUATION RESULTS\n", strings.ToUpper(suiteType))
@@ -401,10 +413,10 @@ func printConfusionMatrix(matrix map[string]map[string]int, labels []string) {
 
 	fmt.Printf("%-16s", "actual \\ pred")
 	for _, c := range cols {
-		fmt.Printf("%8s", c)
+		fmt.Printf("%10s", c)
 	}
 	fmt.Println()
-	fmt.Println(strings.Repeat("-", 16+8*len(cols)))
+	fmt.Println(strings.Repeat("-", 16+10*len(cols)))
 
 	for _, trueLabel := range labels {
 		fmt.Printf("%-16s", trueLabel)
@@ -414,7 +426,7 @@ func printConfusionMatrix(matrix map[string]map[string]int, labels []string) {
 			if trueLabel == "deny" && predLabel == "allow" && count > 0 {
 				cell = "!!" + cell
 			}
-			fmt.Printf("%8s", cell)
+			fmt.Printf("%10s", cell)
 		}
 		fmt.Println()
 	}
@@ -453,18 +465,15 @@ func printFailures(failures []FailureInfo, casesById map[string]EvalCase, maxSho
 	}
 }
 
-func printFullReport(allMetrics map[string]EvalMetrics, cases []EvalCase, suiteType string, modelOrder []string) {
-	labels := []string{"allow", "ask"}
-	if suiteType == "greenfield" {
-		labels = []string{"allow", "deny", "ask"}
-	}
+func printFullReport(allMetrics map[string]EvalMetrics, cases []EvalCase, suiteType, metric string, modelOrder []string) {
+	labels := labelsForReport(suiteType, metric)
 
 	casesById := map[string]EvalCase{}
 	for _, c := range cases {
 		casesById[c.ID] = c
 	}
 
-	printComparisonTable(allMetrics, suiteType, modelOrder)
+	printComparisonTable(allMetrics, suiteType, metric, modelOrder)
 
 	for _, model := range modelOrder {
 		m := allMetrics[model]
@@ -490,7 +499,7 @@ func printFullReport(allMetrics map[string]EvalMetrics, cases []EvalCase, suiteT
 
 		if len(m.Failures) > 0 {
 			fmt.Printf("Failures (%d):\n", len(m.Failures))
-			printFailures(m.Failures, casesById, 30)
+			printFailures(m.Failures, casesById, 200)
 		}
 		fmt.Println()
 	}
@@ -511,16 +520,61 @@ type EvalOptions struct {
 	Timeout        int
 	MaxTokens      int
 	NoThink        bool
+	WithHints      bool // include user classifier hints (~/.yolonot/config.json + .yolonot walk-up) in the system prompt; off by default for reproducibility
+	Metric         string // "" or "decision" → grade allow/ask (default); "risk" → grade safe/low/moderate/high/critical against expected_risk
 }
 
 func needsRateLimit(url string) bool {
 	return !strings.Contains(url, "localhost")
 }
 
+// evalCallLLM is a package-level indirection over CallLLM so the eval
+// suite can mock model responses in unit tests. Tests swap this and
+// restore via t.Cleanup. Production code path is unchanged — same
+// function, one extra dereference. Not exported because the swap
+// pattern is for in-package tests only.
+var evalCallLLM = CallLLM
+
+// extractPrediction returns the model's classification for the active
+// eval metric. In "risk" mode we grade d.Risk against the case's
+// expected_risk; otherwise we grade d.Decision. Empty string signals
+// "couldn't extract a label" — caller records it as "error". Pure,
+// nil-safe, so unit tests cover the metric-switch without spinning up
+// an LLM mock.
+func extractPrediction(d *Decision, metric string) string {
+	if d == nil {
+		return ""
+	}
+	if metric == "risk" {
+		return d.Risk
+	}
+	return d.Decision
+}
+
+// filterAnnotatedForRisk drops cases that lack an expected_risk label.
+// Risk mode can't grade what isn't labeled, so we skip rather than
+// silently emit "error" for every unannotated case. Pulled out so the
+// risk-mode filter behavior has a unit test independent of the eval
+// run loop. Returns the kept slice and the count dropped.
+func filterAnnotatedForRisk(cases []EvalCase) (kept []EvalCase, dropped int) {
+	for _, c := range cases {
+		if c.ExpectedRisk != "" {
+			kept = append(kept, c)
+		} else {
+			dropped++
+		}
+	}
+	return kept, dropped
+}
+
 func runCase(c EvalCase, cfg LLMConfig, systemPrompt string, suiteType string, opts EvalOptions) CaseResult {
+	expected := c.Expected
+	if opts.Metric == "risk" {
+		expected = c.ExpectedRisk
+	}
 	result := CaseResult{
 		CaseID:   c.ID,
-		Expected: c.Expected,
+		Expected: expected,
 	}
 
 	for i := 0; i < opts.Runs; i++ {
@@ -532,7 +586,7 @@ func runCase(c EvalCase, cfg LLMConfig, systemPrompt string, suiteType string, o
 		}
 
 		start := time.Now()
-		raw, err := CallLLM(cfg, systemPrompt, userPrompt, opts.MaxTokens)
+		raw, err := evalCallLLM(cfg, systemPrompt, userPrompt, opts.MaxTokens)
 		if err != nil {
 			result.Predictions = append(result.Predictions, "error")
 			result.RawResponses = append(result.RawResponses, "")
@@ -542,8 +596,13 @@ func runCase(c EvalCase, cfg LLMConfig, systemPrompt string, suiteType string, o
 		} else {
 			result.RawResponses = append(result.RawResponses, raw)
 			d := ParseDecision(raw)
-			if d != nil && d.Decision != "" {
-				result.Predictions = append(result.Predictions, d.Decision)
+			// extractPrediction picks d.Decision or d.Risk based on the
+			// active metric. Pulling this out into a pure helper lets us
+			// unit-test the metric-switch logic without standing up a
+			// full LLM mock.
+			predicted := extractPrediction(d, opts.Metric)
+			if predicted != "" {
+				result.Predictions = append(result.Predictions, predicted)
 			} else {
 				result.Predictions = append(result.Predictions, "error")
 				if opts.Verbose {
@@ -637,6 +696,8 @@ func cmdEval(opts EvalOptions) {
 		fmt.Println("  --timeout <sec>          LLM timeout (default: 15)")
 		fmt.Println("  --max-tokens <n>         Max output tokens (default: 4096)")
 		fmt.Println("  --no-think               Append /no_think to prompts")
+		fmt.Println("  --with-hints             Apply ~/.yolonot/config.json + .yolonot hints (off by default for reproducibility)")
+		fmt.Println("  --metric decision|risk   Grade allow/ask (default) or risk tier (safe..critical, requires expected_risk in suite)")
 		fmt.Println()
 		fmt.Println("Models: gpt-5.4-mini, gpt-5.4-nano, gpt-4o-mini,")
 		fmt.Println("        claude-haiku, claude-sonnet,")
@@ -663,6 +724,12 @@ func cmdEval(opts EvalOptions) {
 		if opts.NoThink {
 			fmt.Println("  Thinking disabled (/no_think appended to prompts)")
 		}
+		if opts.WithHints && suiteType != "brownfield" {
+			fmt.Println("  Classifier hints ENABLED (~/.yolonot/config.json + .yolonot walk-up applied)")
+		}
+		if opts.Metric == "risk" {
+			fmt.Println("  Metric: RISK TIER (grading d.Risk against case.expected_risk)")
+		}
 
 		// Apply filters
 		cases = filterCases(cases, opts)
@@ -671,10 +738,40 @@ func cmdEval(opts EvalOptions) {
 			continue
 		}
 
-		// System prompt
+		// Risk-metric mode: drop cases without an expected_risk annotation.
+		// We can't grade what isn't labeled. Brownfield suites don't have
+		// risk tiers at all (similarity comparison), so risk mode skips
+		// the whole suite there.
+		if opts.Metric == "risk" {
+			if suiteType == "brownfield" {
+				fmt.Println("  --metric risk does not apply to brownfield (similarity) suites; skipping")
+				continue
+			}
+			before := len(cases)
+			var dropped int
+			cases, dropped = filterAnnotatedForRisk(cases)
+			if dropped > 0 {
+				fmt.Printf("  --metric risk: %d/%d cases lack expected_risk annotation, skipping them\n", dropped, before)
+			}
+			if len(cases) == 0 {
+				fmt.Println("  No annotated cases left in this suite, skipping")
+				continue
+			}
+		}
+
+		// System prompt. Greenfield (risk classification) defaults to the
+		// raw SystemPrompt const so eval results stay reproducible across
+		// developer machines — user hints in ~/.yolonot/config.json or
+		// .yolonot walk-up files would otherwise leak machine-specific
+		// state into the score. Pass --with-hints when you actually want
+		// to measure the effect of your tuning. Brownfield uses the
+		// ComparePrompt unconditionally; hints don't apply to similarity
+		// comparison.
 		var systemPrompt string
 		if suiteType == "brownfield" {
 			systemPrompt = ComparePrompt
+		} else if opts.WithHints {
+			systemPrompt = BuildSystemPrompt(LoadConfig().Classifier, LoadHints())
 		} else {
 			systemPrompt = SystemPrompt
 		}
@@ -746,7 +843,7 @@ func cmdEval(opts EvalOptions) {
 		}
 
 		// Report
-		printFullReport(allMetrics, cases, suiteType, opts.Models)
+		printFullReport(allMetrics, cases, suiteType, opts.Metric, opts.Models)
 
 		// JSON output
 		if opts.Output != "" {
@@ -857,8 +954,24 @@ func writeEvalJSON(opts EvalOptions, allMetrics map[string]EvalMetrics, cases []
 	fmt.Printf("Results written to %s\n", outPath)
 }
 
-// parseEvalArgs parses eval-specific flags from os.Args.
+// parseEvalArgs is the public entry point used by the CLI. Exits the
+// process on invalid input (e.g. `--metric bogus`) — never silently
+// falls through, since a typo would otherwise grade an entire run
+// against the wrong field. For unit-testable parsing without os.Exit,
+// see parseEvalArgsValidated.
 func parseEvalArgs(args []string) EvalOptions {
+	opts, err := parseEvalArgsValidated(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	return opts
+}
+
+// parseEvalArgsValidated does the actual parsing and returns an error
+// instead of exiting, so tests can assert on invalid-input behavior
+// without forking a subprocess.
+func parseEvalArgsValidated(args []string) (EvalOptions, error) {
 	opts := EvalOptions{
 		Runs:      3,
 		Timeout:   15,
@@ -937,8 +1050,24 @@ func parseEvalArgs(args []string) EvalOptions {
 			}
 		case "--no-think":
 			opts.NoThink = true
+		case "--with-hints":
+			opts.WithHints = true
+		case "--metric":
+			if i+1 < len(args) {
+				i++
+				opts.Metric = args[i]
+			}
 		}
 	}
 
-	return opts
+	// Validate --metric. Empty string == "decision" (existing behavior); any
+	// other value besides "risk" is a typo we'd rather catch than silently
+	// fall back from.
+	switch opts.Metric {
+	case "", "decision", "risk":
+	default:
+		return opts, fmt.Errorf("yolonot eval: --metric must be \"decision\" or \"risk\", got %q", opts.Metric)
+	}
+
+	return opts, nil
 }
