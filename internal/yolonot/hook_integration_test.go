@@ -490,6 +490,80 @@ func TestIntegration_Disabled_Bypass(t *testing.T) {
 	}
 }
 
+func TestIntegration_PermissionMode_BypassPermissions_TotalBypass(t *testing.T) {
+	// Claude Code sends permission_mode:"bypassPermissions" when the user
+	// launched with --dangerously-skip-permissions. yolonot treats this like
+	// YOLONOT_DISABLED — total bypass, no deny rule, no LLM, no log entry.
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Cleanup(func() { currentPermissionMode = "" })
+
+	// Deny rule to prove it's truly bypassed.
+	writeGlobalRules(t, home, "deny-cmd *\n")
+
+	payload := makePrePayload("int-permmode-bypass", "rm -rf /", "/tmp")
+	payload.PermissionMode = "bypassPermissions"
+	out := runHookWithStruct(t, payload)
+
+	if trimmed := strings.TrimSpace(out); trimmed != "" {
+		t.Errorf("bypassPermissions should produce empty response (total bypass), got %q", trimmed)
+	}
+	if entries := ReadRecentDecisions(10); len(entries) != 0 {
+		t.Errorf("bypassPermissions should not write to decisions.jsonl, got %d entries", len(entries))
+	}
+}
+
+func TestIntegration_PermissionMode_OtherModesStillEvaluate(t *testing.T) {
+	// Only bypassPermissions short-circuits — every other mode (default,
+	// plan, acceptEdits, etc.) flows through the normal pipeline and lands
+	// in decisions.jsonl with permission_mode populated.
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Cleanup(func() { currentPermissionMode = "" })
+
+	writeGlobalRules(t, home, "deny-cmd *sudo *\n")
+
+	payload := makePrePayload("int-permmode-default", "sudo rm -rf /", "/tmp")
+	payload.PermissionMode = "default"
+	out := runHookWithStruct(t, payload)
+
+	resp := parseResponse(t, out)
+	if resp.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Errorf("default mode should still hit deny rule, got %q", resp.HookSpecificOutput.PermissionDecision)
+	}
+
+	entries := ReadRecentDecisions(10)
+	if len(entries) == 0 {
+		t.Fatal("expected at least one decision entry, got none")
+	}
+	last := entries[len(entries)-1]
+	if last.PermissionMode != "default" {
+		t.Errorf("decision entry PermissionMode = %q, want default", last.PermissionMode)
+	}
+}
+
+func TestIntegration_PermissionMode_AbsentLeavesFieldEmpty(t *testing.T) {
+	// Payloads without permission_mode (other harnesses, older Claude builds)
+	// must not populate the decision log's permission_mode field.
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Cleanup(func() { currentPermissionMode = "" })
+
+	writeGlobalRules(t, home, "deny-cmd *sudo *\n")
+
+	payload := makePrePayload("int-permmode-absent", "sudo rm -rf /", "/tmp")
+	runHookWithStruct(t, payload)
+
+	entries := ReadRecentDecisions(10)
+	if len(entries) == 0 {
+		t.Fatal("expected at least one decision entry, got none")
+	}
+	last := entries[len(entries)-1]
+	if last.PermissionMode != "" {
+		t.Errorf("decision entry PermissionMode = %q, want empty", last.PermissionMode)
+	}
+}
+
 func TestIntegration_EmptyCommand(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()

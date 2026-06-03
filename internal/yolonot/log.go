@@ -10,21 +10,22 @@ import (
 )
 
 type DecisionEntry struct {
-	Timestamp  string  `json:"ts"`
-	SessionID  string  `json:"session_id"`
-	Command    string  `json:"command"`
-	Cwd        string  `json:"cwd"`
-	Project    string  `json:"project"`
-	Harness    string  `json:"harness,omitempty"` // claude | codex | opencode | gemini
-	Layer      string  `json:"layer"`
-	Decision   string  `json:"decision"`
-	Risk       string  `json:"risk,omitempty"` // safe | low | moderate | high | critical
-	Confidence float64 `json:"confidence,omitempty"`
-	Short      string  `json:"short,omitempty"` // compact banner label (from LLM)
-	Reasoning  string  `json:"reasoning,omitempty"`
-	Source     string  `json:"source,omitempty"`
-	ReturnedAs string  `json:"returned_as,omitempty"`
-	DurationMs int64   `json:"duration_ms,omitempty"`
+	Timestamp      string  `json:"ts"`
+	SessionID      string  `json:"session_id"`
+	Command        string  `json:"command"`
+	Cwd            string  `json:"cwd"`
+	Project        string  `json:"project"`
+	Harness        string  `json:"harness,omitempty"`         // claude | codex | opencode | gemini
+	PermissionMode string  `json:"permission_mode,omitempty"` // Claude Code only
+	Layer          string  `json:"layer"`
+	Decision       string  `json:"decision"`
+	Risk           string  `json:"risk,omitempty"` // safe | low | moderate | high | critical
+	Confidence     float64 `json:"confidence,omitempty"`
+	Short          string  `json:"short,omitempty"` // compact banner label (from LLM)
+	Reasoning      string  `json:"reasoning,omitempty"`
+	Source         string  `json:"source,omitempty"`
+	ReturnedAs     string  `json:"returned_as,omitempty"`
+	DurationMs     int64   `json:"duration_ms,omitempty"`
 }
 
 func decisionsPath() string {
@@ -46,6 +47,9 @@ func LogDecision(entry DecisionEntry) {
 		if h := ActiveHarness(); h != nil {
 			entry.Harness = h.Name()
 		}
+	}
+	if entry.PermissionMode == "" {
+		entry.PermissionMode = currentPermissionMode
 	}
 
 	dir := YolonotDir()

@@ -18,11 +18,12 @@ import (
 
 // HookPayload is the JSON sent by Claude Code to hooks.
 type HookPayload struct {
-	HookEventName string                 `json:"hook_event_name"`
-	ToolName      string                 `json:"tool_name"`
-	SessionID     string                 `json:"session_id"`
-	Cwd           string                 `json:"cwd"`
-	ToolInput     map[string]interface{} `json:"tool_input"`
+	HookEventName  string                 `json:"hook_event_name"`
+	ToolName       string                 `json:"tool_name"`
+	SessionID      string                 `json:"session_id"`
+	Cwd            string                 `json:"cwd"`
+	ToolInput      map[string]interface{} `json:"tool_input"`
+	PermissionMode string                 `json:"permission_mode,omitempty"` // Claude Code only
 }
 
 // HookResponse is the JSON returned to Claude Code.
@@ -39,6 +40,10 @@ type HookResponse struct {
 // hook process is invoked fresh per command by Claude Code (not concurrent
 // within a single process), so a package-level var is safe here.
 var quietOnAllow bool
+
+// currentPermissionMode mirrors HookPayload.PermissionMode for the active
+// hook invocation. Claude Code only — empty on other harnesses.
+var currentPermissionMode string
 
 // maxBannerRunes caps systemMessage / permissionDecisionReason length to bound
 // terminal-spoof damage from an untrusted pre-check hook. Measured in runes so
@@ -255,6 +260,7 @@ func cmdHook() {
 	if payload.HookEventName == "" {
 		return
 	}
+	currentPermissionMode = payload.PermissionMode
 
 	// Pre-check binaries (Dippy et al.) follow Claude's PreToolUse contract,
 	// so always feed them the canonical Claude JSON — never the raw stdin
@@ -275,6 +281,15 @@ func cmdHook() {
 	// Disabled via env var — total bypass (applies to Post too, so paused
 	// sessions don't silently accumulate pre-approvals).
 	if os.Getenv("YOLONOT_DISABLED") == "1" {
+		return
+	}
+
+	// Claude Code --dangerously-skip-permissions — total bypass, same shape
+	// as YOLONOT_DISABLED. User asked the host to skip its own permission
+	// engine; yolonot honors that and stays out of the way. Post writes are
+	// gated too so resuming a normal session doesn't reveal a pile of
+	// "pre-approved" commands yolonot never vetted.
+	if payload.PermissionMode == "bypassPermissions" {
 		return
 	}
 
@@ -569,7 +584,7 @@ func cmdHook() {
 	LogDecision(DecisionEntry{
 		SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm",
 		Decision: finalDecision, Risk: d.Risk, Confidence: d.Confidence, Short: d.Short,
-		Reasoning: fmt.Sprintf("orig=%s → %s %s", d.Decision, finalDecision, d.Reasoning),
+		Reasoning:  fmt.Sprintf("orig=%s → %s %s", d.Decision, finalDecision, d.Reasoning),
 		DurationMs: ms,
 	})
 	if passthrough {

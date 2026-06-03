@@ -61,6 +61,35 @@ func TestClaudeHarnessParseHookInputStdin(t *testing.T) {
 	}
 }
 
+func TestClaudeHarnessParseHookInputPermissionMode(t *testing.T) {
+	// Claude Code sends permission_mode in the hook payload; the field must
+	// round-trip onto HookPayload so downstream layers can detect
+	// bypassPermissions (--dangerously-skip-permissions) sessions.
+	h := &ClaudeHarness{}
+	raw := `{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"sid","cwd":"/tmp","tool_input":{"command":"ls"},"permission_mode":"bypassPermissions"}`
+	p, err := h.ParseHookInput([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.PermissionMode != "bypassPermissions" {
+		t.Errorf("PermissionMode = %q, want bypassPermissions", p.PermissionMode)
+	}
+}
+
+func TestClaudeHarnessParseHookInputPermissionModeAbsent(t *testing.T) {
+	// Payloads without permission_mode (older Claude builds, other harnesses)
+	// must parse cleanly with PermissionMode left empty.
+	h := &ClaudeHarness{}
+	raw := `{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"sid","cwd":"/tmp","tool_input":{"command":"ls"}}`
+	p, err := h.ParseHookInput([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.PermissionMode != "" {
+		t.Errorf("PermissionMode = %q, want empty", p.PermissionMode)
+	}
+}
+
 func TestClaudeHarnessParseHookInputEnvFallback(t *testing.T) {
 	os.Setenv("CLAUDE_TOOL_INPUT", `{"command":"echo hi"}`)
 	os.Setenv("CLAUDE_HOOK_EVENT_NAME", "PreToolUse")
