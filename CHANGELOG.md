@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-06-03
+
+### Added
+
+- **Honor Claude Code `bypassPermissions` mode.** When the user launches
+  with `--dangerously-skip-permissions`, the PreToolUse payload carries
+  `permission_mode: "bypassPermissions"`. yolonot now mirrors that intent:
+  the hook short-circuits exactly like `YOLONOT_DISABLED=1` — no rules, no
+  LLM, no `decisions.jsonl` write. Other modes (`default`, `plan`,
+  `acceptEdits`, …) still flow through normal evaluation. The mode is
+  recorded on each `DecisionEntry` (`permission_mode`, omitempty) for
+  audit, and the bypass is fail-closed: a missing or unknown
+  `permission_mode` proceeds with normal evaluation rather than silently
+  skipping. (#9)
+
 ## [0.15.1] — 2026-05-11
 
 ### Added
