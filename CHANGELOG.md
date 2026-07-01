@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `claude-haiku-4-5` / `claude-sonnet-4-6` (dropped the date suffixes;
   `claude-sonnet-4-6-20250514` was not a valid model id).
 
+### Fixed
+
+- Provider connection test no longer fails on reasoning/diffusion models
+  (e.g. `inception/mercury-2`). The test used `max_tokens=5`, which such
+  models consume internally before emitting any content — returning empty
+  output (`finish_reason: length`) and a spurious "no content in response"
+  error even though the model works fine for real classification. Raised the
+  test budget to 256 tokens.
+
 ## [0.16.0] — 2026-06-03
 
 ### Added
