@@ -616,7 +616,7 @@ func cmdProvider() {
 	}
 	providers := []providerInfo{
 		{"Claude Code (subscription)", "claude-cli", []string{
-			"claude-haiku-4-5-20251001", "claude-sonnet-4-6-20250514",
+			"claude-haiku-4-5", "claude-sonnet-4-6",
 		}, ""},
 		{"OpenAI", "https://api.openai.com/v1/chat/completions", []string{
 			"gpt-5.4-mini", "gpt-5.4-nano", "gpt-4o-mini",
@@ -810,7 +810,12 @@ func cmdProvider() {
 	if cfg.APIKey == "" && selected.EnvKey != "" {
 		cfg.APIKey = os.Getenv(selected.EnvKey)
 	}
-	text, err := CallLLM(cfg, "Say ok", "ok", 5)
+	// max_tokens must leave room for reasoning/diffusion models (e.g.
+	// inception/mercury-2) which consume budget internally before emitting any
+	// visible content — at max_tokens=5 they return empty content
+	// (finish_reason "length"), failing the test even though the model works
+	// fine at real classifier token counts. 256 is cheap and universal.
+	text, err := CallLLM(cfg, "Say ok", "ok", 256)
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
 	} else if text != "" {
