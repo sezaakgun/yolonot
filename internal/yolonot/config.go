@@ -616,7 +616,7 @@ func cmdProvider() {
 	}
 	providers := []providerInfo{
 		{"Claude Code (subscription)", "claude-cli", []string{
-			"claude-haiku-4-5-20251001", "claude-sonnet-4-6-20250514",
+			"claude-haiku-4-5", "claude-sonnet-4-6",
 		}, ""},
 		{"OpenAI", "https://api.openai.com/v1/chat/completions", []string{
 			"gpt-5.4-mini", "gpt-5.4-nano", "gpt-4o-mini",

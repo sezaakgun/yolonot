@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Claude Code subscription provider lists the current model aliases
+  `claude-haiku-4-5` / `claude-sonnet-4-6` (dropped the date suffixes;
+  `claude-sonnet-4-6-20250514` was not a valid model id).
+
 ## [0.16.0] — 2026-06-03
 
 ### Added
