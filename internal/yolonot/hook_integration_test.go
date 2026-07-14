@@ -1422,3 +1422,123 @@ func TestCmdPreCheckAddFastAllow(t *testing.T) {
 		}
 	}
 }
+
+// mockLLMCaptureSystem creates an httptest server that records the system
+// prompt it receives and returns an allow decision. Used to assert what the
+// hook actually puts on the wire, which is the only place a dropped prompt
+// section is observable — a unit test on BuildSystemPrompt cannot catch a
+// call site that never calls it.
+func mockLLMCaptureSystem(got *string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		for _, m := range body.Messages {
+			if m.Role == "system" {
+				*got = m.Content
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{{
+				"message": map[string]interface{}{
+					"content": `{"decision":"allow","confidence":0.95,"reasoning":"capture"}`,
+				},
+			}},
+		})
+	}))
+}
+
+// TestIntegration_LLM_SystemPromptCarriesHints pins the hook's step-5 LLM
+// call to the augmented system prompt. The hook previously passed the bare
+// SystemPrompt const, so every context/allow-hint/ask-hint the user wrote
+// was parsed and then dropped before the request went out — while
+// `yolonot check` applied them, making hints test clean in the dry-run and
+// do nothing in the hook.
+func TestIntegration_LLM_SystemPromptCarriesHints(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	var gotSystem string
+	srv := mockLLMCaptureSystem(&gotSystem)
+	defer srv.Close()
+
+	// Hints only — no rules, so the command reaches step 5.
+	writeGlobalRules(t, home, `context "trusted infra is example.internal"
+allow-hint "pushing to feature branches is routine here"
+ask-hint "never touch the vault directory"
+`)
+	SaveConfig(Config{Provider: ProviderConfig{URL: srv.URL, Model: "test-model", Timeout: 5}})
+
+	// Clean temp CWD so no project .yolonot in the walk-up interferes.
+	cleanDir := filepath.Join(home, "cleanproject")
+	os.MkdirAll(cleanDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(cleanDir)
+	defer os.Chdir(origCwd)
+
+	runHookWithStruct(t, makePrePayload("int-llm-hints", "some-safe-operation --verbose", cleanDir))
+
+	if gotSystem == "" {
+		t.Fatal("LLM was never called, or no system message was sent")
+	}
+	for _, want := range []string{
+		"trusted infra is example.internal",
+		"pushing to feature branches is routine here",
+		"never touch the vault directory",
+	} {
+		if !strings.Contains(gotSystem, want) {
+			t.Errorf("hook system prompt missing walk-up hint %q", want)
+		}
+	}
+	if !strings.Contains(gotSystem, SystemPrompt) {
+		t.Error("hook system prompt must still contain the base SystemPrompt verbatim")
+	}
+}
+
+// TestIntegration_LLM_SystemPromptCarriesConfigHints is the config.json half
+// of the same invariant: classifier hints set via ~/.yolonot/config.json must
+// reach the hook's LLM call, including $defaults expansion.
+func TestIntegration_LLM_SystemPromptCarriesConfigHints(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	var gotSystem string
+	srv := mockLLMCaptureSystem(&gotSystem)
+	defer srv.Close()
+
+	writeGlobalRules(t, home, "# no rules\n")
+	SaveConfig(Config{
+		Provider: ProviderConfig{URL: srv.URL, Model: "test-model", Timeout: 5},
+		Classifier: ClassifierConfig{
+			AllowHints: []string{"deploying to staging is routine"},
+			AskHints:   []string{DefaultsSentinel},
+		},
+	})
+
+	cleanDir := filepath.Join(home, "cleanproject")
+	os.MkdirAll(cleanDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(cleanDir)
+	defer os.Chdir(origCwd)
+
+	runHookWithStruct(t, makePrePayload("int-llm-cfg-hints", "some-safe-operation --verbose", cleanDir))
+
+	if gotSystem == "" {
+		t.Fatal("LLM was never called, or no system message was sent")
+	}
+	if !strings.Contains(gotSystem, "deploying to staging is routine") {
+		t.Error("hook system prompt missing config.json allow hint")
+	}
+	// $defaults must expand, not pass through as a literal token.
+	if strings.Contains(gotSystem, DefaultsSentinel) {
+		t.Errorf("$defaults sentinel leaked into the prompt unexpanded")
+	}
+	if !strings.Contains(gotSystem, builtinClassifierAskHints[0]) {
+		t.Error("hook system prompt missing $defaults-expanded built-in ask hint")
+	}
+}
