@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,6 +36,11 @@ type HookResponse struct {
 	} `json:"hookSpecificOutput"`
 	SystemMessage string `json:"systemMessage,omitempty"`
 }
+
+// maxHookInputBytes caps the hook stdin payload. A real PreToolUse payload
+// is a few KB; 4 MB is generous headroom while still bounding the work the
+// downstream quote-aware scanners do on the command string.
+const maxHookInputBytes = 4 << 20
 
 // quietOnAllow is set once per `yolonot hook` invocation from Config. The
 // hook process is invoked fresh per command by Claude Code (not concurrent
@@ -229,8 +235,10 @@ func activeHarnessFormat(r HookResponse) string {
 
 func cmdHook() {
 	// Read payload from stdin; adapter handles env var fallback and
-	// harness-specific JSON decoding.
-	raw, _ := io.ReadAll(os.Stdin)
+	// harness-specific JSON decoding. Cap the read: the command string is
+	// processed by quote-aware scanners downstream, so an unbounded payload
+	// would be an easy CPU/memory amplifier.
+	raw, _ := io.ReadAll(io.LimitReader(os.Stdin, maxHookInputBytes))
 
 	// Allow `yolonot hook --harness <name>` to pin the adapter. Harness
 	// CLIs don't all expose a stable session-id env var (Codex, OpenCode
@@ -302,10 +310,12 @@ func cmdHook() {
 		}
 	}
 
-	// PostToolUse: command ran → user approved → save to .approved
+	// PostToolUse: command ran → user approved → save to .approved (plus
+	// the content hash of any attached scripts, so the approval stays
+	// pinned to the contents the user actually saw run).
 	if payload.HookEventName == "PostToolUse" {
 		if sessionID != "" && command != "" {
-			AppendLine(projSessionID, "approved", command)
+			saveApproved(projSessionID, command, cwd)
 		}
 		return
 	}
@@ -370,7 +380,7 @@ func cmdHook() {
 		}
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "allow", Reasoning: reasoning})
 		if sessionID != "" {
-			AppendLine(projSessionID, "approved", command)
+			saveApproved(projSessionID, command, cwd)
 		}
 		emitHook(hookResponse("allow", "rule", userReason, command))
 		return
@@ -383,15 +393,32 @@ func cmdHook() {
 	// `rtk ls`). See MatchesLineOrWrappedVariant + SessionWrappers. When
 	// the match lands via wrapper equivalence we also record the current
 	// form so the next invocation hits the fast exact-match path.
+	// contentStale marks "this exact command was session-approved, but its
+	// attached script contents have changed since". It suppresses every
+	// string-level replay of that approval (exact match here, and the
+	// similarity layer below, which would trivially see the identical
+	// string in the approved list and re-allow) — the content-keyed
+	// cache/LLM layers judge the new contents instead.
+	contentStale := false
 	if sessionID != "" && MatchesLineOrWrappedVariant(projSessionID, "approved", command) {
-		source := "exact_match"
-		if !ContainsLine(projSessionID, "approved", command) {
-			AppendLine(projSessionID, "approved", command)
-			source = "wrapped_variant"
+		// Content gate: a string match is not enough when the command
+		// attaches script contents — the approval was granted for the
+		// contents that existed then. If the script has been edited since,
+		// fall through so the cache/LLM judge the NEW contents instead of
+		// replaying an approval about the old ones.
+		if !sessionContentOK(projSessionID, command, cwd) {
+			contentStale = true
+			Verbosef("session: approved command %q has changed script contents; re-judging", command)
+		} else {
+			source := "exact_match"
+			if !ContainsLine(projSessionID, "approved", command) {
+				saveApproved(projSessionID, command, cwd)
+				source = "wrapped_variant"
+			}
+			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: source})
+			emitHook(hookResponse("allow", "session", "previously approved this session", command))
+			return
 		}
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: source})
-		emitHook(hookResponse("allow", "session", "previously approved this session", command))
-		return
 	}
 
 	// Step 0.55: Session deny. If the user previously rejected this exact
@@ -411,15 +438,22 @@ func cmdHook() {
 			// between our ask and actual execution). Record the plain form
 			// so future checks are an exact match.
 			if ApprovedAsWrappedVariant(projSessionID, command) {
-				AppendLine(projSessionID, "approved", command)
-				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "wrapped_variant"})
-				emitHook(hookResponse("allow", "session", "previously approved as wrapped command this session", command))
+				// Same content gate as step 0.5. Stale contents fall through
+				// to re-judging — NOT to the denied branch below: an edited
+				// script is new evidence, not a prior user rejection.
+				if sessionContentOK(projSessionID, command, cwd) {
+					saveApproved(projSessionID, command, cwd)
+					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "wrapped_variant"})
+					emitHook(hookResponse("allow", "session", "previously approved as wrapped command this session", command))
+					return
+				}
+				Verbosef("session: wrapper-approved command %q has changed script contents; re-judging", command)
+			} else {
+				AppendLine(projSessionID, "denied", command)
+				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "asked_not_approved"})
+				emitHook(hookResponse("deny", "session_deny", "previously rejected this session", command))
 				return
 			}
-			AppendLine(projSessionID, "denied", command)
-			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "asked_not_approved"})
-			emitHook(hookResponse("deny", "session_deny", "previously rejected this session", command))
-			return
 		}
 	}
 
@@ -463,7 +497,7 @@ func cmdHook() {
 			// built-in parser.
 			if ok, reason := fastallow.IsLocallySafeWith(command, AllowRedirectPatterns(rules)); ok {
 				if sessionID != "" {
-					AppendLine(projSessionID, "approved", command)
+					saveApproved(projSessionID, command, cwd)
 				}
 				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "fast_allow", Decision: "allow", Reasoning: reason})
 				emitHook(hookResponse("allow", "fast_allow", reason, command))
@@ -473,7 +507,7 @@ func cmdHook() {
 		}
 		if _, reason, ok := runPreCheck(preCheck, canonicalInput); ok {
 			if sessionID != "" {
-				AppendLine(projSessionID, "approved", command)
+				saveApproved(projSessionID, command, cwd)
 			}
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "pre_check", Decision: "allow", Reasoning: reason})
 			layer := "pre_check (" + preCheckShortName(preCheck) + ")"
@@ -482,8 +516,11 @@ func cmdHook() {
 		}
 	}
 
-	// Step 2: Session similarity (LLM compare)
-	if sessionID != "" {
+	// Step 2: Session similarity (LLM compare). Skipped when the content
+	// gate flagged this exact command as stale — the identical string sits
+	// in the approved list, so the compare would trivially answer "same
+	// command, allow" and launder the stale approval right back in.
+	if sessionID != "" && !contentStale {
 		approved := ReadLines(projSessionID, "approved")
 		candidates := filterByPrefix(command, approved)
 		if len(candidates) > 0 {
@@ -498,7 +535,7 @@ func cmdHook() {
 					// The compare layer says "similar enough to an already
 					// approved command" — that approval already flowed
 					// through a risk map once. Don't re-map here.
-					AppendLine(projSessionID, "approved", command)
+					saveApproved(projSessionID, command, cwd)
 					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "allow", Short: d.Short, Reasoning: d.Reasoning, DurationMs: ms})
 					emitHook(hookResponse("allow", "session_llm", d.Reasoning, command))
 					return
@@ -508,7 +545,7 @@ func cmdHook() {
 	}
 
 	// Step 4: Script cache check
-	if cached := checkCache(command); cached != nil {
+	if cached := checkCache(command, cwd); cached != nil {
 		// Route cached decisions through the risk map so cache + live LLM
 		// paths apply the same policy. Older cache entries without a Risk
 		// tier fall through with their original decision (no map applied).
@@ -525,7 +562,7 @@ func cmdHook() {
 		switch finalDecision {
 		case "allow":
 			if sessionID != "" {
-				AppendLine(projSessionID, "approved", command)
+				saveApproved(projSessionID, command, cwd)
 			}
 			emitHook(hookResponse("allow", "cache", cached.Reasoning, command))
 		case "deny":
@@ -539,9 +576,36 @@ func cmdHook() {
 		return
 	}
 
-	// Step 5: LLM analysis
+	// Step 5: LLM analysis. Collect the referenced scripts ONCE so the
+	// prompt the LLM sees and the cache key we later persist are computed
+	// from the same filesystem snapshot — re-reading after the round-trip
+	// could hash bytes the classifier never judged.
 	cfg := GetLLMConfig()
-	userPrompt := BuildAnalyzePrompt(command)
+	attachedScripts, withheldScripts := collectScripts(command, cwd)
+	userPrompt := buildPromptFromCollected(command, attachedScripts, withheldScripts)
+
+	// Oversize guard: if the assembled prompt exceeds the budget, do not ship
+	// it to the LLM. Apply the active profile's abstain action (its critical
+	// policy, never more permissive than ask) instead of silently deferring
+	// to the host — which fails open on ask-less harnesses. Uncached: the
+	// oversized content is exactly what we could not judge.
+	if len(userPrompt) > maxClassifierPromptBytes {
+		act := abstainAction(ActiveHarness())
+		reason := fmt.Sprintf("classifier prompt %d KB exceeds %d KB budget; profile abstain → %s",
+			len(userPrompt)/1024, maxClassifierPromptBytes/1024, act)
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "oversize", Decision: act, Reasoning: reason})
+		if act == "deny" {
+			emitHook(hookResponse("deny", "oversize", reason, command))
+		} else { // abstainAction only ever returns deny or ask
+			if sessionID != "" {
+				AppendLine(projSessionID, "asked", command)
+			}
+			emitHook(hookResponse("ask", "oversize", reason, command))
+		}
+		return
+	}
+
+	cacheKey := hashCollected(command, attachedScripts, withheldScripts)
 	start := time.Now()
 	// Augment the base prompt with the user's classifier hints — the
 	// classifier block from config.json plus context/allow-hint/ask-hint
@@ -580,8 +644,9 @@ func cmdHook() {
 		return
 	}
 
-	// Cache the decision if it involved a script file
-	saveCache(command, d)
+	// Cache the decision if it involved a script file, keyed to the exact
+	// snapshot the LLM just judged.
+	saveCacheHash(cacheKey, d)
 
 	// Risk map: classifier gave us (decision, risk). Active harness
 	// decides the final action per its RiskMap. "passthrough" returns an
@@ -600,7 +665,7 @@ func cmdHook() {
 	switch finalDecision {
 	case "allow":
 		if sessionID != "" {
-			AppendLine(projSessionID, "approved", command)
+			saveApproved(projSessionID, command, cwd)
 		}
 		emitHook(hookResponse("allow", "llm", d.Reasoning, command))
 	case "deny":
@@ -619,22 +684,100 @@ func cacheDir() string {
 	return filepath.Join(YolonotDir(), "cache")
 }
 
-func scriptHash(command string) string {
-	m := scriptPathRe.FindStringSubmatch(" " + command)
-	if len(m) < 2 {
+// hashCollected keys the decision cache on the exact attached-script set
+// BuildAnalyzePrompt shows the LLM, plus the identities of any withheld
+// refs and the command. Hashing a script the classifier never saw (the old
+// behavior for out-of-project paths) froze "ask" decisions against
+// invisible content; folding in the withheld identities means swapping the
+// decoy set that surrounds an attached script also invalidates the entry.
+// Each file is framed with its path and length so boundary-shifted edits
+// across multiple files can't collide. Returns "" (cache disabled) when
+// nothing was attached.
+func hashCollected(command string, attached []attachedScript, withheld []withheldScript) string {
+	if len(attached) == 0 {
 		return ""
 	}
-	path := m[1]
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
+	// Refuse to cache when an in-root script was crowded out by the attach
+	// cap: the classifier judged an incomplete view (only a note for that
+	// script), so pinning an allow to the attached bytes would reuse the
+	// decision for content the model never saw. A content change in the
+	// crowded-out file would not change this key otherwise.
+	for _, w := range withheld {
+		if w.reason == whReasonCapReached {
+			return ""
+		}
 	}
-	h := sha256.Sum256(append(data, []byte(command)...))
-	return fmt.Sprintf("%x", h[:8])
+	h := sha256.New()
+	for _, a := range attached {
+		// Frame each file as path\0<full-file digest>. The digest is the
+		// sha256 of the WHOLE attached content (files over the attach cap
+		// are withheld, never truncated), so an edit anywhere changes the key.
+		fmt.Fprintf(h, "%s\x00", a.ref.abs)
+		h.Write(a.digest[:])
+	}
+	h.Write([]byte("\x01"))
+	names := make([]string, 0, len(withheld))
+	for _, w := range withheld {
+		names = append(names, w.ref.raw)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		fmt.Fprintf(h, "%s\x00", n)
+	}
+	h.Write([]byte(command))
+	sum := h.Sum(nil)
+	return fmt.Sprintf("%x", sum[:8])
 }
 
-func checkCache(command string) *Decision {
-	hash := scriptHash(command)
+// scriptHash is the convenience form used by the pre-LLM cache read and by
+// callers that don't already hold a collected snapshot.
+func scriptHash(command, cwd string) string {
+	attached, withheld := collectScripts(command, cwd)
+	return hashCollected(command, attached, withheld)
+}
+
+// saveApproved records a session approval: the command line itself plus,
+// when the command attaches script contents, the content-keyed hash into
+// the .approvedhash session file. The hash is what keeps the session
+// exact-match layer content-aware — an approval granted while a script
+// held content X must not silently extend to content Y (the decision that
+// earned the approval was made about X). The unwrapped inner form's hash
+// is stored too, so a plain re-run of a wrapper-approved command still
+// passes the content gate.
+func saveApproved(projSessionID, command, cwd string) {
+	AppendLine(projSessionID, "approved", command)
+	if h := scriptHash(command, cwd); h != "" {
+		AppendLine(projSessionID, "approvedhash", h)
+	}
+	if inner := UnwrapCommand(command, SessionWrappers()); inner != "" {
+		if h := scriptHash(inner, cwd); h != "" {
+			AppendLine(projSessionID, "approvedhash", h)
+		}
+	}
+}
+
+// sessionContentOK reports whether a session-approved command's attached
+// script contents still match what was approved. Commands that attach no
+// script content (h == "") carry no content stake — the string match is
+// the whole story, as before. For attaching commands the current
+// content-keyed hash must be present in .approvedhash; a missing hash
+// (script edited since approval, or approval predates hashing) makes the
+// session layer fall through so the cache/LLM re-judge the new contents.
+func sessionContentOK(projSessionID, command, cwd string) bool {
+	h := scriptHash(command, cwd)
+	if h == "" {
+		if inner := UnwrapCommand(command, SessionWrappers()); inner != "" {
+			h = scriptHash(inner, cwd)
+		}
+	}
+	if h == "" {
+		return true
+	}
+	return ContainsLine(projSessionID, "approvedhash", h)
+}
+
+func checkCache(command, cwd string) *Decision {
+	hash := scriptHash(command, cwd)
 	if hash == "" {
 		return nil
 	}
@@ -700,8 +843,13 @@ func preCheckShortName(cmdPath string) string {
 	return name
 }
 
-func saveCache(command string, d *Decision) {
-	hash := scriptHash(command)
+func saveCache(command, cwd string, d *Decision) {
+	saveCacheHash(scriptHash(command, cwd), d)
+}
+
+// saveCacheHash persists a decision under a precomputed script-cache key.
+// A "" key (no attachable script) is a no-op.
+func saveCacheHash(hash string, d *Decision) {
 	if hash == "" {
 		return
 	}

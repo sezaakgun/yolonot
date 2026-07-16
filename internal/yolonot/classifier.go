@@ -158,6 +158,23 @@ func ResolveRiskMap(h Harness) map[string]string {
 	return out
 }
 
+// abstainAction is the decision yolonot emits when it deliberately does NOT
+// send a command to the classifier — currently when the assembled prompt
+// exceeds maxClassifierPromptBytes. It reuses the active profile's
+// critical-tier policy (resolved per-harness via ResolveRiskMap), the most
+// cautious cell the user has expressed a policy for, but clamps it so an
+// UNJUDGED command is never auto-allowed or passed through (passthrough
+// fails open on ask-less harnesses): deny stays deny, everything else — and
+// any unset/invalid cell — becomes ask. This needs no new config and no
+// profile migration: every profile, built-in or custom, already resolves a
+// critical cell.
+func abstainAction(h Harness) string {
+	if ResolveRiskMap(h)[RiskCritical] == ActionDeny {
+		return ActionDeny
+	}
+	return ActionAsk
+}
+
 // isValidAction reports whether a risk-map value is a known action.
 func isValidAction(s string) bool {
 	switch s {

@@ -50,7 +50,7 @@ All yolonot data lives at `~/.yolonot/`:
 | `config.json` | Provider, model, timeout, pre-check list, risk overrides, harness settings |
 | `rules` | Global rules (allow/deny/ask) |
 | `sessions/` | Per-session per-project approved/asked/denied lists |
-| `cache/` | Script file hash → cached LLM decisions |
+| `cache/` | Attached-script content hash (command + full-file sha256s) → cached LLM decisions |
 | `decisions.jsonl` | Decision log with timestamps and LLM timing |
 | `update-check` | Cached update check (once per day) |
 

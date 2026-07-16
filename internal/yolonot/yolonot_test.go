@@ -615,7 +615,7 @@ func TestHookResponse(t *testing.T) {
 // --- BuildAnalyzePrompt ---
 
 func TestBuildAnalyzePrompt(t *testing.T) {
-	prompt := BuildAnalyzePrompt("kubectl get pods -n production")
+	prompt := BuildAnalyzePrompt("kubectl get pods -n production", "")
 	if !strings.Contains(prompt, "Command: kubectl get pods -n production") {
 		t.Error("prompt should contain the command")
 	}
@@ -625,7 +625,7 @@ func TestBuildAnalyzePrompt(t *testing.T) {
 }
 
 func TestBuildAnalyzePromptWithInlineScript(t *testing.T) {
-	prompt := BuildAnalyzePrompt(`python3 -c "print('hello')"`)
+	prompt := BuildAnalyzePrompt(`python3 -c "print('hello')"`, "")
 	if !strings.Contains(prompt, "Inline script:") {
 		t.Error("prompt should extract inline script")
 	}
@@ -829,15 +829,15 @@ func TestScriptCache(t *testing.T) {
 	command := "sh " + scriptPath
 
 	// No cache initially
-	if d := checkCache(command); d != nil {
+	if d := checkCache(command, scriptDir); d != nil {
 		t.Error("should have no cache initially")
 	}
 
 	// Save and retrieve
 	decision := &Decision{Decision: "allow", Confidence: 0.9, Reasoning: "safe script"}
-	saveCache(command, decision)
+	saveCache(command, scriptDir, decision)
 
-	cached := checkCache(command)
+	cached := checkCache(command, scriptDir)
 	if cached == nil {
 		t.Fatal("should have cached decision")
 	}
@@ -859,9 +859,9 @@ func TestScriptCachePythonFile(t *testing.T) {
 
 	// Save decision
 	decision := &Decision{Decision: "ask", Confidence: 0.8, Reasoning: "deploy script"}
-	saveCache(command, decision)
+	saveCache(command, scriptDir, decision)
 
-	cached := checkCache(command)
+	cached := checkCache(command, scriptDir)
 	if cached == nil {
 		t.Fatal("should cache .py script decision")
 	}
@@ -871,8 +871,8 @@ func TestScriptCachePythonFile(t *testing.T) {
 
 	// uv run with same script also works (different command, same file → different hash)
 	uvCommand := "uv run " + scriptPath
-	saveCache(uvCommand, &Decision{Decision: "allow", Confidence: 0.9, Reasoning: "safe with uv"})
-	uvCached := checkCache(uvCommand)
+	saveCache(uvCommand, scriptDir, &Decision{Decision: "allow", Confidence: 0.9, Reasoning: "safe with uv"})
+	uvCached := checkCache(uvCommand, scriptDir)
 	if uvCached == nil || uvCached.Decision != "allow" {
 		t.Error("uv run with .py should also cache")
 	}
@@ -890,15 +890,52 @@ func TestScriptCacheInvalidatedOnContentChange(t *testing.T) {
 	command := "sh " + scriptPath
 
 	// Cache a decision
-	saveCache(command, &Decision{Decision: "allow", Confidence: 0.95, Reasoning: "safe"})
-	if d := checkCache(command); d == nil {
+	saveCache(command, scriptDir, &Decision{Decision: "allow", Confidence: 0.95, Reasoning: "safe"})
+	if d := checkCache(command, scriptDir); d == nil {
 		t.Fatal("should have cache before content change")
 	}
 
 	// Change the script content → hash changes → cache miss
 	os.WriteFile(scriptPath, []byte("rm -rf /\n"), 0644)
-	if d := checkCache(command); d != nil {
+	if d := checkCache(command, scriptDir); d != nil {
 		t.Error("cache should miss after script content changed")
+	}
+}
+
+// The oversize guard trips only on a genuinely large assembled prompt: a
+// single attachable script stays under budget, an aggregate of several
+// near-cap scripts exceeds it (and defers to the profile abstain action).
+func TestClassifierPromptOversizeThreshold(t *testing.T) {
+	dir := t.TempDir()
+	big := []byte(strings.Repeat("echo x\n", 7*1024)) // ~49 KB, under maxAttachBytes
+	one := filepath.Join(dir, "a.sh")
+	os.WriteFile(one, big, 0644)
+	if got := len(BuildAnalyzePrompt("bash "+one, dir)); got > maxClassifierPromptBytes {
+		t.Errorf("single large script prompt %d should be under budget %d", got, maxClassifierPromptBytes)
+	}
+
+	b := filepath.Join(dir, "b.sh")
+	c := filepath.Join(dir, "c.sh")
+	os.WriteFile(b, big, 0644)
+	os.WriteFile(c, big, 0644)
+	cmd := "bash " + one + " && bash " + b + " && bash " + c // absolute → all attach
+	if got := len(BuildAnalyzePrompt(cmd, dir)); got <= maxClassifierPromptBytes {
+		t.Errorf("three large scripts prompt %d should exceed budget %d", got, maxClassifierPromptBytes)
+	}
+}
+
+// A file over maxAttachBytes never attaches, so the classifier never saw
+// its contents — the cache must not key a decision to them either.
+func TestScriptHashOversizeNotCached(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+	scriptDir := filepath.Join(dir, "project")
+	os.MkdirAll(scriptDir, 0755)
+	scriptPath := filepath.Join(scriptDir, "big.sh")
+	os.WriteFile(scriptPath, []byte(strings.Repeat("x=1\n", 40*1024)), 0644) // ~160 KB
+
+	if h := scriptHash("bash "+scriptPath, scriptDir); h != "" {
+		t.Errorf("an oversize (withheld) script must not produce a cache key, got %s", h)
 	}
 }
 
@@ -942,7 +979,7 @@ func TestScriptPathReMatchesExtensions(t *testing.T) {
 
 func TestScriptHashNoScript(t *testing.T) {
 	// Command without a script file reference
-	if h := scriptHash("ls -la"); h != "" {
+	if h := scriptHash("ls -la", ""); h != "" {
 		t.Errorf("non-script command should return empty hash, got %s", h)
 	}
 }
@@ -2924,9 +2961,9 @@ func TestBuildAnalyzePromptWithScriptFile(t *testing.T) {
 	os.Chdir(dir)
 	defer os.Chdir(origCwd)
 
-	prompt := BuildAnalyzePrompt("python3 " + scriptPath)
-	if !strings.Contains(prompt, "Script file contents:") {
-		t.Error("should include script file contents")
+	prompt := BuildAnalyzePrompt("python3 "+scriptPath, "")
+	if !strings.Contains(prompt, "Contents of the file this command executes:") {
+		t.Error("should include the executed script's contents with the executed-file label")
 	}
 	if !strings.Contains(prompt, "print('hello')") {
 		t.Error("should include actual script content")
@@ -2944,12 +2981,784 @@ func TestBuildAnalyzePromptRejectsOutsideProject(t *testing.T) {
 	os.Chdir(cwd)
 	defer os.Chdir(origCwd)
 
-	prompt := BuildAnalyzePrompt("python3 " + scriptPath)
-	if strings.Contains(prompt, "Script file contents:") {
+	prompt := BuildAnalyzePrompt("python3 "+scriptPath, "")
+	if strings.Contains(prompt, "Contents of") {
 		t.Error("must NOT include script contents when file is outside project")
 	}
 	if strings.Contains(prompt, "sk-") {
 		t.Error("must NOT leak a key from a file outside the project")
+	}
+	// New behavior: the classifier is told contents were withheld instead
+	// of being left to guess at an "unknown script".
+	if !strings.Contains(prompt, "not attached") {
+		t.Error("should carry a withheld-contents note for outside-project scripts")
+	}
+}
+
+func TestBuildAnalyzePromptSessionCwd(t *testing.T) {
+	// The harness payload cwd, not the hook process cwd, decides where
+	// relative script paths resolve. No Chdir here on purpose.
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "task.py"), []byte("print('session cwd')\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("python3 task.py", dir)
+	if !strings.Contains(prompt, "print('session cwd')") {
+		t.Error("relative script should resolve against the session cwd argument")
+	}
+}
+
+func TestBuildAnalyzePromptQuotedPath(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "gather-diff.sh")
+	os.WriteFile(scriptPath, []byte("echo quoted\n"), 0644)
+
+	prompt := BuildAnalyzePrompt(`bash "`+scriptPath+`" --staged-only`, dir)
+	if !strings.Contains(prompt, "echo quoted") {
+		t.Error("quoted script path should still be extracted and attached")
+	}
+}
+
+func TestBuildAnalyzePromptCdPrefix(t *testing.T) {
+	// A relative script in a directory-navigating command is deliberately
+	// NOT attached: resolving it against the session cwd would guess wrong
+	// (and could attach a same-named decoy). The classifier gets a note
+	// instead and still sees the raw command.
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "scripts")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "etl.py"), []byte("print('etl')\n"), 0644)
+	// A same-named decoy at the session cwd must never be attached.
+	os.WriteFile(filepath.Join(dir, "etl.py"), []byte("print('DECOY')\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("cd scripts && python3 etl.py", dir)
+	if strings.Contains(prompt, "print('DECOY')") {
+		t.Error("must not attach a cwd-level decoy for a cd-relative script")
+	}
+	if !strings.Contains(prompt, "not provably") {
+		t.Error("cd-relative script should carry an unproven-position withhold note")
+	}
+}
+
+func TestBuildAnalyzePromptSymlinkedCwd(t *testing.T) {
+	real := t.TempDir()
+	os.WriteFile(filepath.Join(real, "run.sh"), []byte("echo via symlink\n"), 0644)
+	link := filepath.Join(t.TempDir(), "proj")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	prompt := BuildAnalyzePrompt("bash run.sh", link)
+	if !strings.Contains(prompt, "echo via symlink") {
+		t.Error("symlinked session cwd must not disable script attachment")
+	}
+}
+
+func TestBuildAnalyzePromptGitRootBoundary(t *testing.T) {
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, ".git"), 0755)
+	os.MkdirAll(filepath.Join(repo, "tools"), 0755)
+	os.MkdirAll(filepath.Join(repo, "backend"), 0755)
+	os.WriteFile(filepath.Join(repo, "tools", "gen.py"), []byte("print('gen')\n"), 0644)
+
+	// Session sits in a subdirectory; the script is elsewhere in the repo.
+	prompt := BuildAnalyzePrompt("python3 ../tools/gen.py", filepath.Join(repo, "backend"))
+	if !strings.Contains(prompt, "print('gen')") {
+		t.Error("in-repo script above the session dir should attach (boundary is the git root)")
+	}
+}
+
+func TestBuildAnalyzePromptTildeOutsideProject(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.WriteFile(filepath.Join(home, "setup.sh"), []byte("token = 'sk-abcdefghijklmnop1234567890'\n"), 0600)
+
+	prompt := BuildAnalyzePrompt("bash ~/setup.sh", t.TempDir())
+	if strings.Contains(prompt, "sk-") {
+		t.Error("~-path outside the project must not leak contents")
+	}
+	if !strings.Contains(prompt, "not attached") {
+		t.Error("~-path outside the project should carry a withheld note")
+	}
+}
+
+func TestBuildAnalyzePromptWholeScriptSent(t *testing.T) {
+	// A several-hundred-line script is sent in FULL — the classifier must
+	// see a destructive line wherever it sits, not just a 100-line prefix.
+	dir := t.TempDir()
+	var b strings.Builder
+	for i := 0; i < 400; i++ {
+		b.WriteString("echo line\n")
+	}
+	b.WriteString("rm -rf /important\n") // the payload, at line 401
+	os.WriteFile(filepath.Join(dir, "long.sh"), []byte(b.String()), 0644)
+
+	prompt := BuildAnalyzePrompt("bash long.sh", dir)
+	if !strings.Contains(prompt, "rm -rf /important") {
+		t.Error("the whole script should be sent; a line past 100 must still be visible")
+	}
+	if strings.Contains(prompt, "truncated") {
+		t.Error("a normal-sized script must not be truncated")
+	}
+}
+
+func TestBuildAnalyzePromptOversizeScriptWithheld(t *testing.T) {
+	// A file over maxAttachBytes is withheld ENTIRELY, never truncated: a
+	// benign head shown while a malicious tail executes would be a decoy.
+	dir := t.TempDir()
+	big := strings.Repeat("x=1\n", 40*1024) // ~160 KB > maxAttachBytes
+	os.WriteFile(filepath.Join(dir, "big.sh"), []byte(big), 0644)
+
+	prompt := BuildAnalyzePrompt("bash big.sh", dir)
+	if strings.Contains(prompt, "x=1") {
+		t.Error("an oversize script's contents must not attach, even in part")
+	}
+	if !strings.Contains(prompt, "attach size limit") {
+		t.Error("an oversize script should carry an explicit size-limit note")
+	}
+}
+
+func TestBuildAnalyzePromptBinaryWithheld(t *testing.T) {
+	// A non-UTF-8 (binary) target never attaches: its bytes cannot
+	// faithfully stand in for what executes.
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "blob.sh"), []byte{0x7f, 'E', 'L', 'F', 0xff, 0xfe, 0x00, 0x01}, 0755)
+
+	prompt := BuildAnalyzePrompt("bash blob.sh", dir)
+	if strings.Contains(prompt, "ELF") {
+		t.Error("binary contents must not attach")
+	}
+	if !strings.Contains(prompt, "binary or non-UTF-8") {
+		t.Error("a binary target should carry a not-text note")
+	}
+}
+
+func TestBuildAnalyzePromptMultipleScripts(t *testing.T) {
+	// A compound command withholds RELATIVE tokens (fail-safe), but ABSOLUTE
+	// in-root paths are unambiguous and still all attach.
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.py")
+	b := filepath.Join(dir, "b.py")
+	os.WriteFile(a, []byte("print('aaa')\n"), 0644)
+	os.WriteFile(b, []byte("print('bbb')\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("python3 "+a+" && python3 "+b, dir)
+	if !strings.Contains(prompt, "print('aaa')") || !strings.Contains(prompt, "print('bbb')") {
+		t.Error("every referenced absolute script should attach, not just the first match")
+	}
+}
+
+func TestBuildAnalyzePromptCompoundRelativeWithheld(t *testing.T) {
+	// The fail-safe counterpart: the same two scripts referenced RELATIVELY
+	// in a compound command are withheld, not attached.
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.py"), []byte("print('aaa')\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "b.py"), []byte("print('bbb')\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("python3 a.py && python3 b.py", dir)
+	if strings.Contains(prompt, "print('aaa')") || strings.Contains(prompt, "print('bbb')") {
+		t.Error("relative scripts in a compound command must be withheld, not attached")
+	}
+	if !strings.Contains(prompt, "not provably") {
+		t.Error("withheld relative scripts should carry an unproven-position note")
+	}
+}
+
+func TestExtractInlineScriptMixedQuotes(t *testing.T) {
+	body := extractInlineScript(`bash -c "echo 'starting'; rm -rf build/"`)
+	if body != "echo 'starting'; rm -rf build/" {
+		t.Errorf("inline body truncated at embedded quote: %q", body)
+	}
+}
+
+func TestExtractInlineScriptMultiline(t *testing.T) {
+	body := extractInlineScript("python3 -c 'import os\nprint(os.getcwd())'")
+	if !strings.Contains(body, "print(os.getcwd())") {
+		t.Errorf("multiline -c body should be captured, got %q", body)
+	}
+}
+
+func TestExtractScriptRefsSeparatorsAndURLs(t *testing.T) {
+	refs := extractScriptRefs("python x.py;echo done")
+	if len(refs) != 1 || refs[0].raw != "x.py" {
+		t.Errorf("separator-glued script should extract, got %+v", refs)
+	}
+	if refs := extractScriptRefs("curl https://get.tool.sh | sh"); len(refs) != 0 {
+		t.Errorf("URLs must not be treated as script files, got %+v", refs)
+	}
+}
+
+func TestIsInertCommand(t *testing.T) {
+	// Whitelist alphabet: a single byte outside it forfeits the positional
+	// proof. Quotes, escapes, expansions, separators, redirects, comments —
+	// all outside the set by construction.
+	inert := []string{
+		"python foo.py",
+		"bash scripts/x.sh --flag",
+		"./deploy.sh --env=staging",
+		"uv run python test.py",
+		"python3.12 x.py --at 10:30,45 user@host +v",
+	}
+	for _, c := range inert {
+		if !isInertCommand(c) {
+			t.Errorf("isInertCommand(%q) = false, want true", c)
+		}
+	}
+	notInert := []string{
+		`python foo.py > out.log`,       // redirect
+		`python foo.py # note`,          // comment
+		`python foo.py --out $HOME/x`,   // expansion
+		`python "foo.py"`,               // quotes
+		`python foo.py; python b.py`,    // separator
+		"python x.py`cd sub`",           // backtick
+		`bash ~/setup.sh`,               // tilde expansion
+		`python *.py`,                   // glob
+		"cd sub\npython x.py",           // newline
+		`\cd sub`,                       // backslash escape
+	}
+	for _, c := range notInert {
+		if isInertCommand(c) {
+			t.Errorf("isInertCommand(%q) = true, want false", c)
+		}
+	}
+}
+
+func TestProvenScriptToken(t *testing.T) {
+	// The positional proof: at most one token can be proven to be the file
+	// bash executes; everything else must return "".
+	proven := map[string]string{
+		"python foo.py":                       "foo.py",
+		"python3 task.py":                     "task.py",
+		"python3.12 v.py":                     "v.py",
+		"bash scripts/x.sh --flag":            "scripts/x.sh",
+		"./deploy.sh --env=staging":           "./deploy.sh",
+		"scripts/run.sh":                      "scripts/run.sh",
+		"/abs/path/tool.py":                   "/abs/path/tool.py",
+		"node server.js 8080":                 "server.js",
+		"uv run python test.py":               "test.py",
+		"uv run ./script.py":                  "./script.py",
+		"python x=y":                          "x=y", // odd but literal: python opens the file named x=y
+	}
+	for cmd, want := range proven {
+		if got := provenScriptToken(cmd); got != want {
+			t.Errorf("provenScriptToken(%q) = %q, want %q", cmd, got, want)
+		}
+	}
+
+	unproven := []string{
+		// non-inert: separators, subshells, quotes, expansions, heredocs
+		`cd x && python foo.py`,
+		`python a.py | tee log`,
+		`python a.py; python b.py`,
+		`( cd sub && python x.py )`,
+		`{ cd sub; python x.py; }`,
+		`python foo.py &`,
+		"bash <<EOF\npython x.py\nEOF",
+		`bash -c "cd sub && python x.py"`,
+		`: $'\'' ; cd sub ; sh x.py`,
+		"cd /o # it's\n./x.py",
+		"python x.py`cd sub`",
+		`"cd" sub && python x.py`,
+		`\cd sub && python x.py`,
+		`if cd build; then python gen.py; fi`,
+		// inert but flag before the script: forfeits — this is what retires
+		// the chdir-flag blocklist (any flag COULD be a chdir flag)
+		"python -u foo.py",
+		"python -m pytest",
+		"ruby -C/x/evil x.py",
+		"ruby -xsub script.rb",
+		"ruby -X sub main.rb",
+		"bash -x run.sh",
+		// inert but the head is a bare non-interpreter word: PATH lookup,
+		// wrappers, runners with package/task-name operands, chdir tools
+		"foo.sh",
+		"pytest x.py",
+		"make -C sub x.sh",
+		"git -C sub sh x.sh",
+		"env -C sub sh x.sh",
+		"env --chdir=sub sh x.sh",
+		"env -Csub sh x.sh",
+		"sudo -D sub ./x.sh",
+		"sudo python x.py",
+		"bun --cwd=sub app.js",
+		"bun run app.js",
+		"npm run build.js",
+		"chroot /jail sh x.sh",
+		"FOO=bar python foo.py",
+		// uv peel refuses when a flag intervenes (could be --directory)
+		"uv run --directory sub python t.py",
+		"uv --directory sub run python t.py",
+		// interpreter with nothing after it
+		"python",
+		"bash",
+	}
+	for _, cmd := range unproven {
+		if got := provenScriptToken(cmd); got != "" {
+			t.Errorf("provenScriptToken(%q) = %q, want \"\"", cmd, got)
+		}
+	}
+}
+
+func TestBuildAnalyzePromptReservedWordCdNoDecoy(t *testing.T) {
+	// `cd` reached via a reserved-word / builtin prefix is a compound
+	// command and must not attach a cwd-level decoy. (Under the fail-safe
+	// gate these are withheld simply for being compound, so the decoy can
+	// never surface regardless of how `cd` is spelled.)
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "build")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(dir, "gen.py"), []byte("print('DECOY')\n"), 0644)
+	os.WriteFile(filepath.Join(sub, "gen.py"), []byte("print('real')\n"), 0644)
+
+	for _, cmd := range []string{
+		"if cd build; then python gen.py; fi",
+		"while cd build; do python gen.py; break; done",
+		"builtin cd build && python gen.py",
+		"! cd build && python gen.py",
+	} {
+		if strings.Contains(BuildAnalyzePrompt(cmd, dir), "print('DECOY')") {
+			t.Errorf("%q attached a cwd decoy", cmd)
+		}
+	}
+}
+
+func TestBuildAnalyzePromptEscapedQuoteNoLeak(t *testing.T) {
+	// An escaped quote inside a double-quoted message must not close the
+	// string early and leak a trailing token that the shell never executes.
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "secret.py"), []byte("print('sensitive contents')\n"), 0644)
+
+	prompt := BuildAnalyzePrompt(`echo "note \"x\" python secret.py"`, dir)
+	if strings.Contains(prompt, "sensitive contents") {
+		t.Error("escaped quote inside a double-quoted string leaked a non-executed file's contents")
+	}
+	if strings.Contains(prompt, "Contents of") {
+		t.Error("secret.py must not be attached; the shell only runs echo")
+	}
+}
+
+func TestBuildAnalyzePromptAnsiCQuotingNoDecoy(t *testing.T) {
+	// $'...' ANSI-C quoting must not desync the parser into reading a
+	// compound cd-then-exec command as simple (which would attach a cwd decoy
+	// while the shell runs a shadowed file in another dir).
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(dir, "x.sh"), []byte("echo DECOY\n"), 0644)
+	os.WriteFile(filepath.Join(sub, "x.sh"), []byte("echo real\n"), 0644)
+
+	for _, cmd := range []string{
+		`: $'\'' ; cd sub ; sh x.sh`,
+		`printf $'a\'b' ; cd sub ; sh x.sh`,
+	} {
+		if provenScriptToken(cmd) != "" {
+			t.Errorf("provenScriptToken(%q) != \"\"; $'...' must forfeit the proof", cmd)
+		}
+		if strings.Contains(BuildAnalyzePrompt(cmd, dir), "echo DECOY") {
+			t.Errorf("%q attached a cwd decoy via ANSI-C quoting", cmd)
+		}
+	}
+}
+
+func TestBuildAnalyzePromptDirChangeFlagNoDecoy(t *testing.T) {
+	// A single command whose tool chdirs itself (env -C, find -execdir,
+	// git -C, …) breaks the "runs in session cwd" premise — the relative
+	// script must be withheld, not attached from the cwd.
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(dir, "x.sh"), []byte("echo DECOY\n"), 0644)
+	os.WriteFile(filepath.Join(sub, "x.sh"), []byte("echo real\n"), 0644)
+
+	for _, cmd := range []string{
+		"env -C sub sh x.sh",
+		"env --chdir=sub sh x.sh",
+		"find sub -name x.sh -execdir sh {} ;",
+		"git -C sub sh x.sh",
+		"make -C sub x.sh",
+		// tools that chdir via their OWN flag, no shell metacharacter — the
+		// class the old blocklist kept missing (found by adversarial review)
+		"bun --cwd=sub sh x.sh",
+		"ruby -xsub x.sh",
+		"ruby -X sub x.sh",
+		"sudo -D sub sh x.sh",
+	} {
+		if provenScriptToken(cmd) != "" {
+			t.Errorf("provenScriptToken(%q) != \"\"; a dir-changing tool must forfeit the proof", cmd)
+		}
+		if strings.Contains(BuildAnalyzePrompt(cmd, dir), "echo DECOY") {
+			t.Errorf("%q attached a cwd decoy via a dir-changing flag", cmd)
+		}
+	}
+	// A flag between the interpreter and the script forfeits too — that flag
+	// could be a chdir flag we've never heard of. Withheld, never guessed.
+	if strings.Contains(BuildAnalyzePrompt("python -u x.sh", dir), "echo DECOY") {
+		t.Error("a flag between interpreter and script must withhold, not attach from cwd")
+	}
+	// Without the flag the proof holds and the cwd file attaches.
+	if !strings.Contains(BuildAnalyzePrompt("sh x.sh", dir), "echo DECOY") {
+		t.Error("a plain `sh x.sh` should attach the cwd file")
+	}
+}
+
+func TestBuildAnalyzePromptCommentNewlineNoDecoy(t *testing.T) {
+	// A `#` comment carrying an unbalanced quote must not hide the newline
+	// separator (which bash honors) and read as a simple command.
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(dir, "evil.sh"), []byte("echo DECOY\n"), 0644)
+	os.WriteFile(filepath.Join(sub, "evil.sh"), []byte("echo real\n"), 0644)
+
+	cmd := "cd sub  # it's a note\n./evil.sh"
+	if provenScriptToken(cmd) != "" {
+		t.Error("a command with an embedded newline must not yield a positional proof")
+	}
+	if strings.Contains(BuildAnalyzePrompt(cmd, dir), "echo DECOY") {
+		t.Error("comment/newline desync attached a cwd decoy")
+	}
+}
+
+func TestBuildAnalyzePromptGluedShortDirChangeNoDecoy(t *testing.T) {
+	// Glued short chdir option (-C<dir>, no space) must forfeit simple.
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(dir, "script.rb"), []byte("puts 'DECOY'\n"), 0644)
+	os.WriteFile(filepath.Join(sub, "script.rb"), []byte("puts 'real'\n"), 0644)
+
+	for _, cmd := range []string{
+		"ruby -C" + sub + " script.rb",
+		"ruby -Csub script.rb",
+		"env -Csub sh script.rb",
+	} {
+		if provenScriptToken(cmd) != "" {
+			t.Errorf("provenScriptToken(%q) != \"\"; glued -C<dir> must forfeit the proof", cmd)
+		}
+		if strings.Contains(BuildAnalyzePrompt(cmd, dir), "DECOY") {
+			t.Errorf("%q attached a cwd decoy via glued -C", cmd)
+		}
+	}
+}
+
+func TestBuildAnalyzePromptQuotedCdNoDecoy(t *testing.T) {
+	// The quoted-cd evasion must not attach a cwd-level decoy.
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(dir, "x.py"), []byte("print('DECOY')\n"), 0644)
+	os.WriteFile(filepath.Join(sub, "x.py"), []byte("print('real')\n"), 0644)
+
+	for _, cmd := range []string{
+		`"cd" sub && python x.py`,
+		`\cd sub && python x.py`,
+		`eval "cd sub && python x.py"`,
+	} {
+		if strings.Contains(BuildAnalyzePrompt(cmd, dir), "print('DECOY')") {
+			t.Errorf("%q attached a cwd decoy", cmd)
+		}
+	}
+}
+
+func TestScriptHashDisabledWhenInRootCrowdedOut(t *testing.T) {
+	// Cache must not engage when an in-root script is crowded out by the
+	// attach cap — the classifier saw only a note for it. (Absolute paths:
+	// relative non-proven refs withhold for position instead.)
+	dir := t.TempDir()
+	cmd := "python"
+	for _, n := range []string{"a.py", "b.py", "c.py", "d.py"} {
+		p := filepath.Join(dir, n)
+		os.WriteFile(p, []byte("print('"+n+"')\n"), 0644)
+		cmd += " " + p
+	}
+	if h := scriptHash(cmd, dir); h != "" {
+		t.Errorf("cache must be disabled when an in-root script is crowded out, got %s", h)
+	}
+}
+
+func TestBuildAnalyzePromptNewlineCd(t *testing.T) {
+	// Newline-separated `cd` is directory navigation just like `cd &&`:
+	// the relative script is withheld, and a decoy at cwd is never attached.
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "scripts")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "etl.py"), []byte("print('newline etl')\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "etl.py"), []byte("print('DECOY')\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("cd scripts\npython3 etl.py", dir)
+	if strings.Contains(prompt, "print('DECOY')") {
+		t.Error("newline cd must not attach a cwd-level decoy")
+	}
+	if !strings.Contains(prompt, "not provably") {
+		t.Error("newline-cd relative script should carry an unproven-position note")
+	}
+}
+
+func TestBuildAnalyzePromptBackgrounded(t *testing.T) {
+	// `&` makes the command compound, so a RELATIVE token is withheld; an
+	// ABSOLUTE token with `&` glued on is still cleanly extracted + attached.
+	dir := t.TempDir()
+	abs := filepath.Join(dir, "run.sh")
+	os.WriteFile(abs, []byte("echo backgrounded\n"), 0644)
+
+	if !strings.Contains(BuildAnalyzePrompt("bash "+abs+"&", dir), "echo backgrounded") {
+		t.Error("backgrounding & glued to an absolute token should not defeat extraction")
+	}
+	os.WriteFile(filepath.Join(dir, "rel.sh"), []byte("echo rel\n"), 0644)
+	if strings.Contains(BuildAnalyzePrompt("bash rel.sh&", dir), "echo rel") {
+		t.Error("a relative token in a backgrounded (compound) command must be withheld")
+	}
+}
+
+func TestBuildAnalyzePromptSubshellSpaceNoDecoy(t *testing.T) {
+	// A space after the subshell opener must not defeat the guard.
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(dir, "etl.py"), []byte("print('DECOY')\n"), 0644)
+	os.WriteFile(filepath.Join(sub, "etl.py"), []byte("print('real')\n"), 0644)
+
+	for _, cmd := range []string{
+		"( cd sub && python etl.py )",
+		"{ cd sub; python etl.py; }",
+		"{ cd sub; }; python etl.py",
+	} {
+		prompt := BuildAnalyzePrompt(cmd, dir)
+		if strings.Contains(prompt, "print('DECOY')") {
+			t.Errorf("%q attached a cwd decoy", cmd)
+		}
+	}
+}
+
+func TestBuildAnalyzePromptHeredocNoAttach(t *testing.T) {
+	// A heredoc makes the command navigation-complex; relative tokens in
+	// the body must not attach a cwd file.
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "evil.py"), []byte("print('DECOY')\n"), 0644)
+	prompt := BuildAnalyzePrompt("bash <<EOF\ncd /etc\npython evil.py\nEOF", dir)
+	if strings.Contains(prompt, "print('DECOY')") {
+		t.Error("heredoc body must not cause a cwd file to attach")
+	}
+}
+
+func TestBuildAnalyzePromptInlineBodyNavigationNoDecoy(t *testing.T) {
+	// A cd inside a `-c` body must not attach the cwd-level same-named file
+	// while the body runs the child-dir file.
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(dir, "x.py"), []byte("print('DECOY')\n"), 0644)
+	os.WriteFile(filepath.Join(sub, "x.py"), []byte("print('real')\n"), 0644)
+
+	prompt := BuildAnalyzePrompt(`bash -c "cd sub && python x.py"`, dir)
+	if strings.Contains(prompt, "print('DECOY')") {
+		t.Error("cd inside a -c body must not attach a cwd decoy")
+	}
+	// The body itself is still surfaced to the classifier verbatim.
+	if !strings.Contains(prompt, "Inline script:") {
+		t.Error("the -c body should still appear as an inline script")
+	}
+}
+
+func TestBuildAnalyzePromptSensitiveHomeFloor(t *testing.T) {
+	// Even when the repo root is $HOME (so the git-root boundary would
+	// admit it), dotfile subtrees like ~/.ssh must never attach.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(filepath.Join(home, ".git"), 0755)
+	os.MkdirAll(filepath.Join(home, ".ssh"), 0700)
+	os.WriteFile(filepath.Join(home, ".ssh", "keygen.sh"), []byte("echo id_rsa contents\n"), 0600)
+
+	prompt := BuildAnalyzePrompt("bash .ssh/keygen.sh", home)
+	if strings.Contains(prompt, "id_rsa contents") {
+		t.Error("scripts under ~/.ssh must never attach, even inside a home git root")
+	}
+}
+
+func TestBuildAnalyzePromptProvenOutranksEnrichment(t *testing.T) {
+	// The proven executed script always takes the first attach slot; extra
+	// absolute enrichment refs fill the rest and overflow gets a cap note.
+	dir := t.TempDir()
+	ab := func(n string) string { return filepath.Join(dir, n) }
+	for _, n := range []string{"a.sql", "b.sql", "c.sql"} {
+		os.WriteFile(ab(n), []byte("SELECT 1;\n"), 0644)
+	}
+	os.WriteFile(ab("main.py"), []byte("print('the executed one')\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("python "+ab("main.py")+" "+ab("a.sql")+" "+ab("b.sql")+" "+ab("c.sql"), dir)
+	if !strings.Contains(prompt, "the executed one") {
+		t.Error("the proven executed script must never be crowded out of the attach cap")
+	}
+	if !strings.Contains(prompt, "attachment limit reached") {
+		t.Error("the crowded-out enrichment ref should carry a cap note")
+	}
+}
+
+func TestBuildAnalyzePromptWithheldAggregateNotStarved(t *testing.T) {
+	// A flood of decoy refs must not starve the note for a real in-root
+	// script forced out by the attach cap.
+	dir := t.TempDir()
+	for _, n := range []string{"a.py", "b.py", "c.py", "keep.py"} {
+		os.WriteFile(filepath.Join(dir, n), []byte("print('"+n+"')\n"), 0644)
+	}
+	// 4 in-root absolute scripts, cap 3 → keep.py withheld with cap reason,
+	// plus unresolvable decoys. The cap-withheld note must survive ordering.
+	ab := func(n string) string { return filepath.Join(dir, n) }
+	cmd := "python " + ab("a.py") + " " + ab("b.py") + " " + ab("c.py") + " " + ab("keep.py") + " $X.py $Y.py $Z.py"
+	prompt := BuildAnalyzePrompt(cmd, dir)
+	if !strings.Contains(prompt, "attachment limit reached") {
+		t.Error("the cap-withheld real script must get a note despite decoy refs")
+	}
+}
+
+func TestBuildAnalyzePromptSubshellCdPoisons(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(dir, "x.py"), []byte("print('benign root')\n"), 0644)
+	os.WriteFile(filepath.Join(sub, "x.py"), []byte("print('actually executed')\n"), 0644)
+
+	// The shell executes sub/x.py; attaching the same-named root file
+	// would let a malicious script hide behind a benign shadow.
+	prompt := BuildAnalyzePrompt("(cd sub && python3 x.py)", dir)
+	if strings.Contains(prompt, "print('benign root')") {
+		t.Error("subshell cd must not cause the wrong (shadowing) file to attach")
+	}
+	if !strings.Contains(prompt, "not attached") {
+		t.Error("unresolvable subshell ref should carry a withheld note")
+	}
+}
+
+func TestBuildAnalyzePromptPaddingCannotBlind(t *testing.T) {
+	dir := t.TempDir()
+	abs := filepath.Join(dir, "deploy.sh")
+	os.WriteFile(abs, []byte("echo real deploy\n"), 0644)
+
+	// Unresolvable refs must not consume the attachment budget (deploy.sh
+	// is absolute so it attaches despite the compound command).
+	prompt := BuildAnalyzePrompt("echo $A.py $B.py $C.py && bash "+abs, dir)
+	if !strings.Contains(prompt, "echo real deploy") {
+		t.Error("padding a command with unresolvable script tokens must not suppress real attachment")
+	}
+}
+
+func TestBuildAnalyzePromptCdRelativeWithheld(t *testing.T) {
+	// Any cd form (including with flags) makes a relative script's dir
+	// ambiguous → withhold, never attach a same-named cwd decoy.
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "x.py"), []byte("print('after flags')\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "x.py"), []byte("print('DECOY')\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("cd -- sub && python3 x.py", dir)
+	if strings.Contains(prompt, "print('DECOY')") {
+		t.Error("cd (with flags) must not attach a cwd-level decoy")
+	}
+	if !strings.Contains(prompt, "not provably") {
+		t.Error("cd-relative script should carry an unproven-position note")
+	}
+}
+
+func TestBuildAnalyzePromptAbsoluteAttachesUnderNavigation(t *testing.T) {
+	// An ABSOLUTE path is unambiguous regardless of cd, so it still
+	// attaches even in a navigating command (as long as it is in-project).
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, ".git"), 0755)
+	os.MkdirAll(filepath.Join(repo, "scripts"), 0755)
+	os.MkdirAll(filepath.Join(repo, "backend"), 0755)
+	abs := filepath.Join(repo, "scripts", "build.sh")
+	os.WriteFile(abs, []byte("echo toplevel build\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("cd whatever && bash "+abs, filepath.Join(repo, "backend"))
+	if !strings.Contains(prompt, "echo toplevel build") {
+		t.Error("an absolute in-project script should attach even under cd navigation")
+	}
+}
+
+func TestBuildAnalyzePromptEnrichmentLabelNotExecuted(t *testing.T) {
+	// Enrichment refs (absolute paths without a positional proof) attach
+	// with the weaker "references" label, never the "executes" label — the
+	// classifier must not over-trust a file we cannot prove will run.
+	dir := t.TempDir()
+	abs := filepath.Join(dir, "notes.sh")
+	os.WriteFile(abs, []byte("echo referenced data\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("cat "+abs+" && echo done", dir)
+	if !strings.Contains(prompt, "echo referenced data") {
+		t.Error("an absolute in-root ref should attach as enrichment")
+	}
+	if strings.Contains(prompt, "Contents of the file this command executes:") {
+		t.Error("an unproven ref must not carry the executed-file label")
+	}
+	if !strings.Contains(prompt, "Contents of a script file the command references:") {
+		t.Error("an unproven ref should carry the weaker references label")
+	}
+}
+
+func TestBuildAnalyzePromptNonRegularFileSkipped(t *testing.T) {
+	dir := t.TempDir()
+	// A directory named like a script: stat guard must skip it without
+	// attaching and without hanging.
+	os.MkdirAll(filepath.Join(dir, "x.sh"), 0755)
+
+	prompt := BuildAnalyzePrompt("bash x.sh", dir)
+	if strings.Contains(prompt, "Contents of") {
+		t.Error("non-regular files must not attach")
+	}
+	if !strings.Contains(prompt, "not attached") {
+		t.Error("non-regular files should carry a withheld note")
+	}
+}
+
+func TestExtractInlineScriptEscapedQuotes(t *testing.T) {
+	body := extractInlineScript(`bash -c "echo \"hi\"; rm -rf /"`)
+	if body != `echo \"hi\"; rm -rf /` {
+		t.Errorf("escaped double quotes must not truncate the inline body, got %q", body)
+	}
+}
+
+func TestScriptHashBoundaryShiftNoCollision(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a.py"), filepath.Join(dir, "b.py")
+	os.WriteFile(a, []byte("AB"), 0644)
+	os.WriteFile(b, []byte("C"), 0644)
+	cmd := "python " + a + " " + b // absolute so both attach
+	h1 := scriptHash(cmd, dir)
+
+	os.WriteFile(a, []byte("A"), 0644)
+	os.WriteFile(b, []byte("BC"), 0644)
+	h2 := scriptHash(cmd, dir)
+
+	if h1 == "" || h1 == h2 {
+		t.Errorf("boundary-shifted file contents must not collide: h1=%s h2=%s", h1, h2)
+	}
+}
+
+func TestScriptHashMatchesAttachedSet(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "real.sh"), []byte("echo real\n"), 0644)
+
+	// The unproven refs withhold; real.sh (proven) attaches — the hash must
+	// engage exactly when attachment does.
+	cmd := "bash real.sh missing1.sh missing2.sh missing3.sh"
+	if h := scriptHash(cmd, dir); h == "" {
+		t.Error("hash must engage when a script is attached, regardless of withheld refs")
+	}
+	prompt := BuildAnalyzePrompt(cmd, dir)
+	if !strings.Contains(prompt, "echo real") {
+		t.Error("real.sh should attach despite withheld refs")
+	}
+}
+
+func TestScriptHashOutsideProjectDisabled(t *testing.T) {
+	outside := t.TempDir()
+	scriptPath := filepath.Join(outside, "tool.py")
+	os.WriteFile(scriptPath, []byte("print('x')\n"), 0644)
+
+	// The LLM never sees this file's contents, so the cache must not key
+	// a decision to them either.
+	if h := scriptHash("python3 "+scriptPath, t.TempDir()); h != "" {
+		t.Errorf("out-of-project script must not produce a cache key, got %s", h)
 	}
 }
 

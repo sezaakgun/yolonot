@@ -67,6 +67,29 @@ func TestApplyRiskMap_DenyEscalatesAllow(t *testing.T) {
 	}
 }
 
+func TestAbstainAction(t *testing.T) {
+	// abstainAction reuses the profile's critical cell but clamps so an
+	// unjudged (oversize) command is never auto-allowed or passed through.
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	h := &fakeHarness{riskMap: map[string]string{}}
+	RegisterHarness(h)
+	defer unregisterHarness(h)
+
+	cases := []struct{ critical, want string }{
+		{ActionDeny, ActionDeny},       // paranoid/strict/fast → deny
+		{ActionAsk, ActionAsk},         // balanced → ask
+		{ActionAllow, ActionAsk},       // clamp: never auto-allow the unjudged
+		{ActionPassthrough, ActionAsk}, // clamp: never fail open on abstain
+	}
+	for _, c := range cases {
+		SaveConfig(Config{RiskMaps: map[string]map[string]string{h.Name(): {RiskCritical: c.critical}}})
+		if got := abstainAction(h); got != c.want {
+			t.Errorf("critical=%s: abstainAction=%s, want %s", c.critical, got, c.want)
+		}
+	}
+}
+
 func TestClaudeHarnessDefaultRiskMap(t *testing.T) {
 	m := (&ClaudeHarness{}).RiskMap()
 	cases := map[string]string{

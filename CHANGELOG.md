@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-07-17
+
+### Fixed
+
+- **Script paths resolve against the session cwd** from the hook payload,
+  not the hook process's working directory. This was the root cause of
+  most "unknown script" asks (`cd`-launched sessions, monorepo
+  subdirectories, harnesses that send a per-call cwd).
+
+### Changed
+
+- **Script attachment now requires a positional proof.** A relative
+  script's contents are attached to the classifier prompt only when it is
+  provably the file bash will execute: the command must use only an inert
+  character set (no quotes, expansions, or separators — on that set
+  whitespace splitting provably matches bash's argv), and the script must
+  be either a leading path (`./run.sh`, `scripts/x.sh`) or the first
+  non-flag argument after a known interpreter (`python`, `bash`, `node`,
+  `ruby`, …, plus a `uv run` prefix). Anything else — compound commands,
+  wrapper tools, any flag between the interpreter and the script —
+  attaches a "contents withheld" note instead. This replaces the
+  directory-changing-flag blocklist, which adversarial review kept
+  finding gaps in (`bun --cwd`, `ruby -x`): a chdir flag is always a flag
+  sitting before the script, so requiring a flag-free position excludes
+  every such flag, known or future. Withholding costs at most one ask;
+  attaching the wrong file would silently approve a decoy.
+- **Whole file or nothing.** Attached scripts are sent in full (up to
+  64 KB). Larger or non-UTF-8 files are withheld entirely instead of
+  truncated — a benign prefix could mask a malicious tail. Cache keys are
+  the sha256 of the full attached contents, so an edit anywhere in the
+  file re-judges the command.
+- **Oversize prompts abstain.** If the assembled classifier prompt
+  exceeds 128 KB it is never sent to the provider; the active profile's
+  abstain action (its critical tier, clamped to at least `ask`) applies
+  instead, and the decision is not cached.
+- **Session approvals are content-aware.** A session approval for a
+  command that attaches script contents is pinned to those contents
+  (recorded in a `.approvedhash` session file). Editing the script after
+  approval makes the session exact-match layer fall through, so the
+  cache/LLM re-judge the new contents instead of replaying an approval
+  granted for the old ones. Commands that attach nothing keep plain
+  string matching; session denies stay pinned regardless of content
+  (an edit is new evidence for allowing, never for un-denying).
+
+### Security
+
+- Script attachment is bounded by the git repo root of the session cwd
+  and never enters sensitive home directories (`~/.ssh`, `~/.aws`,
+  `~/.gnupg`, …), even when the repo root is `$HOME`. Script reads are
+  TOCTOU-hardened (`O_NOFOLLOW|O_NONBLOCK` + fstat on the open fd). Hook
+  stdin is capped at 4 MB.
+
 ## [0.16.1] — 2026-06-29
 
 ### Changed

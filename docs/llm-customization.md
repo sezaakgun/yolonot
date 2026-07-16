@@ -172,7 +172,7 @@ Project ask hints:   (from cfg.ask_hints + walkup.ask_hints)
   ↓
 [explicit user-intent override clause]
   ↓
-[user message: "Command: ..."]
+[user message: "Command: ..." + attached script contents / withheld-script notes]
 ```
 
 Within each section, **config entries appear before walk-up entries**, and
