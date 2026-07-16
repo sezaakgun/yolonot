@@ -4,7 +4,7 @@ Every Bash command goes through this pipeline in order. The first layer that pro
 
 1. **Deny rules** — absolute block, no override, checked first.
 2. **Pre-check hooks** (ordered list) — includes the built-in [`fast-allow`](pre-check.md#fast-allow) and any external hooks like [Dippy](https://github.com/ldayton/Dippy). The first entry that returns `allow` short-circuits. See [pre-check.md](pre-check.md).
-3. **Session memory** — exact match against previously approved commands → instant allow.
+3. **Session memory** — exact match against previously approved commands → instant allow. Content-aware for script commands: the approval is pinned to the script contents that were approved, so editing the script re-judges instead of replaying the allow.
 4. **Session deny** — previously rejected commands → instant block.
 5. **Session similarity** — LLM compares against approved commands → allow if similar (project-aware, prefix-prefiltered).
 6. **Allow / ask rules** — `.yolonot` patterns → instant decision. See [rules.md](rules.md).

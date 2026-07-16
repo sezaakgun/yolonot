@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exceeds 128 KB it is never sent to the provider; the active profile's
   abstain action (its critical tier, clamped to at least `ask`) applies
   instead, and the decision is not cached.
+- **Session approvals are content-aware.** A session approval for a
+  command that attaches script contents is pinned to those contents
+  (recorded in a `.approvedhash` session file). Editing the script after
+  approval makes the session exact-match layer fall through, so the
+  cache/LLM re-judge the new contents instead of replaying an approval
+  granted for the old ones. Commands that attach nothing keep plain
+  string matching; session denies stay pinned regardless of content
+  (an edit is new evidence for allowing, never for un-denying).
 
 ### Security
 

@@ -249,6 +249,7 @@ func CleanOldSessions() {
 	for _, e := range entries {
 		name := e.Name()
 		if strings.HasSuffix(name, ".approved") ||
+			strings.HasSuffix(name, ".approvedhash") ||
 			strings.HasSuffix(name, ".asked") ||
 			strings.HasSuffix(name, ".denied") ||
 			strings.HasSuffix(name, ".paused") ||

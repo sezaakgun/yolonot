@@ -310,10 +310,12 @@ func cmdHook() {
 		}
 	}
 
-	// PostToolUse: command ran → user approved → save to .approved
+	// PostToolUse: command ran → user approved → save to .approved (plus
+	// the content hash of any attached scripts, so the approval stays
+	// pinned to the contents the user actually saw run).
 	if payload.HookEventName == "PostToolUse" {
 		if sessionID != "" && command != "" {
-			AppendLine(projSessionID, "approved", command)
+			saveApproved(projSessionID, command, cwd)
 		}
 		return
 	}
@@ -378,7 +380,7 @@ func cmdHook() {
 		}
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "allow", Reasoning: reasoning})
 		if sessionID != "" {
-			AppendLine(projSessionID, "approved", command)
+			saveApproved(projSessionID, command, cwd)
 		}
 		emitHook(hookResponse("allow", "rule", userReason, command))
 		return
@@ -391,15 +393,32 @@ func cmdHook() {
 	// `rtk ls`). See MatchesLineOrWrappedVariant + SessionWrappers. When
 	// the match lands via wrapper equivalence we also record the current
 	// form so the next invocation hits the fast exact-match path.
+	// contentStale marks "this exact command was session-approved, but its
+	// attached script contents have changed since". It suppresses every
+	// string-level replay of that approval (exact match here, and the
+	// similarity layer below, which would trivially see the identical
+	// string in the approved list and re-allow) — the content-keyed
+	// cache/LLM layers judge the new contents instead.
+	contentStale := false
 	if sessionID != "" && MatchesLineOrWrappedVariant(projSessionID, "approved", command) {
-		source := "exact_match"
-		if !ContainsLine(projSessionID, "approved", command) {
-			AppendLine(projSessionID, "approved", command)
-			source = "wrapped_variant"
+		// Content gate: a string match is not enough when the command
+		// attaches script contents — the approval was granted for the
+		// contents that existed then. If the script has been edited since,
+		// fall through so the cache/LLM judge the NEW contents instead of
+		// replaying an approval about the old ones.
+		if !sessionContentOK(projSessionID, command, cwd) {
+			contentStale = true
+			Verbosef("session: approved command %q has changed script contents; re-judging", command)
+		} else {
+			source := "exact_match"
+			if !ContainsLine(projSessionID, "approved", command) {
+				saveApproved(projSessionID, command, cwd)
+				source = "wrapped_variant"
+			}
+			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: source})
+			emitHook(hookResponse("allow", "session", "previously approved this session", command))
+			return
 		}
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: source})
-		emitHook(hookResponse("allow", "session", "previously approved this session", command))
-		return
 	}
 
 	// Step 0.55: Session deny. If the user previously rejected this exact
@@ -419,15 +438,22 @@ func cmdHook() {
 			// between our ask and actual execution). Record the plain form
 			// so future checks are an exact match.
 			if ApprovedAsWrappedVariant(projSessionID, command) {
-				AppendLine(projSessionID, "approved", command)
-				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "wrapped_variant"})
-				emitHook(hookResponse("allow", "session", "previously approved as wrapped command this session", command))
+				// Same content gate as step 0.5. Stale contents fall through
+				// to re-judging — NOT to the denied branch below: an edited
+				// script is new evidence, not a prior user rejection.
+				if sessionContentOK(projSessionID, command, cwd) {
+					saveApproved(projSessionID, command, cwd)
+					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "wrapped_variant"})
+					emitHook(hookResponse("allow", "session", "previously approved as wrapped command this session", command))
+					return
+				}
+				Verbosef("session: wrapper-approved command %q has changed script contents; re-judging", command)
+			} else {
+				AppendLine(projSessionID, "denied", command)
+				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "asked_not_approved"})
+				emitHook(hookResponse("deny", "session_deny", "previously rejected this session", command))
 				return
 			}
-			AppendLine(projSessionID, "denied", command)
-			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "asked_not_approved"})
-			emitHook(hookResponse("deny", "session_deny", "previously rejected this session", command))
-			return
 		}
 	}
 
@@ -471,7 +497,7 @@ func cmdHook() {
 			// built-in parser.
 			if ok, reason := fastallow.IsLocallySafeWith(command, AllowRedirectPatterns(rules)); ok {
 				if sessionID != "" {
-					AppendLine(projSessionID, "approved", command)
+					saveApproved(projSessionID, command, cwd)
 				}
 				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "fast_allow", Decision: "allow", Reasoning: reason})
 				emitHook(hookResponse("allow", "fast_allow", reason, command))
@@ -481,7 +507,7 @@ func cmdHook() {
 		}
 		if _, reason, ok := runPreCheck(preCheck, canonicalInput); ok {
 			if sessionID != "" {
-				AppendLine(projSessionID, "approved", command)
+				saveApproved(projSessionID, command, cwd)
 			}
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "pre_check", Decision: "allow", Reasoning: reason})
 			layer := "pre_check (" + preCheckShortName(preCheck) + ")"
@@ -490,8 +516,11 @@ func cmdHook() {
 		}
 	}
 
-	// Step 2: Session similarity (LLM compare)
-	if sessionID != "" {
+	// Step 2: Session similarity (LLM compare). Skipped when the content
+	// gate flagged this exact command as stale — the identical string sits
+	// in the approved list, so the compare would trivially answer "same
+	// command, allow" and launder the stale approval right back in.
+	if sessionID != "" && !contentStale {
 		approved := ReadLines(projSessionID, "approved")
 		candidates := filterByPrefix(command, approved)
 		if len(candidates) > 0 {
@@ -506,7 +535,7 @@ func cmdHook() {
 					// The compare layer says "similar enough to an already
 					// approved command" — that approval already flowed
 					// through a risk map once. Don't re-map here.
-					AppendLine(projSessionID, "approved", command)
+					saveApproved(projSessionID, command, cwd)
 					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "allow", Short: d.Short, Reasoning: d.Reasoning, DurationMs: ms})
 					emitHook(hookResponse("allow", "session_llm", d.Reasoning, command))
 					return
@@ -533,7 +562,7 @@ func cmdHook() {
 		switch finalDecision {
 		case "allow":
 			if sessionID != "" {
-				AppendLine(projSessionID, "approved", command)
+				saveApproved(projSessionID, command, cwd)
 			}
 			emitHook(hookResponse("allow", "cache", cached.Reasoning, command))
 		case "deny":
@@ -636,7 +665,7 @@ func cmdHook() {
 	switch finalDecision {
 	case "allow":
 		if sessionID != "" {
-			AppendLine(projSessionID, "approved", command)
+			saveApproved(projSessionID, command, cwd)
 		}
 		emitHook(hookResponse("allow", "llm", d.Reasoning, command))
 	case "deny":
@@ -705,6 +734,46 @@ func hashCollected(command string, attached []attachedScript, withheld []withhel
 func scriptHash(command, cwd string) string {
 	attached, withheld := collectScripts(command, cwd)
 	return hashCollected(command, attached, withheld)
+}
+
+// saveApproved records a session approval: the command line itself plus,
+// when the command attaches script contents, the content-keyed hash into
+// the .approvedhash session file. The hash is what keeps the session
+// exact-match layer content-aware — an approval granted while a script
+// held content X must not silently extend to content Y (the decision that
+// earned the approval was made about X). The unwrapped inner form's hash
+// is stored too, so a plain re-run of a wrapper-approved command still
+// passes the content gate.
+func saveApproved(projSessionID, command, cwd string) {
+	AppendLine(projSessionID, "approved", command)
+	if h := scriptHash(command, cwd); h != "" {
+		AppendLine(projSessionID, "approvedhash", h)
+	}
+	if inner := UnwrapCommand(command, SessionWrappers()); inner != "" {
+		if h := scriptHash(inner, cwd); h != "" {
+			AppendLine(projSessionID, "approvedhash", h)
+		}
+	}
+}
+
+// sessionContentOK reports whether a session-approved command's attached
+// script contents still match what was approved. Commands that attach no
+// script content (h == "") carry no content stake — the string match is
+// the whole story, as before. For attaching commands the current
+// content-keyed hash must be present in .approvedhash; a missing hash
+// (script edited since approval, or approval predates hashing) makes the
+// session layer fall through so the cache/LLM re-judge the new contents.
+func sessionContentOK(projSessionID, command, cwd string) bool {
+	h := scriptHash(command, cwd)
+	if h == "" {
+		if inner := UnwrapCommand(command, SessionWrappers()); inner != "" {
+			h = scriptHash(inner, cwd)
+		}
+	}
+	if h == "" {
+		return true
+	}
+	return ContainsLine(projSessionID, "approvedhash", h)
 }
 
 func checkCache(command, cwd string) *Decision {
