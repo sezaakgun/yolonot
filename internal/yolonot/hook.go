@@ -543,7 +543,13 @@ func cmdHook() {
 	cfg := GetLLMConfig()
 	userPrompt := BuildAnalyzePrompt(command)
 	start := time.Now()
-	text, err := CallLLM(cfg, SystemPrompt, userPrompt, 4096)
+	// Augment the base prompt with the user's classifier hints — the
+	// classifier block from config.json plus context/allow-hint/ask-hint
+	// directives from the .yolonot walk-up chain. Must stay in sync with
+	// cmdCheck: if this passes the bare SystemPrompt const, `yolonot check`
+	// reports decisions the hook will not actually make.
+	sysPrompt := BuildSystemPrompt(config.Classifier, LoadHints())
+	text, err := CallLLM(cfg, sysPrompt, userPrompt, 4096)
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
 		// LLM unavailable → emit decisionless envelope with the
