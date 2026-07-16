@@ -8,14 +8,26 @@ Every Bash command goes through this pipeline in order. The first layer that pro
 4. **Session deny** — previously rejected commands → instant block.
 5. **Session similarity** — LLM compares against approved commands → allow if similar (project-aware, prefix-prefiltered).
 6. **Allow / ask rules** — `.yolonot` patterns → instant decision. See [rules.md](rules.md).
-7. **Script cache** — SHA256 of the script file → reuse cached decision.
-8. **LLM analysis** — 2-class classifier (allow / ask) emitting a [risk tier](risk-tiers.md) the active harness turns into a final action.
+7. **Script cache** — SHA256 of the command plus the full contents of every attached script → reuse cached decision. Editing an attached script anywhere invalidates the entry.
+8. **LLM analysis** — 2-class classifier (allow / ask) emitting a [risk tier](risk-tiers.md) the active harness turns into a final action. Referenced scripts are attached to the prompt when it is provable which file will run (see below).
 
 Sessions are project-aware. A command approved in one project is not auto-approved in another within the same session — session keys include a hash of the git root (or working directory).
 
 `deny` rules are absolute — nothing overrides them. `ask` rules prompt once, then session memory takes over. `allow` rules are instant but are skipped for chained commands, redirects, and commands touching sensitive files (see [rules.md](rules.md)).
 
 When the LLM is unavailable, yolonot emits a warning (`LLM unreachable, falling back to host permissions`) and goes transparent — the host's native permission system handles it. yolonot never silently allows on LLM failure.
+
+## Script attachment
+
+When a command references a script file, yolonot reads it and embeds the contents in the classifier prompt so the model judges actual code instead of guessing from a filename. Contents are attached only when it is **provable which file bash will execute**:
+
+- the script is a leading path in a plain command — `./run.sh`, `scripts/x.sh --flag`
+- or it directly follows a known interpreter with nothing in between — `python foo.py`, `bash scripts/x.sh`, `node server.js`, `uv run python test.py`
+- absolute paths inside the project always attach, in any command shape
+
+Everything else gets a "contents withheld" note instead of an attachment: compound commands (`cd x && python foo.py`), any flag between the interpreter and the script (`python -u foo.py`), wrapper/runner tools whose operand is not a file path (`bun run`, `npm run`, `go run` package form, `sudo`, `env`), bare names without a slash (`foo.sh` — resolved via PATH, not the current directory), and files over 64 KB or not valid UTF-8 (never truncated — a benign prefix could mask a malicious tail).
+
+The asymmetry is deliberate: withholding costs at most one extra ask prompt, while attaching the *wrong* file would let a benign shadow file get a malicious script auto-allowed. Attachment never crosses the project's git root and never enters sensitive home directories (`~/.ssh`, `~/.aws`, …); credential-looking lines are redacted before the model sees them.
 
 > **⚠ The LLM layer is probabilistic, not guaranteed.** Classifications can be wrong — models hallucinate, miss context, and can be talked out of a correct answer by adversarial prompts. Treat yolonot as a safety net that reduces prompt fatigue, not as an authoritative sandbox. If a class of command *must never* run, encode it as a `deny-cmd` rule in `.yolonot` — rules beat the LLM unconditionally. See [rules.md](rules.md#format).
 
