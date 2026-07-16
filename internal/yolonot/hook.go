@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,6 +36,11 @@ type HookResponse struct {
 	} `json:"hookSpecificOutput"`
 	SystemMessage string `json:"systemMessage,omitempty"`
 }
+
+// maxHookInputBytes caps the hook stdin payload. A real PreToolUse payload
+// is a few KB; 4 MB is generous headroom while still bounding the work the
+// downstream quote-aware scanners do on the command string.
+const maxHookInputBytes = 4 << 20
 
 // quietOnAllow is set once per `yolonot hook` invocation from Config. The
 // hook process is invoked fresh per command by Claude Code (not concurrent
@@ -229,8 +235,10 @@ func activeHarnessFormat(r HookResponse) string {
 
 func cmdHook() {
 	// Read payload from stdin; adapter handles env var fallback and
-	// harness-specific JSON decoding.
-	raw, _ := io.ReadAll(os.Stdin)
+	// harness-specific JSON decoding. Cap the read: the command string is
+	// processed by quote-aware scanners downstream, so an unbounded payload
+	// would be an easy CPU/memory amplifier.
+	raw, _ := io.ReadAll(io.LimitReader(os.Stdin, maxHookInputBytes))
 
 	// Allow `yolonot hook --harness <name>` to pin the adapter. Harness
 	// CLIs don't all expose a stable session-id env var (Codex, OpenCode
@@ -508,7 +516,7 @@ func cmdHook() {
 	}
 
 	// Step 4: Script cache check
-	if cached := checkCache(command); cached != nil {
+	if cached := checkCache(command, cwd); cached != nil {
 		// Route cached decisions through the risk map so cache + live LLM
 		// paths apply the same policy. Older cache entries without a Risk
 		// tier fall through with their original decision (no map applied).
@@ -539,9 +547,36 @@ func cmdHook() {
 		return
 	}
 
-	// Step 5: LLM analysis
+	// Step 5: LLM analysis. Collect the referenced scripts ONCE so the
+	// prompt the LLM sees and the cache key we later persist are computed
+	// from the same filesystem snapshot — re-reading after the round-trip
+	// could hash bytes the classifier never judged.
 	cfg := GetLLMConfig()
-	userPrompt := BuildAnalyzePrompt(command)
+	attachedScripts, withheldScripts := collectScripts(command, cwd)
+	userPrompt := buildPromptFromCollected(command, attachedScripts, withheldScripts)
+
+	// Oversize guard: if the assembled prompt exceeds the budget, do not ship
+	// it to the LLM. Apply the active profile's abstain action (its critical
+	// policy, never more permissive than ask) instead of silently deferring
+	// to the host — which fails open on ask-less harnesses. Uncached: the
+	// oversized content is exactly what we could not judge.
+	if len(userPrompt) > maxClassifierPromptBytes {
+		act := abstainAction(ActiveHarness())
+		reason := fmt.Sprintf("classifier prompt %d KB exceeds %d KB budget; profile abstain → %s",
+			len(userPrompt)/1024, maxClassifierPromptBytes/1024, act)
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "oversize", Decision: act, Reasoning: reason})
+		if act == "deny" {
+			emitHook(hookResponse("deny", "oversize", reason, command))
+		} else { // abstainAction only ever returns deny or ask
+			if sessionID != "" {
+				AppendLine(projSessionID, "asked", command)
+			}
+			emitHook(hookResponse("ask", "oversize", reason, command))
+		}
+		return
+	}
+
+	cacheKey := hashCollected(command, attachedScripts, withheldScripts)
 	start := time.Now()
 	// Augment the base prompt with the user's classifier hints — the
 	// classifier block from config.json plus context/allow-hint/ask-hint
@@ -580,8 +615,9 @@ func cmdHook() {
 		return
 	}
 
-	// Cache the decision if it involved a script file
-	saveCache(command, d)
+	// Cache the decision if it involved a script file, keyed to the exact
+	// snapshot the LLM just judged.
+	saveCacheHash(cacheKey, d)
 
 	// Risk map: classifier gave us (decision, risk). Active harness
 	// decides the final action per its RiskMap. "passthrough" returns an
@@ -619,22 +655,60 @@ func cacheDir() string {
 	return filepath.Join(YolonotDir(), "cache")
 }
 
-func scriptHash(command string) string {
-	m := scriptPathRe.FindStringSubmatch(" " + command)
-	if len(m) < 2 {
+// hashCollected keys the decision cache on the exact attached-script set
+// BuildAnalyzePrompt shows the LLM, plus the identities of any withheld
+// refs and the command. Hashing a script the classifier never saw (the old
+// behavior for out-of-project paths) froze "ask" decisions against
+// invisible content; folding in the withheld identities means swapping the
+// decoy set that surrounds an attached script also invalidates the entry.
+// Each file is framed with its path and length so boundary-shifted edits
+// across multiple files can't collide. Returns "" (cache disabled) when
+// nothing was attached.
+func hashCollected(command string, attached []attachedScript, withheld []withheldScript) string {
+	if len(attached) == 0 {
 		return ""
 	}
-	path := m[1]
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
+	// Refuse to cache when an in-root script was crowded out by the attach
+	// cap: the classifier judged an incomplete view (only a note for that
+	// script), so pinning an allow to the attached bytes would reuse the
+	// decision for content the model never saw. A content change in the
+	// crowded-out file would not change this key otherwise.
+	for _, w := range withheld {
+		if w.reason == whReasonCapReached {
+			return ""
+		}
 	}
-	h := sha256.Sum256(append(data, []byte(command)...))
-	return fmt.Sprintf("%x", h[:8])
+	h := sha256.New()
+	for _, a := range attached {
+		// Frame each file as path\0<full-file digest>. The digest is the
+		// sha256 of the WHOLE attached content (files over the attach cap
+		// are withheld, never truncated), so an edit anywhere changes the key.
+		fmt.Fprintf(h, "%s\x00", a.ref.abs)
+		h.Write(a.digest[:])
+	}
+	h.Write([]byte("\x01"))
+	names := make([]string, 0, len(withheld))
+	for _, w := range withheld {
+		names = append(names, w.ref.raw)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		fmt.Fprintf(h, "%s\x00", n)
+	}
+	h.Write([]byte(command))
+	sum := h.Sum(nil)
+	return fmt.Sprintf("%x", sum[:8])
 }
 
-func checkCache(command string) *Decision {
-	hash := scriptHash(command)
+// scriptHash is the convenience form used by the pre-LLM cache read and by
+// callers that don't already hold a collected snapshot.
+func scriptHash(command, cwd string) string {
+	attached, withheld := collectScripts(command, cwd)
+	return hashCollected(command, attached, withheld)
+}
+
+func checkCache(command, cwd string) *Decision {
+	hash := scriptHash(command, cwd)
 	if hash == "" {
 		return nil
 	}
@@ -700,8 +774,13 @@ func preCheckShortName(cmdPath string) string {
 	return name
 }
 
-func saveCache(command string, d *Decision) {
-	hash := scriptHash(command)
+func saveCache(command, cwd string, d *Decision) {
+	saveCacheHash(scriptHash(command, cwd), d)
+}
+
+// saveCacheHash persists a decision under a precomputed script-cache key.
+// A "" key (no attachable script) is a no-op.
+func saveCacheHash(hash string, d *Decision) {
 	if hash == "" {
 		return
 	}

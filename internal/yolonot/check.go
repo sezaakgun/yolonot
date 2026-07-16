@@ -135,7 +135,14 @@ func cmdCheck(command string) {
 		return
 	}
 
-	userPrompt := BuildAnalyzePrompt(command)
+	userPrompt := BuildAnalyzePrompt(command, "")
+	if len(userPrompt) > maxClassifierPromptBytes {
+		act := abstainAction(ActiveHarness())
+		fmt.Printf("  [%d] LLM analysis:    skipped — prompt %d KB exceeds %d KB budget\n", step, len(userPrompt)/1024, maxClassifierPromptBytes/1024)
+		fmt.Println()
+		fmt.Printf("  → Result: %s (layer: oversize, profile abstain)\n", strings.ToUpper(act))
+		return
+	}
 	start := time.Now()
 	// Use the same augmented system prompt the real hook path uses
 	// (hook.go step 5). Without this, `yolonot check` would show
