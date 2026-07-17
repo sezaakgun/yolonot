@@ -1646,3 +1646,105 @@ func TestSessionAllowLegacyApprovalOfScriptCommandFallsThrough(t *testing.T) {
 		t.Fatalf("legacy hashless approval must not session-allow an attaching command, got %+v", out.HookSpecificOutput)
 	}
 }
+
+// --- Human ask-resolution labels ---
+
+// humanLabelEntries returns the layer:"human" entries from the decision log.
+func humanLabelEntries(t *testing.T) []DecisionEntry {
+	t.Helper()
+	var out []DecisionEntry
+	for _, e := range ReadRecentDecisions(1000) {
+		if e.Layer == "human" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// An ask the user answers "yes" (PostToolUse fires for a command on the
+// asked list) must mint exactly one layer:"human" allow entry — the
+// ground-truth label for history mining. Replays of the already-approved
+// command must not mint more.
+func TestIntegration_HumanLabel_AskApproved(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	writeGlobalRules(t, home, "ask-cmd *curl *\n")
+
+	sid := "int-human-ask-approved"
+	cmd := "curl example.com"
+
+	out := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
+	if d := parseResponse(t, out).HookSpecificOutput.PermissionDecision; d != "ask" {
+		t.Fatalf("first call: expected ask, got %q", d)
+	}
+
+	post := makePostPayloadStruct(sid, cmd)
+	post.Cwd = "/tmp"
+	runHookWithStruct(t, post)
+
+	labels := humanLabelEntries(t)
+	if len(labels) != 1 {
+		t.Fatalf("expected exactly 1 human label after approval, got %d: %+v", len(labels), labels)
+	}
+	e := labels[0]
+	if e.Decision != "allow" || e.Source != "ask_approved" || e.Command != cmd {
+		t.Errorf("unexpected label entry: %+v", e)
+	}
+
+	// Replay: session allow (no ask) + another PostToolUse. Command is
+	// already on the approved list, so no second label.
+	runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
+	runHookWithStruct(t, post)
+	if labels := humanLabelEntries(t); len(labels) != 1 {
+		t.Errorf("replay must not mint a second human label, got %d", len(labels))
+	}
+}
+
+// An ask the user answers "no" (no PostToolUse ever fires; the agent
+// retries the command) must mint a layer:"human" deny entry alongside the
+// session_deny gate entry.
+func TestIntegration_HumanLabel_AskRejected(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	writeGlobalRules(t, home, "ask-cmd *curl *\n")
+
+	sid := "int-human-ask-rejected"
+	cmd := "curl example.com"
+
+	out := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
+	if d := parseResponse(t, out).HookSpecificOutput.PermissionDecision; d != "ask" {
+		t.Fatalf("first call: expected ask, got %q", d)
+	}
+
+	// User rejected: no PostToolUse. Retry infers the rejection.
+	out2 := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
+	if d := parseResponse(t, out2).HookSpecificOutput.PermissionDecision; d != "deny" {
+		t.Fatalf("second call: expected deny, got %q", d)
+	}
+
+	labels := humanLabelEntries(t)
+	if len(labels) != 1 {
+		t.Fatalf("expected exactly 1 human label after rejection, got %d: %+v", len(labels), labels)
+	}
+	e := labels[0]
+	if e.Decision != "deny" || e.Source != "ask_rejected" || e.Command != cmd {
+		t.Errorf("unexpected label entry: %+v", e)
+	}
+}
+
+// PostToolUse for a command that was never asked (auto-allowed, or approved
+// by the host without yolonot asking) must not mint a human label.
+func TestIntegration_HumanLabel_NotMintedForUnasked(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	post := makePostPayloadStruct("int-human-unasked", "npm test")
+	post.Cwd = "/tmp"
+	runHookWithStruct(t, post)
+
+	if labels := humanLabelEntries(t); len(labels) != 0 {
+		t.Errorf("unasked command must not mint a human label, got %+v", labels)
+	}
+}

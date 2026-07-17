@@ -2,6 +2,15 @@
 
 yolonot records every decision to `~/.yolonot/decisions.jsonl` with timestamp, decision, layer that produced it, and LLM timing where applicable. Three tools surface that data.
 
+## Human ask resolutions
+
+When yolonot answers "ask", the final verdict belongs to the user. That verdict is logged as its own entry with `layer: "human"`:
+
+- `decision: "allow", source: "ask_approved"` — the command ran after an ask (the host's PostToolUse event fired), meaning the user approved it.
+- `decision: "deny", source: "ask_rejected"` — the user rejected the ask. This is inferred: the command was asked, never ran, and the agent retried it. A rejection the agent never retries is not observed.
+
+These entries are labels, not gate decisions — `yolonot stats` reports them on a separate "Ask resolutions" line and keeps them out of the allow/ask/deny percentages. They give `yolonot suggest` (and any future learning on top of the log) ground truth about what the user actually decided, rather than only what yolonot decided.
+
 ## `yolonot log`
 
 Shows recent decisions with the reason string, layer (rule / session / cache / LLM / fast_allow / pre_check), and LLM latency.

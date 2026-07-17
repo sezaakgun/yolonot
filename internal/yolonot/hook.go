@@ -315,6 +315,17 @@ func cmdHook() {
 	// pinned to the contents the user actually saw run).
 	if payload.HookEventName == "PostToolUse" {
 		if sessionID != "" && command != "" {
+			// Human verdict: this run resolves a pending ask. The command
+			// sits on the asked list with no approval recorded yet, and
+			// PostToolUse means the user answered yes — log that as a
+			// layer:"human" entry so decision history carries real user
+			// answers, not just yolonot's own verdicts. Commands that were
+			// auto-allowed (never asked) or already approved this session
+			// don't produce one.
+			if MatchesLineOrWrappedVariant(projSessionID, "asked", command) &&
+				!MatchesLineOrWrappedVariant(projSessionID, "approved", command) {
+				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "human", Decision: "allow", Source: "ask_approved"})
+			}
 			saveApproved(projSessionID, command, cwd)
 		}
 		return
@@ -450,6 +461,14 @@ func cmdHook() {
 				Verbosef("session: wrapper-approved command %q has changed script contents; re-judging", command)
 			} else {
 				AppendLine(projSessionID, "denied", command)
+				// Human verdict (inferred): we asked, no PostToolUse ever
+				// recorded an approval, and the agent is retrying the same
+				// command — the user answered no. Logged as its own
+				// layer:"human" entry (alongside the session_deny gate entry
+				// below) so history mining sees the rejection the moment we
+				// can infer it. Weaker than ask_approved: a rejection where
+				// the agent never retries is never observed.
+				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "human", Decision: "deny", Source: "ask_rejected"})
 				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "asked_not_approved"})
 				emitHook(hookResponse("deny", "session_deny", "previously rejected this session", command))
 				return
