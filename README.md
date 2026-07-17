@@ -17,7 +17,7 @@
 
 ---
 
-yolonot sits between your AI coding assistant and your shell. It uses an LLM to classify every Bash command as **safe** (allow) or **needs-review** (ask), with session memory so approved commands don't ask twice and rejected commands stay blocked. Deny rules give you absolute blocks nothing can override.
+yolonot sits between your AI coding assistant and your shell. It uses an LLM to classify every Bash command as **safe** (allow) or **needs-review** (ask), with session memory so approved commands don't ask twice and rejected commands stay blocked. Deny rules give you absolute blocks nothing can override. Optionally, an [escalation model](docs/providers.md#escalation-second-opinion-model) — a second, bigger LLM — gets one look at uncertain verdicts before you're interrupted: confident false alarms get rescued into allows, sneaky-dangerous ones get hardened, and everything else still asks.
 
 > **Claude Code first.** yolonot was designed for Claude Code and that's where it gets the richest UX (full allow/ask/deny). Cursor, Codex CLI, OpenCode, and Gemini CLI adapters ship in-tree but have upstream hook-API limitations — see [docs/harnesses.md](docs/harnesses.md) for each host's caveats.
 
@@ -63,7 +63,7 @@ That's it. Every Bash command now runs through [the pipeline](docs/how-it-works.
 | Pre-check hooks — `fast-allow` internals, Dippy integration, security model | [docs/pre-check.md](docs/pre-check.md) |
 | Risk tiers — per-harness action policy, overrides | [docs/risk-tiers.md](docs/risk-tiers.md) |
 | Risk profiles — `fast`/`balanced`/`strict`/`paranoid` + custom | [docs/risk-profiles.md](docs/risk-profiles.md) |
-| LLM providers — matrix, env vars, response schema | [docs/providers.md](docs/providers.md) |
+| LLM providers — matrix, env vars, response schema, escalation (second-opinion model) | [docs/providers.md](docs/providers.md) |
 | Classifier customization — teach the LLM about your trusted infra (prose hints) | [docs/llm-customization.md](docs/llm-customization.md) |
 | Harnesses — install flags, runtime pinning, per-host caveats | [docs/harnesses.md](docs/harnesses.md) |
 | Analytics — `yolonot log`, `stats`, `suggest`, quiet mode | [docs/analytics.md](docs/analytics.md) |

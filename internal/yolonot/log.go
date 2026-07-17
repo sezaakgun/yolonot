@@ -25,7 +25,21 @@ type DecisionEntry struct {
 	Reasoning      string  `json:"reasoning,omitempty"`
 	Source         string  `json:"source,omitempty"`
 	ReturnedAs     string  `json:"returned_as,omitempty"`
-	DurationMs     int64   `json:"duration_ms,omitempty"`
+	DurationMs     int64   `json:"duration_ms,omitempty"` // primary LLM call only; escalation time is escalation_ms
+
+	// Escalation fields — set only when the escalation layer was configured
+	// and consulted (or deliberately skipped). Unattended runs have no
+	// terminal to read, so the JSONL must carry the full second-opinion
+	// forensics: which model, what it said, how it failed, what changed.
+	Escalated           bool   `json:"escalated,omitempty"` // the escalation call fired
+	EscalationModel     string `json:"escalation_model,omitempty"`
+	EscalationDecision  string `json:"escalation_decision,omitempty"`
+	EscalationRisk      string `json:"escalation_risk,omitempty"`
+	EscalationReasoning string `json:"escalation_reasoning,omitempty"` // truncated
+	EscalationMs        int64  `json:"escalation_ms,omitempty"`
+	EscalationError     string `json:"escalation_error,omitempty"`   // timeout | api | transport | parse
+	EscalationOutcome   string `json:"escalation_outcome,omitempty"` // rescued | hardened | kept | error | skipped:<reason>
+	PrimaryRisk         string `json:"primary_risk,omitempty"`       // pre-adoption tier (risk holds the adopted one)
 }
 
 func decisionsPath() string {
@@ -146,11 +160,18 @@ func cmdLog(n int) {
 		if e.DurationMs > 0 {
 			dur = fmt.Sprintf("  %dms", e.DurationMs)
 		}
+		esc := ""
+		if e.Escalated {
+			esc = "  ⤴esc"
+			if e.EscalationMs > 0 {
+				esc = fmt.Sprintf("  ⤴esc %dms", e.EscalationMs)
+			}
+		}
 		cmd := e.Command
 		if len(cmd) > 60 {
 			cmd = cmd[:57] + "..."
 		}
-		fmt.Printf("  %s  %-6s %-14s %s%s%s\n", ts, e.Decision, e.Layer, cmd, extra, dur)
+		fmt.Printf("  %s  %-6s %-14s %s%s%s%s\n", ts, e.Decision, e.Layer, cmd, extra, dur, esc)
 	}
 
 	// Total count

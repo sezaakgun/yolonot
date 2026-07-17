@@ -15,6 +15,7 @@ yolonot stats        Show analytics from decision history
 yolonot check <cmd>  Dry-run: what would the pipeline decide?
 yolonot risk         Show/set per-harness risk tier → action policy
 yolonot pre-check    Manage pre-checkers (fast-allow + external hooks)
+yolonot escalation   Second-opinion model consulted before surfacing an ask
 yolonot quiet        Silence banners for allow decisions (only show ask/deny)
 yolonot pause        Disable yolonot for current session (total bypass)
 yolonot resume       Re-enable yolonot for current session

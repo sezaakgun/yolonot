@@ -97,3 +97,15 @@ yolonot risk cursor moderate passthrough   # let Cursor's own permission engine 
 Restart Cursor (or start a new chat) after `yolonot install --harness cursor` so the agent re-reads the file.
 
 Session id arrives on stdin as `conversation_id`. Cursor does not export a session env var, so set `YOLONOT_CURSOR_SESSION_ID` if you need CLI commands (`yolonot pause`, `status`, etc.) to target a specific Cursor session from a shell.
+
+## Escalation per harness
+
+The [escalation model](providers.md#escalation-second-opinion-model) triggers on the classifier's *raw* uncertainty (`decision: ask`, any non-critical tier) or on a resolved ask, so it fires consistently across harnesses — but what a rescue or harden buys you differs:
+
+| Harness | What escalation changes |
+|---------|------------------------|
+| Claude Code / Gemini | A rescue removes the ask prompt entirely (no interruption); a harden can turn an ask into a deny under a `critical → deny` risk map. |
+| Codex / Cursor | The classifier's uncertain verdicts land in passthrough/deny cells. A rescue converts a wobbly passthrough into a definitive allow (with session memory); a harden can convert it into a deny instead of deferring to the host. |
+| OpenCode | Default map resolves moderate rather permissively — hardening is the main value: a big-model `high`/`critical` verdict flips it to deny. |
+
+Escalation improves *verdicts*; it cannot create enforcement on harnesses whose hook APIs don't enforce (see the per-harness notes above). For unattended runs on any harness, `"unresolved": "deny"` converts a post-escalation residual ask into a reasoned deny instead of a stall.

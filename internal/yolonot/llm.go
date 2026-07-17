@@ -299,6 +299,10 @@ type Decision struct {
 	Short      string  `json:"short,omitempty"`      // <=60 char banner label; falls back to truncated Reasoning
 	Reasoning  string  `json:"reasoning"`
 	ComparedTo string  `json:"compared_to,omitempty"`
+	// Escalated marks a verdict adopted from the escalation model. Never
+	// emitted by an LLM — set by the hook so the provenance survives the
+	// script cache round-trip and shows up on later cache-hit log lines.
+	Escalated bool `json:"escalated,omitempty"`
 }
 
 // confidenceToRisk maps legacy confidence scores to the 5-tier taxonomy.
@@ -357,6 +361,29 @@ type LLMConfig struct {
 	Model   string
 	APIKey  string
 	Timeout int // seconds, 0 = use default
+	// TimeoutEnvKey names the env var that overrides Timeout at call time.
+	// Empty means LLM_TIMEOUT (the primary provider's knob). The escalation
+	// resolver sets LLM_ESCALATION_TIMEOUT so a user's LLM_TIMEOUT tuned for
+	// a fast primary model can't silently clamp the bigger model's call.
+	TimeoutEnvKey string
+}
+
+// resolveTimeoutSeconds returns the effective call timeout: cfg.Timeout,
+// falling back to def when unset, overridable by the env var named in
+// cfg.TimeoutEnvKey (default LLM_TIMEOUT).
+func resolveTimeoutSeconds(cfg LLMConfig, def int) int {
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = def
+	}
+	envKey := cfg.TimeoutEnvKey
+	if envKey == "" {
+		envKey = "LLM_TIMEOUT"
+	}
+	if t := os.Getenv(envKey); t != "" {
+		fmt.Sscanf(t, "%d", &timeout)
+	}
+	return timeout
 }
 
 // GetLLMConfig resolves provider config from env vars > config.json.
@@ -380,6 +407,80 @@ func GetLLMConfig() LLMConfig {
 	return LLMConfig{URL: url, Model: model, APIKey: apiKey, Timeout: p.Timeout}
 }
 
+// GetEscalationConfig resolves the escalation (bigger second model)
+// provider from env vars > config.json, mirroring GetLLMConfig. Returns
+// empty URL/Model when unresolvable — escalation is then off.
+//
+// Inheritance: an escalation provider with no URL runs against the
+// primary's endpoint and inherits its credentials and timeout (the common
+// "same endpoint, bigger model" case). An explicit URL inherits nothing —
+// the primary's credential must never be sent to a different endpoint.
+func GetEscalationConfig() LLMConfig {
+	cfg := LoadConfig()
+	var p ProviderConfig
+	if cfg.Escalation != nil {
+		p = cfg.Escalation.Provider
+	}
+
+	url := envOr("LLM_ESCALATION_URL", p.URL)
+	model := envOr("LLM_ESCALATION_MODEL", p.Model)
+
+	envKey := p.EnvKey
+	explicitKey := p.APIKey
+	timeout := p.Timeout
+
+	if url == "" {
+		prim := GetLLMConfig() // env-resolved primary, credentials included
+		url = prim.URL
+		if envKey == "" && explicitKey == "" {
+			explicitKey = prim.APIKey
+		}
+		if timeout == 0 {
+			timeout = prim.Timeout
+		}
+	}
+
+	apiKey := ""
+	if envKey != "" {
+		apiKey = os.Getenv(envKey)
+	}
+	if apiKey == "" {
+		apiKey = explicitKey
+	}
+
+	return LLMConfig{
+		URL:           url,
+		Model:         model,
+		APIKey:        apiKey,
+		Timeout:       timeout,
+		TimeoutEnvKey: "LLM_ESCALATION_TIMEOUT",
+	}
+}
+
+// EscalationEnabled reports whether the escalation layer should run for
+// the given resolved escalation config: provider resolvable, not disabled
+// in config, not killed via YOLONOT_ESCALATION=off. Env-only setups
+// (LLM_ESCALATION_* with no config block) count, mirroring the primary's
+// LLM_URL/LLM_MODEL semantics. Thin wrapper over escalationGateReason —
+// the single source of gate truth used by the hook.
+func EscalationEnabled(cfg Config, esc LLMConfig) bool {
+	return escalationGateReason(cfg, esc) == ""
+}
+
+// EscalationUnresolved returns the effective unresolved-ask policy:
+// "deny" degrades a post-escalation residual ask to deny (unattended
+// runs), anything else keeps the ask. Env var wins over config.
+func EscalationUnresolved(cfg Config) string {
+	v := os.Getenv("YOLONOT_ESCALATION_UNRESOLVED")
+	if v == "" && cfg.Escalation != nil {
+		v = cfg.Escalation.Unresolved
+	}
+	if strings.EqualFold(strings.TrimSpace(v), "deny") {
+		return ActionDeny
+	}
+	return ActionAsk
+}
+
 // needsNewTokenParam checks if the model requires max_completion_tokens.
 func needsNewTokenParam(model string) bool {
 	m := strings.ToLower(model)
@@ -398,13 +499,7 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 		return callClaudeCLI(cfg, systemPrompt, userPrompt)
 	}
 
-	timeout := cfg.Timeout
-	if timeout == 0 {
-		timeout = 10
-	}
-	if t := os.Getenv("LLM_TIMEOUT"); t != "" {
-		fmt.Sscanf(t, "%d", &timeout)
-	}
+	timeout := resolveTimeoutSeconds(cfg, 10)
 
 	tokenKey := "max_tokens"
 	if needsNewTokenParam(cfg.Model) {
@@ -520,13 +615,26 @@ func callClaudeCLI(cfg LLMConfig, systemPrompt, userPrompt string) (string, erro
 		"--system-prompt", systemPrompt,
 	}
 
-	cmd := exec.Command("claude", args...)
+	// A hung `claude -p` would otherwise block the hook until the harness's
+	// own ~60s kill, which fails toward host permissions instead of a
+	// verdict. Default is 30s — the CLI is much slower than raw HTTP.
+	timeoutSec := resolveTimeoutSeconds(cfg, 30)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Stdin = strings.NewReader(userPrompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// Without WaitDelay, Run blocks past the kill while any child process
+	// claude spawned still holds the stdout/stderr pipes open.
+	cmd.WaitDelay = 2 * time.Second
 	err := cmd.Run()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("claude -p: timeout after %ds", timeoutSec)
+		}
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {
 			errMsg = err.Error()
@@ -1208,6 +1316,12 @@ func ParseDecision(text string) *Decision {
 					Verbosef("ParseDecision: unknown risk tier %q, defaulting to moderate", d.Risk)
 					d.Risk = RiskModerate
 				}
+				// Escalated is hook-set provenance, never model output. A
+				// response embedding `"escalated": true` would forge audit
+				// provenance (banner layer, log, cache) — strip it. The
+				// cache decode path (checkCache) uses raw json.Unmarshal,
+				// not ParseDecision, so legitimate provenance survives.
+				d.Escalated = false
 				return &d
 			}
 		}

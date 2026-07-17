@@ -172,24 +172,64 @@ func cmdCheck(command string) {
 	}
 
 	// The classifier emits (decision, risk); the gate's actual action is that
-	// pair run through the active harness's risk map + profile (hook.go). Show
-	// the model's raw call AND the mapped result, or the preview lies whenever
-	// the profile escalates a tier (e.g. critical → deny, high → ask).
-	final, passthrough := applyRiskMap(ActiveHarness(), d.Decision, d.Risk)
+	// pair run through the active harness's risk map + profile (hook.go). The
+	// map is applied AFTER the escalation step below, because escalation can
+	// change the tier being mapped. Show the model's raw call here, the
+	// mapped result at the end — or the preview lies whenever the profile
+	// escalates a tier (e.g. critical → deny, high → ask).
 	fmt.Printf("  [%d] LLM analysis:    %s (risk: %s, confidence: %.0f%%, %dms)\n",
-		step, strings.ToUpper(d.Decision), d.Risk, d.Confidence*100, ms)
+		step, strings.ToUpper(d.Decision), riskOrDash(d.Risk), d.Confidence*100, ms)
 	if d.Reasoning != "" {
 		fmt.Printf("      Reasoning: %s\n", d.Reasoning)
 	}
+	step++
+
+	// Escalation — the identical branch the hook runs after parsing the
+	// primary verdict. Must stay in sync with hook.go step 5 or this
+	// dry-run lies about what the hook decides.
+	escOut, _ := maybeEscalate(ActiveHarness(), checkCfg, d, sysPrompt, userPrompt, time.Now())
+	switch {
+	case escOut.Outcome == "":
+		// unconfigured or not triggered — silent, like the hook.
+	case escOut.Fired:
+		fmt.Printf("  [%d] Escalation:      %s → %s (%s, %dms)\n",
+			step, escOut.Model, strings.ToUpper(sanitizeBanner(escOut.summary())), escOut.Outcome, escOut.Ms)
+		if escOut.Reasoning != "" {
+			fmt.Printf("      Reasoning: %s\n", sanitizeBanner(escOut.Reasoning))
+		}
+	default:
+		fmt.Printf("  [%d] Escalation:      %s\n", step, escOut.Outcome)
+	}
+
+	// Risk map + unresolved policy — same resolution as the hook.
+	final, passthrough := applyRiskMap(ActiveHarness(), d.Decision, d.Risk)
+	layer := "llm"
+	if d.Escalated {
+		layer = "llm+esc"
+	}
 	fmt.Println()
 	if passthrough {
-		fmt.Printf("  → Result: PASS-THROUGH (layer: llm, risk map defers to host permissions)\n")
+		fmt.Printf("  → Result: PASS-THROUGH (layer: %s, risk map defers to host permissions)\n", layer)
 		return
 	}
-	if final != d.Decision {
-		fmt.Printf("  → Result: %s (layer: llm, %s → %s via %s risk map)\n",
-			strings.ToUpper(final), d.Decision, final, ActiveHarness().Name())
-	} else {
-		fmt.Printf("  → Result: %s (layer: llm)\n", strings.ToUpper(final))
+	if final == "ask" {
+		if degrade, reason := escalationUnresolvedDeny(checkCfg, escOut, d); degrade {
+			fmt.Printf("  → Result: DENY (layer: %s, %s)\n", layer, sanitizeBanner(reason))
+			return
+		}
 	}
+	if final != d.Decision {
+		fmt.Printf("  → Result: %s (layer: %s, %s → %s via %s risk map)\n",
+			strings.ToUpper(final), layer, d.Decision, final, ActiveHarness().Name())
+	} else {
+		fmt.Printf("  → Result: %s (layer: %s)\n", strings.ToUpper(final), layer)
+	}
+}
+
+// riskOrDash renders a risk tier or "-" for legacy responses without one.
+func riskOrDash(risk string) string {
+	if risk == "" {
+		return "-"
+	}
+	return risk
 }

@@ -27,11 +27,11 @@ type ProviderConfig struct {
 
 type Config struct {
 	Provider     ProviderConfig               `json:"provider"`
-	Classifier   ClassifierConfig             `json:"classifier,omitempty"`    // backend choice + LLM prompt customization (context / allow_hints / ask_hints). Accepts legacy string form ("llm") for backward compat. Env var YOLONOT_CLASSIFIER overrides backend selection.
-	RiskMaps     map[string]map[string]string `json:"risk_maps,omitempty"`     // per-harness tier→action override. Outer key = harness name; inner key = risk tier; value ∈ {allow, ask, deny, passthrough}. Merged on top of each harness's shipped defaults.
-	PreCheck     PreCheckList                 `json:"pre_check,omitempty"`     // optional pre-checkers run before yolonot's pipeline; "fast-allow" is a reserved sentinel for the built-in Go bash parser, others are external hook binaries (e.g. /opt/homebrew/bin/dippy). First "allow" wins.
+	Classifier   ClassifierConfig             `json:"classifier,omitempty"`     // backend choice + LLM prompt customization (context / allow_hints / ask_hints). Accepts legacy string form ("llm") for backward compat. Env var YOLONOT_CLASSIFIER overrides backend selection.
+	RiskMaps     map[string]map[string]string `json:"risk_maps,omitempty"`      // per-harness tier→action override. Outer key = harness name; inner key = risk tier; value ∈ {allow, ask, deny, passthrough}. Merged on top of each harness's shipped defaults.
+	PreCheck     PreCheckList                 `json:"pre_check,omitempty"`      // optional pre-checkers run before yolonot's pipeline; "fast-allow" is a reserved sentinel for the built-in Go bash parser, others are external hook binaries (e.g. /opt/homebrew/bin/dippy). First "allow" wins.
 	QuietOnAllow bool                         `json:"quiet_on_allow,omitempty"` // when true, allow decisions emit no systemMessage — only ask/deny show a banner
-	LocalAllow   bool                         `json:"local_allow,omitempty"`   // DEPRECATED: migrated on load into PreCheck as "fast-allow". Kept for backward-compat read only.
+	LocalAllow   bool                         `json:"local_allow,omitempty"`    // DEPRECATED: migrated on load into PreCheck as "fast-allow". Kept for backward-compat read only.
 	Wrappers     []string                     `json:"wrappers,omitempty"`       // user-defined transparent command wrappers (e.g. ["mycli","corp-shim"]). Extend the built-in set (time/timeout/nice/nohup/strace/ltrace/command/builtin/rtk) — never replace it. Applied to both fast_allow unwrapping and session-approval cross-form lookup.
 
 	// Profile = global named risk policy bundle. Resolves to a built-in
@@ -48,6 +48,10 @@ type Config struct {
 	// ValidateCustomProfile at create time. Names must not collide with
 	// built-ins.
 	CustomProfiles map[string]map[string]string `json:"custom_profiles,omitempty"`
+
+	// Escalation is the optional bigger-model second opinion. Pointer so an
+	// absent block stays absent through Save (old configs byte-identical).
+	Escalation *EscalationConfig `json:"escalation,omitempty"`
 }
 
 // ClassifierConfig holds the classifier backend choice plus prose tuning that
@@ -111,6 +115,29 @@ func (c ClassifierConfig) MarshalJSON() ([]byte, error) {
 	}
 	type raw ClassifierConfig
 	return json.Marshal(raw(c))
+}
+
+// EscalationConfig configures the optional second, bigger model consulted
+// when the primary classifier is uncertain (see hook.go escalation block).
+// A nil Config.Escalation means the feature was never configured and the
+// config file round-trips byte-identical. Note the feature can also be
+// armed purely via LLM_ESCALATION_URL/LLM_ESCALATION_MODEL env vars with
+// no config block at all, mirroring the primary's LLM_URL/LLM_MODEL.
+type EscalationConfig struct {
+	// Disabled is the config-side kill switch: `yolonot escalation off`
+	// sets it instead of deleting Provider, so re-enabling needs no
+	// re-setup. Zero value = active — the field vanishes from disk when on.
+	Disabled bool `json:"disabled,omitempty"`
+	// Provider is the escalation endpoint. With only Model set, the
+	// primary provider's URL/credentials/timeout are inherited (same
+	// endpoint, bigger model). With URL set explicitly, nothing is
+	// inherited — the primary's credential is never sent elsewhere.
+	Provider ProviderConfig `json:"provider"`
+	// Unresolved controls what happens when escalation FIRED and the final
+	// action still resolves to ask (including escalation errors):
+	// "" / "ask" keeps the ask; "deny" degrades it to a deny that carries
+	// both verdicts — for unattended runs where an ask is a stall.
+	Unresolved string `json:"unresolved,omitempty"`
 }
 
 // FastAllowSentinel is the reserved entry in Config.PreCheck that dispatches
@@ -192,6 +219,15 @@ func SaveConfig(c Config) {
 	// could read it. See security-audit: "API key persisted plaintext to
 	// ~/.yolonot/config.json" (Medium).
 	c.Provider.APIKey = ""
+	// Same scrub for the escalation provider — but via a copy: c is a value,
+	// yet c.Escalation is a shared pointer, and writing through it would
+	// erase the caller's in-memory key (e.g. between setup's Save and its
+	// connection test).
+	if c.Escalation != nil && c.Escalation.Provider.APIKey != "" {
+		esc := *c.Escalation
+		esc.Provider.APIKey = ""
+		c.Escalation = &esc
+	}
 	data, _ := json.MarshalIndent(c, "", "  ")
 	// atomicWriteFile does symlink rejection + rename-from-tempfile so
 	// an attacker can't redirect the write via a TOCTOU symlink.
@@ -607,28 +643,62 @@ func isDir(path string) bool {
 
 func cmdProvider() {
 	config := LoadConfig()
+	selected, ok := pickProvider(config, false)
+	if !ok {
+		return
+	}
+	config.Provider = selected
+	SaveConfig(config)
+	fmt.Printf("\nProvider set: %s via %s\n", selected.Model, selected.URL)
+	testProviderConnection(selected)
+}
 
+// pickProvider runs the interactive provider/model picker. escalation=true
+// biases the model suggestions toward bigger models (that's the point of a
+// second opinion) and skips primary-only advice like the claude-cli speed
+// warning — escalation latency only sits in front of would-be asks.
+// Returns ok=false on any cancel.
+func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 	type providerInfo struct {
-		Name   string
-		URL    string
-		Models []string
-		EnvKey string
+		Name      string
+		URL       string
+		Models    []string // primary suggestions (small/fast)
+		EscModels []string // escalation suggestions (big); empty = same as Models
+		EnvKey    string
 	}
 	providers := []providerInfo{
 		{"Claude Code (subscription)", "claude-cli", []string{
 			"claude-haiku-4-5", "claude-sonnet-4-6",
+		}, []string{
+			// Opus first: the escalation slot is the judgment slot, it only
+			// fires on would-be asks, and via the subscription it costs
+			// nothing extra — only latency, which sits in front of an
+			// interruption anyway.
+			"claude-opus-4-8", "claude-sonnet-4-6",
 		}, ""},
 		{"OpenAI", "https://api.openai.com/v1/chat/completions", []string{
-			"gpt-5.4-mini", "gpt-5.4-nano", "gpt-4o-mini",
+			"gpt-5.6-luna", "gpt-5.4-mini", "gpt-5.4-nano",
+		}, []string{
+			"gpt-5.6-sol", "gpt-5.6-terra",
 		}, "OPENAI_API_KEY"},
 		{"Anthropic (API)", "https://api.anthropic.com/v1/messages", []string{
 			"claude-haiku", "claude-sonnet",
+		}, []string{
+			"claude-opus", "claude-sonnet",
 		}, "ANTHROPIC_API_KEY"},
 		{"xAI", "https://api.x.ai/v1/chat/completions", []string{
-			"grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning",
+			"grok-4.20-non-reasoning", "grok-4.20-reasoning",
+		}, []string{
+			"grok-4.5", "grok-4.3",
 		}, "XAI_API_KEY"},
-		{"Ollama (local)", "http://localhost:11434/v1/chat/completions", nil, ""},
-		{"OpenRouter", "https://openrouter.ai/api/v1/chat/completions", nil, "OPENROUTER_API_KEY"},
+		{"Ollama (local)", "http://localhost:11434/v1/chat/completions", nil, nil, ""},
+		{"OpenRouter", "https://openrouter.ai/api/v1/chat/completions", nil, nil, "OPENROUTER_API_KEY"},
+	}
+	suggestedModels := func(p providerInfo) []string {
+		if escalation && len(p.EscModels) > 0 {
+			return p.EscModels
+		}
+		return p.Models
 	}
 
 	// Build menu items with status indicators
@@ -640,6 +710,10 @@ func cmdProvider() {
 			if _, err := exec.LookPath("claude"); err != nil {
 				icon = "✗"
 				status = "claude not found"
+			} else if escalation {
+				// For escalation, claude-cli is the zero-extra-cost pick and
+				// its latency only sits in front of would-be interruptions.
+				status = "subscription-covered"
 			} else {
 				icon = "⚠"
 				status = "slow — not recommended"
@@ -655,11 +729,9 @@ func cmdProvider() {
 				status = "not running"
 			}
 		}
-		modelHint := ""
-		if len(p.Models) > 0 {
-			modelHint = p.Models[0]
-		} else {
-			modelHint = "(select model)"
+		modelHint := "(select model)"
+		if models := suggestedModels(p); len(models) > 0 {
+			modelHint = models[0]
 		}
 		items = append(items, fmt.Sprintf("%s %s — %s [%s]", icon, p.Name, modelHint, status))
 	}
@@ -667,14 +739,21 @@ func cmdProvider() {
 
 	title := "Select LLM provider"
 	curModel := envOr("LLM_MODEL", config.Provider.Model)
+	if escalation {
+		title = "Select escalation provider"
+		curModel = envOr("LLM_ESCALATION_MODEL", "")
+		if curModel == "" && config.Escalation != nil {
+			curModel = config.Escalation.Provider.Model
+		}
+	}
 	if curModel != "" {
-		title = fmt.Sprintf("Select LLM provider (current: %s)", curModel)
+		title = fmt.Sprintf("%s (current: %s)", title, curModel)
 	}
 
 	idx := tuiSelect(title, items, 0)
 	if idx < 0 {
 		fmt.Println("Cancelled.")
-		return
+		return ProviderConfig{}, false
 	}
 
 	var selected ProviderConfig
@@ -685,7 +764,7 @@ func cmdProvider() {
 		var model string
 		var apiKey string
 
-		if p.URL == "claude-cli" {
+		if p.URL == "claude-cli" && !escalation {
 			fmt.Println()
 			fmt.Println("  Warning: Claude Code subscription is slow (~2-5s per command).")
 			fmt.Println("  Every command spawns a separate claude process.")
@@ -695,7 +774,7 @@ func cmdProvider() {
 			fmt.Println()
 			if !tuiConfirm("Continue with Claude Code subscription?") {
 				fmt.Println("Cancelled.")
-				return
+				return ProviderConfig{}, false
 			}
 		}
 
@@ -711,7 +790,10 @@ func cmdProvider() {
 			// Ollama: list installed models
 			if !checkOllama() {
 				tuiNote("Ollama not running", "Start it with: ollama serve")
-				return
+				return ProviderConfig{}, false
+			}
+			if escalation {
+				fmt.Println("  Note: a local model escalating to another local model adds latency more than judgment.")
 			}
 			models := listOllamaModels()
 			if len(models) > 0 {
@@ -719,7 +801,7 @@ func cmdProvider() {
 				modelIdx := tuiSelect("Select Ollama model", models, 0)
 				if modelIdx < 0 {
 					fmt.Println("Cancelled.")
-					return
+					return ProviderConfig{}, false
 				}
 				if modelIdx == len(models)-1 {
 					model = tuiInput("Model name", "e.g. llama3:8b", "")
@@ -732,10 +814,12 @@ func cmdProvider() {
 				model = tuiInput("Model name", "gemma4:e4b", "gemma4:e4b")
 			}
 		} else {
-			models := p.Models
+			models := suggestedModels(p)
 
-			// OpenRouter: fetch free models live
-			if strings.Contains(p.URL, "openrouter") && len(models) == 0 {
+			// OpenRouter: fetch free models live for the primary. For
+			// escalation the free list is the wrong pool — big models are
+			// the point — so fall through to typed input.
+			if strings.Contains(p.URL, "openrouter") && len(models) == 0 && !escalation {
 				fmt.Print("Fetching free models... ")
 				models = fetchOpenRouterFreeModels()
 				if len(models) > 0 {
@@ -751,7 +835,7 @@ func cmdProvider() {
 				modelIdx := tuiSelect(fmt.Sprintf("Select %s model", p.Name), choices, 0)
 				if modelIdx < 0 {
 					fmt.Println("Cancelled.")
-					return
+					return ProviderConfig{}, false
 				}
 				if modelIdx == len(choices)-1 {
 					model = tuiInput("Model name", "", "")
@@ -765,7 +849,7 @@ func cmdProvider() {
 
 		if model == "" {
 			fmt.Println("Cancelled.")
-			return
+			return ProviderConfig{}, false
 		}
 
 		timeout := 10
@@ -787,7 +871,7 @@ func cmdProvider() {
 		envKey := tuiInput("API key env var", "leave empty if none", "")
 		if url == "" || model == "" {
 			fmt.Println("Cancelled.")
-			return
+			return ProviderConfig{}, false
 		}
 		selected = ProviderConfig{
 			Name:   "Custom",
@@ -797,16 +881,17 @@ func cmdProvider() {
 		}
 	default:
 		fmt.Println("Cancelled.")
-		return
+		return ProviderConfig{}, false
 	}
 
-	config.Provider = selected
-	SaveConfig(config)
-	fmt.Printf("\nProvider set: %s via %s\n", selected.Model, selected.URL)
+	return selected, true
+}
 
-	// Connection test
+// testProviderConnection runs the cheap "Say ok" round-trip against a
+// picked provider and prints the result. Returns true on success.
+func testProviderConnection(selected ProviderConfig) bool {
 	fmt.Print("Testing connection... ")
-	cfg := LLMConfig{URL: selected.URL, Model: selected.Model, APIKey: selected.APIKey}
+	cfg := LLMConfig{URL: selected.URL, Model: selected.Model, APIKey: selected.APIKey, Timeout: selected.Timeout}
 	if cfg.APIKey == "" && selected.EnvKey != "" {
 		cfg.APIKey = os.Getenv(selected.EnvKey)
 	}
@@ -816,12 +901,16 @@ func cmdProvider() {
 	// (finish_reason "length"), failing the test even though the model works
 	// fine at real classifier token counts. 256 is cheap and universal.
 	text, err := CallLLM(cfg, "Say ok", "ok", 256)
-	if err != nil {
+	switch {
+	case err != nil:
 		fmt.Printf("error: %v\n", err)
-	} else if text != "" {
+		return false
+	case text != "":
 		fmt.Println("ok")
-	} else {
+		return true
+	default:
 		fmt.Println("unexpected response")
+		return false
 	}
 }
 
@@ -942,10 +1031,10 @@ func cmdRules() {
 // "where did this rule come from?" after a walk-up load.
 func cmdRulesTrace() {
 	type entry struct {
-		source  string
-		line    int
-		rule    Rule
-		shadowed bool
+		source     string
+		line       int
+		rule       Rule
+		shadowed   bool
 		shadowedBy string
 	}
 	var all []entry
@@ -1100,15 +1189,15 @@ var idTokenRe = regexp.MustCompile(`^[0-9a-f]{8,}$|^\d{10,}$`)
 var multiplexTools = map[string]bool{
 	"kubectl": true, "k": true,
 	"docker": true, "podman": true,
-	"helm":      true,
-	"aws":       true, "gcloud": true, "az": true,
-	"git":       true,
-	"npm":       true, "pnpm": true, "yarn": true, "bun": true,
-	"pip":       true, "pip3": true, "uv": true,
-	"cargo":     true, "go": true,
+	"helm": true,
+	"aws":  true, "gcloud": true, "az": true,
+	"git": true,
+	"npm": true, "pnpm": true, "yarn": true, "bun": true,
+	"pip": true, "pip3": true, "uv": true,
+	"cargo": true, "go": true,
 	"brew":      true,
 	"terraform": true, "tf": true, "pulumi": true,
-	"ansible":   true, "ansible-playbook": true,
+	"ansible": true, "ansible-playbook": true,
 	"gh":        true,
 	"systemctl": true, "service": true,
 }

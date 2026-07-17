@@ -10,6 +10,7 @@ Every Bash command goes through this pipeline in order. The first layer that pro
 6. **Allow / ask rules** — `.yolonot` patterns → instant decision. See [rules.md](rules.md).
 7. **Script cache** — SHA256 of the command plus the full contents of every attached script → reuse cached decision. Editing an attached script anywhere invalidates the entry.
 8. **LLM analysis** — 2-class classifier (allow / ask) emitting a [risk tier](risk-tiers.md) the active harness turns into a final action. Referenced scripts are attached to the prompt when it is provable which file will run (see below).
+   - **Escalation (optional)** — when the verdict is uncertain in a way that would surface an ask, a configured bigger model gets one look before the interruption. A confident `allow` + `safe`/`low` from it rescues the ask into an allow; a more dangerous tier hardens the verdict upward; anything else (including errors) leaves the primary verdict standing. Never fires on confident allows, `critical` verdicts, rule-layer denies, or the oversize abstain. See [providers.md](providers.md#escalation-second-opinion-model). Note: harnesses whose hooks yolonot cannot gate at all get no benefit from escalation — it improves verdicts, it cannot create enforcement where a harness offers none.
 
 Sessions are project-aware. A command approved in one project is not auto-approved in another within the same session — session keys include a hash of the git root (or working directory).
 

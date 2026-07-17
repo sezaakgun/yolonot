@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The redaction marker rendered in place of a credential-looking line.
@@ -86,5 +87,59 @@ func TestBuildAnalyzePromptRedactsInRootScriptSecret(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "echo deploying") || !strings.Contains(prompt, "echo finished") {
 		t.Errorf("benign lines of the attached script should remain, got:\n%s", prompt)
+	}
+}
+
+// resolveTimeoutSeconds resolution order: cfg.Timeout > default, then the
+// env var named by TimeoutEnvKey overrides — and a custom key (escalation)
+// must be isolated from LLM_TIMEOUT (primary knob).
+func TestResolveTimeoutSeconds(t *testing.T) {
+	os.Unsetenv("LLM_TIMEOUT")
+	if got := resolveTimeoutSeconds(LLMConfig{}, 10); got != 10 {
+		t.Errorf("default: got %d, want 10", got)
+	}
+	if got := resolveTimeoutSeconds(LLMConfig{Timeout: 25}, 10); got != 25 {
+		t.Errorf("cfg.Timeout: got %d, want 25", got)
+	}
+
+	t.Setenv("LLM_TIMEOUT", "7")
+	if got := resolveTimeoutSeconds(LLMConfig{Timeout: 25}, 10); got != 7 {
+		t.Errorf("LLM_TIMEOUT override: got %d, want 7", got)
+	}
+
+	t.Setenv("LLM_ESCALATION_TIMEOUT", "42")
+	esc := LLMConfig{Timeout: 25, TimeoutEnvKey: "LLM_ESCALATION_TIMEOUT"}
+	if got := resolveTimeoutSeconds(esc, 10); got != 42 {
+		t.Errorf("custom TimeoutEnvKey: got %d, want 42", got)
+	}
+	// And the custom key must NOT read LLM_TIMEOUT.
+	t.Setenv("LLM_ESCALATION_TIMEOUT", "")
+	if got := resolveTimeoutSeconds(esc, 10); got != 25 {
+		t.Errorf("custom key isolation: got %d, want 25 (cfg), not 7 (LLM_TIMEOUT)", got)
+	}
+}
+
+// callClaudeCLI must kill a hung `claude` process at the resolved timeout
+// instead of blocking the hook until the harness's own kill.
+func TestCallClaudeCLITimeout(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "claude")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\n/bin/sleep 30\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	start := time.Now()
+	_, err := callClaudeCLI(LLMConfig{URL: "claude-cli", Model: "m", Timeout: 1}, "sys", "user")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Errorf("error should mention timeout, got: %v", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("call should return ~1s after timeout, took %v", elapsed)
 	}
 }
