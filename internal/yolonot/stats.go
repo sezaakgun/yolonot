@@ -50,6 +50,13 @@ func cmdStats() {
 	// Instant allows (rule/session/cache with allow decision)
 	instantAllows := 0
 
+	// Human ask resolutions (layer "human"). Counted separately — they are
+	// labels for what the user answered, not gate decisions, and the deny
+	// side is always logged alongside a session_deny gate entry (counting
+	// both would double-count).
+	humanApproved := 0
+	humanRejected := 0
+
 	// Asked commands for "top asked" grouping
 	askedCmds := map[string]int{}
 
@@ -57,6 +64,15 @@ func cmdStats() {
 	projectMap := map[string]*projectStats{}
 
 	for _, e := range entries {
+		if e.Layer == "human" {
+			switch e.Decision {
+			case "allow":
+				humanApproved++
+			case "deny":
+				humanRejected++
+			}
+			continue
+		}
 		switch e.Decision {
 		case "allow":
 			allowCount++
@@ -114,6 +130,10 @@ func cmdStats() {
 		}
 	}
 
+	// Human entries were skipped by the loop; keep them out of the decision
+	// percentages too.
+	total -= humanApproved + humanRejected
+
 	// Print header
 	fmt.Printf("yolonot stats (%s)\n\n", dateRange)
 
@@ -124,6 +144,9 @@ func cmdStats() {
 	fmt.Printf("  Denied:            %3d (%d%%)\n", denyCount, int(pct(denyCount, total)))
 	if passthroughCount > 0 {
 		fmt.Printf("  Passthrough:       %3d (LLM unavailable)\n", passthroughCount)
+	}
+	if humanApproved > 0 || humanRejected > 0 {
+		fmt.Printf("\n  Ask resolutions:   %d approved, %d rejected by user\n", humanApproved, humanRejected)
 	}
 
 	// Layer breakdown
