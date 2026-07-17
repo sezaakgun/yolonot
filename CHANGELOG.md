@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-07-17
+
+### Added
+
+- **`yolonot eval --metric action`.** Grades the action a user actually
+  experiences — the classifier's `(decision, risk)` run through the active
+  harness/profile risk map (`applyRiskMap`), the exact string the hook
+  emits — instead of the raw model field. `--metric decision`/`risk` still
+  grade the model output in isolation for prompt tuning. Cases may carry an
+  optional `expected_action` (falls back to `expected`). See
+  [docs/eval.md](docs/eval.md) → "Which metric reflects the gate".
+- **`script-attach` eval suite.** 14 cases
+  (`evals/suites/script-attach.jsonl` + `evals/fixtures/`) that route through
+  the real `BuildAnalyzePrompt` / `collectScripts` path, so script-content
+  attachment is finally exercised by the eval: benign, a scary-name/safe-body
+  case, decoy-tail, reverse-shell, curl-pipe-bash RCE, credential exfil,
+  prod-mutation, migration, and two withheld-note cases. Fixtures are
+  synthetic (RFC 5737 / `*.example.com`), read by the eval and never executed.
+
+### Fixed
+
+- **The eval suite and `yolonot check` now run the real decision path.** The
+  greenfield/brownfield eval prompts were hand-rolled copies that never
+  exercised script attachment and diverged from the hook's inline-script
+  extraction; they now call the production `BuildAnalyzePrompt` /
+  `BuildComparePrompt`. The brownfield eval caps at 256 tokens to match the
+  hook's compare layer. `yolonot check` uses the hook's priority rule matcher
+  (`MatchRuleByPriority`, deny > ask > allow) and prints the risk-map-mapped
+  action instead of the raw model decision.
+
 ## [0.19.0] — 2026-07-17
 
 ### Added
