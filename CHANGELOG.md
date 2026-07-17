@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-07-17
+
+### Added
+
+- **Human ask resolutions are logged.** When yolonot answers "ask", the
+  user's actual verdict now lands in `decisions.jsonl` as its own
+  `layer:"human"` entry: `source:"ask_approved"` when the command runs
+  after an ask (the host's PostToolUse event fired for an
+  asked-but-unapproved command), `source:"ask_rejected"` when the
+  rejection is inferred (asked, never ran, agent retried the command).
+  Previously the log carried only yolonot's own verdicts; these entries
+  give `yolonot suggest` — and anything else mining the decision history —
+  ground truth about what the user actually answered. A rejection the
+  agent never retries is not observed. `yolonot stats` reports them on a
+  separate "Ask resolutions" line and keeps them out of the
+  allow/ask/deny percentages (the deny side is always logged alongside a
+  `session_deny` gate entry, which would otherwise double-count).
+
 ## [0.18.0] — 2026-07-17
 
 ### Fixed
