@@ -27,7 +27,7 @@ func cmdCheck(command string) {
 	for _, r := range rules {
 		if r.Action == "deny" {
 			if (r.Type == "cmd" && matchCmd(r.Pattern, command, firstToken)) ||
-				(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && glob.Match(r.Pattern, scriptPathRe.FindStringSubmatch(" "+command)[1])) {
+				(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && glob.Match(r.Pattern, scriptPathRe.FindStringSubmatch(" " + command)[1])) {
 				fmt.Printf("  [%d] Deny rules:      DENY — matched deny-%s %s\n", step, r.Type, r.Pattern)
 				fmt.Println()
 				fmt.Printf("  → Result: DENY (layer: rule, absolute block)\n")
@@ -70,12 +70,15 @@ func cmdCheck(command string) {
 		step++
 	}
 
-	// Step: Allow/Ask rules (same as hook.go step 3 via MatchRuleWith)
+	// Step: Allow/Ask rules (same as hook.go step 3). Use the SAME priority
+	// matcher the hook uses (deny > ask > allow, file-order-independent) so
+	// the preview can't report ALLOW on a command the gate would ASK — the
+	// first-match MatchRuleWith could pick an earlier allow over a later ask.
 	chains := hasChainOperator(command)
 	sensitiveFile := hasSensitivePathWith(command, sensitive)
 	skipAllow := chains || sensitiveFile
 
-	match := MatchRuleWith(command, rules, sensitive)
+	match := MatchRuleByPriority(command, rules, sensitive)
 
 	if skipAllow {
 		// Report why allow rules were skipped
@@ -91,7 +94,7 @@ func cmdCheck(command string) {
 		for _, r := range rules {
 			if r.Action == "allow" {
 				if (r.Type == "cmd" && matchCmd(r.Pattern, command, firstToken)) ||
-					(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && glob.Match(r.Pattern, scriptPathRe.FindStringSubmatch(" "+command)[1])) {
+					(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && glob.Match(r.Pattern, scriptPathRe.FindStringSubmatch(" " + command)[1])) {
 					hasAllowCandidate = true
 					break
 				}
@@ -168,11 +171,25 @@ func cmdCheck(command string) {
 		return
 	}
 
-	decision := strings.ToUpper(d.Decision)
-	fmt.Printf("  [%d] LLM analysis:    %s (confidence: %.0f%%, %dms)\n", step, decision, d.Confidence*100, ms)
+	// The classifier emits (decision, risk); the gate's actual action is that
+	// pair run through the active harness's risk map + profile (hook.go). Show
+	// the model's raw call AND the mapped result, or the preview lies whenever
+	// the profile escalates a tier (e.g. critical → deny, high → ask).
+	final, passthrough := applyRiskMap(ActiveHarness(), d.Decision, d.Risk)
+	fmt.Printf("  [%d] LLM analysis:    %s (risk: %s, confidence: %.0f%%, %dms)\n",
+		step, strings.ToUpper(d.Decision), d.Risk, d.Confidence*100, ms)
 	if d.Reasoning != "" {
 		fmt.Printf("      Reasoning: %s\n", d.Reasoning)
 	}
 	fmt.Println()
-	fmt.Printf("  → Result: %s (layer: llm)\n", decision)
+	if passthrough {
+		fmt.Printf("  → Result: PASS-THROUGH (layer: llm, risk map defers to host permissions)\n")
+		return
+	}
+	if final != d.Decision {
+		fmt.Printf("  → Result: %s (layer: llm, %s → %s via %s risk map)\n",
+			strings.ToUpper(final), d.Decision, final, ActiveHarness().Name())
+	} else {
+		fmt.Printf("  → Result: %s (layer: llm)\n", strings.ToUpper(final))
+	}
 }
