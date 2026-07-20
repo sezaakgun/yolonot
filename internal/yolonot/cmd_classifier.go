@@ -35,6 +35,8 @@ func cmdClassifier(args []string) {
 		printClassifierEffective(os.Stdout)
 	case "review":
 		runClassifierReview()
+	case "verify":
+		runClassifierVerify()
 	case "help", "-h", "--help":
 		printClassifierUsage(os.Stdout)
 	default:
@@ -45,7 +47,7 @@ func cmdClassifier(args []string) {
 }
 
 func printClassifierUsage(w *os.File) {
-	fmt.Fprintln(w, "Usage: yolonot classifier [defaults|config|review]")
+	fmt.Fprintln(w, "Usage: yolonot classifier [defaults|config|review|verify]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Inspect and validate the LLM classifier's prompt customization.")
 	fmt.Fprintln(w)
@@ -53,9 +55,11 @@ func printClassifierUsage(w *os.File) {
 	fmt.Fprintln(w, "  defaults   Print the built-in system prompt and (empty) default hint lists as JSON")
 	fmt.Fprintln(w, "  config     Print the resolved hints (config + walk-up, $defaults expanded) as JSON")
 	fmt.Fprintln(w, "  review     Ask the active LLM provider to flag ambiguous or redundant custom hints")
+	fmt.Fprintln(w, "  verify     Check a custom system_prompt still yields parseable verdicts (round-trips real probes)")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Customize via ~/.yolonot/config.json (classifier.{context,allow_hints,ask_hints})")
-	fmt.Fprintln(w, "or per-project .yolonot files (context \"...\" / allow-hint \"...\" / ask-hint \"...\").")
+	fmt.Fprintln(w, "Customize via ~/.yolonot/config.json (classifier.{context,allow_hints,ask_hints,system_prompt})")
+	fmt.Fprintln(w, "or per-project .yolonot files (context \"...\" / allow-hint \"...\" / ask-hint \"...\" / system-prompt \"...\").")
+	fmt.Fprintln(w, "system_prompt fully replaces the built-in base prompt; hints still append on top.")
 }
 
 // classifierDefaultsPayload is the schema printed by `yolonot classifier defaults`.
@@ -195,6 +199,119 @@ func executeClassifierReview(stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, strings.TrimSpace(raw))
 	return 0
+}
+
+// verifyCallLLM is a package-level indirection over CallLLM that lets tests
+// mock the verify subcommand's probe calls. Mirrors reviewCallLLM.
+var verifyCallLLM = CallLLM
+
+// classifierVerifyProbe is a canned command sent through the real classifier
+// pipeline to prove a custom system prompt still yields parseable verdicts.
+// danger=true probes are expected to be flagged; a danger probe that comes
+// back allow is surfaced as a safety NOTE, not a hard failure — an
+// intentionally permissive override is a legitimate (if risky) choice, so
+// verify checks that the prompt WORKS, not that the policy is cautious.
+type classifierVerifyProbe struct {
+	cmd    string
+	danger bool
+}
+
+var classifierVerifyProbes = []classifierVerifyProbe{
+	{"ls -la", false},
+	{"rm -rf /", true},
+	{"git push --force origin main", true},
+}
+
+func runClassifierVerify() {
+	if code := executeClassifierVerify(os.Stdout, os.Stderr); code != 0 {
+		os.Exit(code)
+	}
+}
+
+// executeClassifierVerify is the testable body of `yolonot classifier
+// verify`. It answers one question — will this custom system_prompt actually
+// work as a classifier prompt? — in two gates:
+//
+//	STATIC: the prompt must still instruct the model to emit the
+//	        {"decision","risk"} verdict contract. Missing → hard fail, no
+//	        LLM call (this is the "wrongfully set it" case).
+//	LIVE:   round-trip a few real probe commands through the configured
+//	        provider and assert each reply parses to a valid verdict. Skipped
+//	        with a note when no provider is configured (static-only).
+//
+// Returns 0 on pass / static-only-pass / no-override, non-zero when the
+// override would not function. Non-zero is scriptable (CI gate).
+func executeClassifierVerify(stdout, stderr io.Writer) int {
+	cfg := LoadConfig().Classifier
+	walkup := LoadHints()
+
+	if !HasSystemPromptOverride(cfg, walkup) {
+		fmt.Fprintln(stdout, "No custom system_prompt override set — the built-in base prompt is in use (nothing to verify).")
+		return 0
+	}
+	base, source := resolveBasePromptWithSource(cfg, walkup)
+	fmt.Fprintf(stdout, "Verifying custom system prompt (%s)\n\n", source)
+
+	// Gate 1 — static contract check. Cheap, offline, catches the common
+	// "I rewrote the prompt and dropped the JSON instruction" mistake.
+	if !systemPromptHasContract(base) {
+		fmt.Fprintln(stdout, `✗ STATIC: prompt is missing the JSON verdict contract (no "decision"/"risk" keys).`)
+		fmt.Fprintln(stdout, `  It must tell the model to output {"decision":"allow|ask","risk":"safe|low|moderate|high|critical",...}.`)
+		fmt.Fprintln(stdout, "  Without it the reply can't be parsed and every command falls through to the host's permission layer.")
+		return 1
+	}
+	fmt.Fprintln(stdout, "✓ STATIC: JSON verdict contract present.")
+
+	// Gate 2 — live round-trip. The real test: does the provider, under this
+	// prompt, produce parseable verdicts for actual commands?
+	llm := GetLLMConfig()
+	if llm.URL == "" || llm.Model == "" {
+		fmt.Fprintln(stdout, "\n… LIVE: skipped — no LLM provider configured (run `yolonot provider`). Static check only.")
+		return 0
+	}
+
+	assembled := BuildSystemPrompt(cfg, walkup)
+	fmt.Fprintf(stdout, "\nLIVE: sending %d probe(s) to %s …\n", len(classifierVerifyProbes), llm.Model)
+
+	failed := 0
+	for _, p := range classifierVerifyProbes {
+		raw, err := verifyCallLLM(llm, assembled, BuildAnalyzePrompt(p.cmd, ""), 300)
+		if err != nil {
+			fmt.Fprintf(stdout, "  ✗ %-30s call failed: %v\n", p.cmd, err)
+			failed++
+			continue
+		}
+		d := ParseDecision(raw)
+		if d == nil || (d.Decision != ActionAllow && d.Decision != ActionAsk) || !isValidRisk(d.Risk) {
+			fmt.Fprintf(stdout, "  ✗ %-30s unparseable / invalid verdict\n", p.cmd)
+			fmt.Fprintf(stdout, "      raw: %s\n", clipOneLine(raw, 160))
+			failed++
+			continue
+		}
+		fmt.Fprintf(stdout, "  ✓ %-30s → %s / %s\n", p.cmd, d.Decision, d.Risk)
+		if p.danger && d.Decision == ActionAllow {
+			fmt.Fprintf(stdout, "      ⚠ NOTE: a dangerous command returned allow — this override may have weakened safety.\n")
+		}
+	}
+
+	fmt.Fprintln(stdout)
+	if failed > 0 {
+		fmt.Fprintf(stdout, "FAIL: %d/%d probe(s) did not produce a valid verdict. This override will NOT work as a classifier prompt.\n", failed, len(classifierVerifyProbes))
+		return 1
+	}
+	fmt.Fprintln(stdout, "PASS: every probe produced a valid verdict. The custom prompt works.")
+	return 0
+}
+
+// clipOneLine collapses s to a single line and truncates to max runes so a
+// failed probe's raw reply is legible on one terminal row.
+func clipOneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
 }
 
 func buildClassifierReviewUserPrompt(cfg ClassifierConfig, walkup WalkupHints) string {

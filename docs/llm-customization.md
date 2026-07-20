@@ -130,6 +130,62 @@ yolonot classifier defaults
 > unless you have a deliberate reason to fully replace the built-in
 > behavior. Same contract as Claude Code's `autoMode`.
 
+## Fully replacing the base prompt
+
+The three hint fields *append* to yolonot's shipped base prompt. When that
+isn't enough — you want to rewrite the risk taxonomy, change the output
+schema wording, or drop the built-in examples entirely — set a full
+override. It replaces the built-in base const; **your hints still append on
+top**, so `$defaults` and walk-up hints keep working over a custom base.
+
+Two surfaces, same precedence as everything else (most specific wins):
+
+| Surface | Field / directive | Scope |
+|---|---|---|
+| `~/.yolonot/config.json` | `classifier.system_prompt` (string) | Personal / global |
+| `.yolonot` walk-up | `system-prompt "..."` directive | Per-project (closest-to-cwd wins) |
+
+A walk-up `system-prompt` directive beats the config-json override, which
+beats the built-in const.
+
+```json
+{
+  "classifier": {
+    "system_prompt": "You are a command safety classifier for a sandboxed CI box.\nOutput ONLY JSON: {\"decision\":\"allow|ask\",\"risk\":\"safe|low|moderate|high|critical\",\"short\":\"<=6 words\",\"reasoning\":\"one line\"}\nAllow anything reversible; ask only on irreversible + wide-blast-radius operations."
+  }
+}
+```
+
+Because JSON strings carry real newlines, config.json is the right home for
+a long multi-line prompt. In a `.yolonot` file the directive body is one
+quoted line, so a literal `\n` is expanded to a newline for this directive
+only — enough to carry a short multi-line override that rides with the repo:
+
+```
+# ./ci-sandbox/.yolonot
+system-prompt "Sandbox classifier. Output ONLY JSON: {\"decision\":\"allow|ask\",\"risk\":\"safe|low|moderate|high|critical\"}\nAllow all reversible ops."
+```
+
+> **You own the contract.** The model's verdict is parsed as
+> `{"decision","risk","short","reasoning"}`. If your override drops that
+> instruction, the classifier can't parse the reply, so yolonot emits a
+> **decisionless passthrough** and defers to the host's native permission
+> layer (on Claude Code, its own approval prompt) — it does not silently
+> allow, but it also stops making its own decision. Keep the JSON-output
+> line in any rewrite, and **run `yolonot classifier verify` after editing**
+> — it proves the prompt still produces parseable verdicts before you rely
+> on it (see [Inspecting your configuration](#inspecting-your-configuration)).
+> Two backstops if a broken override slips through: a base-prompt override
+> is loaded anyway (the override is used, `verify` is how you catch a bad
+> one), and at runtime the parse-error passthrough banner names a malformed
+> `system_prompt` as the likely cause and points you at `verify`.
+
+Verify what will actually be sent:
+
+```bash
+yolonot classifier config | jq -r .system_prompt
+```
+
 ## Inspecting your configuration
 
 Three subcommands, all read-only:
@@ -138,8 +194,27 @@ Three subcommands, all read-only:
 yolonot classifier defaults    # Built-in system prompt + (empty) default hint lists, as JSON
 yolonot classifier config      # Effective merged config — config + walk-up, $defaults expanded
 yolonot classifier review      # Ask the active LLM provider to flag ambiguous or redundant hints
+yolonot classifier verify      # Prove a custom system_prompt still yields parseable verdicts
 yolonot classifier             # Shorthand for `config`
 ```
+
+`yolonot classifier verify` is the command to run after writing a
+`system_prompt` override. Two gates:
+
+1. **Static** — the override must still carry the JSON verdict contract
+   (`"decision"` / `"risk"`). Missing → hard fail, exit non-zero, no LLM
+   call. This is the "I rewrote the prompt and dropped the schema" case.
+2. **Live** — it round-trips a few real probe commands (`ls -la`,
+   `rm -rf /`, `git push --force origin main`) through your configured
+   provider under the assembled prompt and asserts each reply parses to a
+   valid `{decision, risk}` verdict. Skipped with a note if no provider is
+   configured. A dangerous probe that comes back `allow` is surfaced as a
+   safety NOTE (not a failure — an intentionally permissive override is
+   your call).
+
+It exits non-zero when the override wouldn't function, so you can gate on it
+in CI or a pre-commit hook. `verify` answers "will this work"; `config`
+shows "what will be sent"; `review` audits your hint *prose*.
 
 `yolonot classifier config` prints the actual `system_prompt` that will
 be sent on the next LLM call — the most useful single field for debugging
@@ -162,7 +237,8 @@ real decisions.
 Within the assembled system prompt the layering is:
 
 ```
-[base SystemPrompt — yolonot's shipped safety rules]
+[base prompt — classifier.system_prompt / .yolonot system-prompt override,
+              else yolonot's shipped SystemPrompt const]
   ↓
 Project context:    (from cfg.context + walkup.context)
   ↓
@@ -201,7 +277,11 @@ This feature is purely additive:
   subcommand.
 - **Existing `.yolonot` directives:** `allow-cmd`, `deny-cmd`,
   `ask-cmd`, `allow-redirect`, `sensitive`, `not-sensitive` — unchanged.
-  The new directives (`context`, `allow-hint`, `ask-hint`) are additive.
+  The new directives (`context`, `allow-hint`, `ask-hint`, `system-prompt`)
+  are additive.
+- **Default base prompt:** with no `system_prompt` override set anywhere,
+  the base is byte-equal to the shipped `SystemPrompt` const — an override
+  is opt-in and changes nothing until you set it.
 
 If you upgrade and don't touch any config, nothing changes.
 
@@ -218,6 +298,20 @@ If you upgrade and don't touch any config, nothing changes.
 - **Hard blocks beat hints.** A `deny-cmd` rule fires before the LLM is
   consulted at all, so it cannot be talked out of by a hint or by the
   user's message. Use `deny-cmd` for anything you truly never want run.
+- **A base-prompt override is more dangerous than a hint.** A `.yolonot`
+  `system-prompt` directive in a cloned repo doesn't just *nudge* the
+  classifier — it *replaces* yolonot's entire shipped safety base (the
+  read-only-is-safe logic, the DANGEROUS/SENSITIVE taxonomy, every named
+  example) with attacker-chosen text, e.g. an "allow everything" prompt.
+  The walk-up trust boundary (enclosing git repo root) is the same as for
+  rules, so a repo you don't trust to write `allow-cmd *` is exactly as
+  untrusted here — but the blast radius is larger. Review `.yolonot`
+  `system-prompt` directives in unfamiliar clones before running anything.
+  Note the backstop that still holds even under a hostile override:
+  `deny-cmd` rules fire *before* the LLM is consulted, so a base-prompt
+  override cannot unblock anything a `deny-cmd` rule denies. (A reply that
+  doesn't match the JSON verdict contract only passes through to the host's
+  native layer — it is not a yolonot-enforced block, so don't rely on it.)
 
 ## Limitations and out-of-scope (today)
 

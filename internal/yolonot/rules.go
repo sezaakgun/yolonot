@@ -45,6 +45,11 @@ type WalkupHints struct {
 	Context    []string
 	AllowHints []string
 	AskHints   []string
+	// SystemPrompt is a full base-prompt override from a `system-prompt`
+	// directive. Unlike the hint slices it does NOT stack — the first
+	// (closest-to-cwd, most specific) non-empty override in the walk-up
+	// chain wins; parents cannot re-override a child's base prompt.
+	SystemPrompt string
 }
 
 type RuleMatch struct {
@@ -89,6 +94,14 @@ func LoadHints() WalkupHints {
 				out.AllowHints = append(out.AllowHints, h.Text)
 			case "ask-hint":
 				out.AskHints = append(out.AskHints, h.Text)
+			case "system-prompt":
+				// First non-empty wins: paths are appended closest-to-cwd
+				// first, so the most specific file's override sticks and
+				// parents cannot clobber it. A full base prompt does not
+				// stack the way sentence-sized hints do.
+				if out.SystemPrompt == "" {
+					out.SystemPrompt = h.Text
+				}
 			}
 		}
 	}
@@ -130,11 +143,19 @@ func loadHintsFromFile(path string) []Hint {
 		directive := parts[0]
 		body := strings.TrimSpace(parts[1])
 		switch directive {
-		case "context", "allow-hint", "ask-hint":
+		case "context", "allow-hint", "ask-hint", "system-prompt":
 		default:
 			continue
 		}
 		text := unquoteHintBody(body)
+		if directive == "system-prompt" {
+			// A full base prompt is inherently multi-line but the walk-up
+			// format is one directive per line, so let a `\n` escape stand
+			// in for a real newline here. Hint sentences never need this, so
+			// the expansion is scoped to system-prompt to avoid surprising
+			// context/allow/ask bodies that legitimately contain "\n".
+			text = strings.ReplaceAll(text, `\n`, "\n")
+		}
 		if text == "" {
 			// A recognized hint directive with an unparseable body is
 			// almost always a quoting mistake (`allow-hint kubectl get

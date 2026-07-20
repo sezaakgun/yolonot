@@ -14,6 +14,7 @@ yolonot suggest      Analyze history, suggest permanent rules
 yolonot stats        Show analytics from decision history
 yolonot check <cmd>  Dry-run: what would the pipeline decide?
 yolonot risk         Show/set per-harness risk tier → action policy
+yolonot classifier   Inspect/validate the LLM prompt customization (defaults|config|review|verify)
 yolonot pre-check    Manage pre-checkers (fast-allow + external hooks)
 yolonot escalation   Second-opinion model consulted before surfacing an ask
 yolonot quiet        Silence banners for allow decisions (only show ask/deny)
@@ -50,6 +51,20 @@ yolonot quiet off      # restore default
 ```
 
 Quiet mode only affects the user-facing `systemMessage`. The underlying `permissionDecision` + `permissionDecisionReason` still flow to the host CLI, and the decision log (`yolonot log`) is unchanged.
+
+### Classifier customization
+
+All read-only inspectors for the LLM classifier's prompt. Full reference: [llm-customization.md](llm-customization.md).
+
+```bash
+yolonot classifier defaults    # Built-in base prompt + (empty) default hint lists, as JSON
+yolonot classifier config      # Effective prompt actually sent (config + walk-up, $defaults expanded)
+yolonot classifier review      # LLM audits your custom hints for ambiguity/redundancy/over-reach
+yolonot classifier verify      # Prove a custom system_prompt still yields parseable verdicts
+yolonot classifier             # Shorthand for `config`
+```
+
+Customize via `~/.yolonot/config.json` (`classifier.{context,allow_hints,ask_hints,system_prompt}`) or per-project `.yolonot` directives (`context`/`allow-hint`/`ask-hint`/`system-prompt`). `system_prompt` fully replaces the built-in base; hints still append. **Run `verify` after setting a `system_prompt`** — it static-checks the JSON verdict contract and round-trips real probes through your provider, exiting non-zero if the override wouldn't function.
 
 ## Skill (`/yolonot`)
 
