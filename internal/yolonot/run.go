@@ -100,6 +100,8 @@ func Run() {
 		cmdPreCheck(os.Args[2:])
 	case "classifier":
 		cmdClassifier(os.Args[2:])
+	case "escalation":
+		cmdEscalation(os.Args[2:])
 	case "quiet":
 		cmdQuiet(os.Args[2:])
 	case "local-allow", "localallow":
@@ -168,6 +170,14 @@ func cmdDefault() {
 	fmt.Printf("  Status:   installed\n")
 	fmt.Printf("  Version:  %s\n", Version)
 	fmt.Printf("  Provider: %s\n", provider)
+	if esc := GetEscalationConfig(); esc.URL != "" && esc.Model != "" {
+		switch escalationGateReason(config, esc) {
+		case "":
+			fmt.Printf("  Escalation: on — %s\n", esc.Model)
+		default:
+			fmt.Printf("  Escalation: off (configured: %s)\n", esc.Model)
+		}
+	}
 	fmt.Printf("  Data:     %s\n", YolonotDir())
 	{
 		profileName := config.Profile
@@ -224,6 +234,7 @@ func cmdDefault() {
 	fmt.Println("  risk        Show/set per-harness risk tier → action policy")
 	fmt.Println("  pre-check   Manage pre-checkers (fast-allow + external hooks like dippy)")
 	fmt.Println("  classifier  Inspect/review LLM classifier prompt customization")
+	fmt.Println("  escalation  Second-opinion model consulted before surfacing an ask")
 	fmt.Println("  quiet       Silence banners for allow decisions (only show ask/deny)")
 	fmt.Println("  pause       Disable yolonot for current session (total bypass)")
 	fmt.Println("  resume      Re-enable yolonot for current session")

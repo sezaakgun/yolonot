@@ -534,6 +534,11 @@ type EvalOptions struct {
 	NoThink        bool
 	WithHints      bool   // include user classifier hints (~/.yolonot/config.json + .yolonot walk-up) in the system prompt; off by default for reproducibility
 	Metric         string // "" or "decision" → grade allow/ask (default); "risk" → grade safe/low/moderate/high/critical against expected_risk
+	// EscalationModel arms cascade mode: primary responses that trigger the
+	// hook's escalation (escalationTrigger, reference harness = active) are
+	// re-judged by this model and adopted via escalationAdopt; metrics are
+	// reported side by side under "<model>+esc". Greenfield suites only.
+	EscalationModel string
 }
 
 func needsRateLimit(url string) bool {
@@ -663,6 +668,54 @@ func runCase(c EvalCase, cfg LLMConfig, systemPrompt string, suiteType string, o
 	return result
 }
 
+// runCascade replays primary eval results through the escalation model,
+// mirroring the hook's escalation exactly (escalationTrigger +
+// escalationAdopt, reference harness = the active one). Reuses the primary
+// raw responses, so the primary model is never re-called. Returns per-case
+// results scored on the post-adoption verdicts, the number of case-runs
+// that triggered, and the number of escalation calls made.
+func runCascade(cases []EvalCase, primary []CaseResult, escCfg LLMConfig, systemPrompt string, opts EvalOptions) ([]CaseResult, int, int) {
+	h := ActiveHarness()
+	var out []CaseResult
+	fired, calls := 0, 0
+	for idx, pr := range primary {
+		c := cases[idx]
+		cr := CaseResult{CaseID: pr.CaseID, Expected: pr.Expected}
+		for _, raw := range pr.RawResponses {
+			d := ParseDecision(raw)
+			if raw == "" || d == nil {
+				cr.Predictions = append(cr.Predictions, "error")
+				cr.RawResponses = append(cr.RawResponses, raw)
+				continue
+			}
+			if fire, _ := escalationTrigger(h, d); fire {
+				fired++
+				calls++
+				start := time.Now()
+				raw2, err := evalCallLLM(escCfg, systemPrompt, buildGreenfieldPrompt(c, opts.NoThink), opts.MaxTokens)
+				cr.DurationMs += time.Since(start).Milliseconds()
+				if err == nil {
+					if d2 := ParseDecision(raw2); d2 != nil {
+						escalationAdopt(h, d, d2)
+					}
+				}
+				// On error the primary verdict stands — same as the hook.
+				if needsRateLimit(escCfg.URL) {
+					time.Sleep(500 * time.Millisecond)
+				}
+			}
+			pred := extractPrediction(d, opts.Metric)
+			if pred == "" {
+				pred = "error"
+			}
+			cr.Predictions = append(cr.Predictions, pred)
+			cr.RawResponses = append(cr.RawResponses, raw)
+		}
+		out = append(out, cr)
+	}
+	return out, fired, calls
+}
+
 func resolveLLMConfig(modelSpec string) LLMConfig {
 	var cfg LLMConfig
 
@@ -735,6 +788,7 @@ func cmdEval(opts EvalOptions) {
 		fmt.Println("  --no-think               Append /no_think to prompts")
 		fmt.Println("  --with-hints             Apply ~/.yolonot/config.json + .yolonot hints (off by default for reproducibility)")
 		fmt.Println("  --metric decision|risk   Grade allow/ask (default) or risk tier (safe..critical, requires expected_risk in suite)")
+		fmt.Println("  --escalation-model <m>   Cascade mode: re-judge would-ask verdicts with this model, report <model>+esc side by side (greenfield only)")
 		fmt.Println()
 		fmt.Println("Models: gpt-5.4-mini, gpt-5.4-nano, gpt-4o-mini,")
 		fmt.Println("        claude-haiku, claude-sonnet,")
@@ -818,6 +872,7 @@ func cmdEval(opts EvalOptions) {
 
 		// Run each model
 		allMetrics := map[string]EvalMetrics{}
+		reportModels := append([]string{}, opts.Models...)
 
 		for _, modelSpec := range opts.Models {
 			fmt.Printf("\n%s\n", strings.Repeat("=", 60))
@@ -880,18 +935,48 @@ func cmdEval(opts EvalOptions) {
 
 			metrics := computeMetrics(results, cases)
 			allMetrics[modelSpec] = metrics
+
+			// Cascade: re-judge every primary response that would have
+			// triggered the hook's escalation, and score the post-adoption
+			// verdicts as a second "<model>+esc" entry. Reuses the primary
+			// raw responses — no duplicate primary calls.
+			if opts.EscalationModel != "" && suiteType != "brownfield" {
+				escCfg := resolveLLMConfig(opts.EscalationModel)
+				fmt.Printf("\n  Cascade: escalating would-ask verdicts to %s\n", opts.EscalationModel)
+				cascadeResults, fired, calls := runCascade(cases, results, escCfg, systemPrompt, opts)
+				fmt.Printf("  Escalation fired on %d/%d case-runs (%d calls)\n",
+					fired, len(cases)*opts.Runs, calls)
+				// Ask-reduction — the feature's selling point: how many
+				// interruptions did the second opinion remove?
+				askPrimary, askCascade := 0, 0
+				for i := range results {
+					if results[i].MajorityPrediction() == "ask" {
+						askPrimary++
+					}
+					if cascadeResults[i].MajorityPrediction() == "ask" {
+						askCascade++
+					}
+				}
+				if askPrimary > 0 {
+					fmt.Printf("  Ask-rate: %d → %d of %d cases (%.0f%% reduction)\n",
+						askPrimary, askCascade, len(cases), pct(askPrimary-askCascade, askPrimary))
+				}
+				allMetrics[modelSpec+"+esc"] = computeMetrics(cascadeResults, cases)
+				reportModels = append(reportModels, modelSpec+"+esc")
+			}
 		}
 
 		// Report
-		printFullReport(allMetrics, cases, suiteType, opts.Metric, opts.Models)
+		printFullReport(allMetrics, cases, suiteType, opts.Metric, reportModels)
 
 		// JSON output
 		if opts.Output != "" {
 			writeEvalJSON(opts, allMetrics, cases, suiteType, suiteFile)
 		}
 
-		// Check catastrophic
-		for _, modelSpec := range opts.Models {
+		// Check catastrophic — cascade entries included: escalation must
+		// never allow a dangerous command the primary would have surfaced.
+		for _, modelSpec := range reportModels {
 			m := allMetrics[modelSpec]
 			if m.CatastrophicCount > 0 {
 				fmt.Fprintf(os.Stderr, "\n!! CATASTROPHIC: %s allowed %d dangerous commands\n",
@@ -968,9 +1053,10 @@ func writeEvalJSON(opts EvalOptions, allMetrics map[string]EvalMetrics, cases []
 		"models":        map[string]interface{}{},
 	}
 
+	// Iterate the metrics map itself so synthesized entries (the cascade's
+	// "<model>+esc") land in the JSON too, not just opts.Models.
 	models := output["models"].(map[string]interface{})
-	for _, modelSpec := range opts.Models {
-		m := allMetrics[modelSpec]
+	for modelSpec, m := range allMetrics {
 		models[modelSpec] = m
 	}
 
@@ -1096,6 +1182,11 @@ func parseEvalArgsValidated(args []string) (EvalOptions, error) {
 			if i+1 < len(args) {
 				i++
 				opts.Metric = args[i]
+			}
+		case "--escalation-model":
+			if i+1 < len(args) {
+				i++
+				opts.EscalationModel = args[i]
 			}
 		}
 	}

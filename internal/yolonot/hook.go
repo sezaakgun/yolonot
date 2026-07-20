@@ -147,6 +147,12 @@ func sanitizeBanner(s string) string {
 // the LLM already saw something worth asking about, a permissive tier
 // mapping shouldn't override that judgement.
 //
+// Scope note: this invariant governs TIER-MAPPING only. The escalation
+// layer (escalation.go) may replace the classifier verdict upstream of
+// this function with a deliberate second judgment from a bigger model —
+// that is a sanctioned re-classification, not a relaxation, and its own
+// guardrails forbid relaxing a resolved deny.
+//
 // passthrough returns ("", true); callers emit nothing and defer to the
 // host's native permission engine. Any unknown action falls back to the
 // classifier's original decision.
@@ -234,6 +240,10 @@ func activeHarnessFormat(r HookResponse) string {
 }
 
 func cmdHook() {
+	// Wall-clock anchor for the escalation budget guard — harnesses kill
+	// hooks around 60s, so late escalation calls are skipped, not risked.
+	hookStart := time.Now()
+
 	// Read payload from stdin; adapter handles env var fallback and
 	// harness-specific JSON decoding. Cap the read: the command string is
 	// processed by quote-aware scanners downstream, so an unbounded payload
@@ -573,6 +583,10 @@ func cmdHook() {
 			SessionID: sessionID, Command: command, Cwd: cwd, Layer: "cache",
 			Decision: finalDecision, Risk: cached.Risk, Confidence: cached.Confidence, Short: cached.Short,
 			Reasoning: fmt.Sprintf("orig=%s → %s (cached) %s", cached.Decision, finalDecision, cached.Reasoning),
+			// A cache hit on a big-model-earned verdict must keep its
+			// provenance — otherwise every replay looks like a plain
+			// primary decision in the audit trail.
+			Escalated: cached.Escalated,
 		})
 		if passthrough {
 			emitHook("")
@@ -663,37 +677,82 @@ func cmdHook() {
 		return
 	}
 
-	// Cache the decision if it involved a script file, keyed to the exact
-	// snapshot the LLM just judged.
-	saveCacheHash(cacheKey, d)
+	// Escalation: when the primary verdict is uncertain in a way a second,
+	// bigger model could improve, consult it once and adopt under the
+	// guardrails in maybeEscalate. Mutates d on adoption, so the cache
+	// write below persists the post-adoption verdict (with provenance) and
+	// the risk map resolves the adopted tier like any other.
+	escOut, escCacheOK := maybeEscalate(ActiveHarness(), config, d, sysPrompt, userPrompt, hookStart)
 
 	// Risk map: classifier gave us (decision, risk). Active harness
 	// decides the final action per its RiskMap. "passthrough" returns an
 	// empty response; the host's native permission engine takes over.
 	finalDecision, passthrough := applyRiskMap(ActiveHarness(), d.Decision, d.Risk)
-	LogDecision(DecisionEntry{
+
+	// Unresolved policy (unattended runs): escalation fired and the result
+	// still resolves to ask — nobody is there to answer it. "deny" degrades
+	// it to a definitive verdict carrying both opinions.
+	unresolvedReason := ""
+	if !passthrough && finalDecision == "ask" {
+		if degrade, reason := escalationUnresolvedDeny(config, escOut, d); degrade {
+			finalDecision = "deny"
+			unresolvedReason = reason
+		}
+	}
+
+	// Cache the decision if it involved a script file, keyed to the exact
+	// snapshot the LLM just judged. Skipped when the escalation call failed
+	// transiently (caching would freeze the un-rescued ask for this content
+	// and the one-shot rescue would never re-fire) and when the unresolved
+	// policy degraded the verdict — the cache path can't re-apply that
+	// policy, and a cached "ask" would contradict this run's deny on every
+	// replay.
+	if escCacheOK && unresolvedReason == "" {
+		saveCacheHash(cacheKey, d)
+	}
+
+	entry := DecisionEntry{
 		SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm",
 		Decision: finalDecision, Risk: d.Risk, Confidence: d.Confidence, Short: d.Short,
 		Reasoning:  fmt.Sprintf("orig=%s → %s %s", d.Decision, finalDecision, d.Reasoning),
 		DurationMs: ms,
-	})
+	}
+	escalationLogFields(&entry, escOut)
+	if unresolvedReason != "" {
+		entry.Reasoning = unresolvedReason + " | " + entry.Reasoning
+	}
+	LogDecision(entry)
+
 	if passthrough {
 		emitHook("")
 		return
+	}
+	layer := "llm"
+	if d.Escalated {
+		layer = "llm+esc"
 	}
 	switch finalDecision {
 	case "allow":
 		if sessionID != "" {
 			saveApproved(projSessionID, command, cwd)
 		}
-		emitHook(hookResponse("allow", "llm", d.Reasoning, command))
+		emitHook(hookResponse("allow", layer, d.Reasoning, command))
 	case "deny":
-		emitHook(hookResponse("deny", "llm", d.Reasoning, command))
+		reason := d.Reasoning
+		if escOut.Outcome == "hardened" && escOut.Reasoning != "" {
+			// The harden is what turned this into a deny — show the
+			// rationale that caused it, not the milder primary one.
+			reason = escOut.Reasoning
+		}
+		if unresolvedReason != "" {
+			reason = unresolvedReason
+		}
+		emitHook(hookResponse("deny", layer, reason, command))
 	default: // ask
 		if sessionID != "" {
 			AppendLine(projSessionID, "asked", command)
 		}
-		emitHook(hookResponse("ask", "llm", d.Reasoning, command))
+		emitHook(hookResponse("ask", layer, d.Reasoning, command))
 	}
 }
 

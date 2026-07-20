@@ -52,6 +52,7 @@ The three suites are split by **classifier path**, not just by data:
 | `--verbose` | Per-case timing + reasoning output. |
 | `--with-hints` | Apply user classifier hints (`~/.yolonot/config.json` + `.yolonot` walk-up) when building the system prompt. Off by default. See "Reproducibility and hints" below. |
 | `--metric decision\|risk\|action` | What to grade. `decision` (default) grades the LLM's raw `allow`/`ask` field. `risk` grades the policy-neutral risk tier (`safe`/`low`/`moderate`/`high`/`critical`) against `expected_risk`. `action` grades the **actual gate action** — the classifier output run through the active harness/profile risk map, i.e. exactly what the hook emits — see "Which metric reflects the gate" below. |
+| `--escalation-model <provider/model>` | Cascade mode: primary responses that would trigger the hook's [escalation](providers.md#escalation-second-opinion-model) are re-judged by this model with the identical trigger + adoption rules, and a second `<model>+esc` entry appears in the report (and in `--output` JSON) along with the ask-reduction rate. Measures rescue-rate and whether the cascade raises the catastrophic-allow rate (it must not) before you trust the feature. Primary responses are reused — no duplicate primary calls. Greenfield suites only. The trigger runs through your ACTIVE harness/profile risk map — for reproducible published numbers, use the defaults (claude + balanced, no `risk_maps` overrides); the `+esc` entry's timing counts escalation calls only. |
 
 ## Reproducibility and hints
 

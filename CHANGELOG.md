@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Escalation: a second-opinion model for uncertain verdicts.** When the primary
+  classifier is uncertain in a way that would surface an ask (raw `ask` decision or a
+  resolved ask, never confident allows and never `critical`), a configured bigger model
+  gets one look before the interruption. A confident `allow` + `safe`/`low` from it
+  rescues the ask into an allow; a *more* dangerous tier hardens the verdict upward
+  (tier only — it can flip permissive cells to deny on ask-less harnesses); anything
+  else, including any escalation error, leaves the primary verdict standing. Guardrails
+  are hard-coded, not configurable. New `escalation` config block reuses the provider
+  shape with same-endpoint inheritance (`{"escalation":{"provider":{"model":"big-model"}}}`
+  inherits the primary URL/credentials; an explicit `url` inherits nothing), plus
+  `disabled` and `unresolved` (`"deny"` fails a post-escalation residual ask closed for
+  unattended runs — a reasoned deny beats a stall). CLI: `yolonot escalation
+  [on|off|setup|test]` — `test` is non-interactive with exit codes for CI preflight.
+  Env: `LLM_ESCALATION_URL` / `LLM_ESCALATION_MODEL` / `LLM_ESCALATION_TIMEOUT`
+  (isolated from `LLM_TIMEOUT`), `YOLONOT_ESCALATION=off`,
+  `YOLONOT_ESCALATION_UNRESOLVED`. Env-only setups work with no config block.
+  Escalation is skipped when the active profile makes a rescue impossible (paranoid),
+  when the hook is near its harness kill deadline, and after transient escalation
+  failures the script cache write is suppressed so the one-shot rescue can re-fire.
+  Full audit trail in `decisions.jsonl` (`escalation_*` fields, cache-replay
+  provenance), counters in `yolonot stats`, `⤴esc` markers in `yolonot log`, identical
+  branch in `yolonot check`, and `yolonot eval --escalation-model <spec>` measures the
+  cascade (rescue-rate, catastrophic-allow gate) against the single-model baseline.
+
+### Changed
+
+- **Provider picker model lists refreshed.** OpenAI adds `gpt-5.6-luna` (primary) and
+  `gpt-5.6-sol` / `gpt-5.6-terra` (escalation); Anthropic and Claude Code escalation
+  suggestions are opus-first — the escalation slot is the judgment slot, it only fires
+  on would-be asks, and via the subscription costs nothing extra. xAI entries move to
+  the dateless `grok-4.20-non-reasoning` / `grok-4.20-reasoning` aliases (primary) and
+  `grok-4.5` / `grok-4.3` (escalation) — the previous `grok-4-1-fast-*` IDs no longer
+  exist upstream, so that picker entry produced a broken config. All new IDs verified
+  against the live provider catalogs.
+
+### Fixed
+
+- **`claude-cli` calls can no longer hang the hook.** `callClaudeCLI` ran `claude -p`
+  with no timeout; a wedged CLI blocked the hook until the harness's own ~60s kill,
+  which falls back to host permissions. Now runs under a context deadline (default
+  30s, `LLM_TIMEOUT`/config override) with a `WaitDelay` so lingering child processes
+  can't hold the pipes open past the kill.
+
 ## [0.20.0] — 2026-07-17
 
 ### Added

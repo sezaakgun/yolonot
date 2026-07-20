@@ -47,6 +47,13 @@ func cmdStats() {
 	llmCallCount := 0
 	var llmTotalMs int64
 
+	// Escalation tracking
+	escFired := 0
+	escRescued := 0
+	escHardened := 0
+	escErrors := 0
+	var escTotalMs int64
+
 	// Instant allows (rule/session/cache with allow decision)
 	instantAllows := 0
 
@@ -94,6 +101,21 @@ func cmdStats() {
 		if e.DurationMs > 0 {
 			llmCallCount++
 			llmTotalMs += e.DurationMs
+		}
+
+		// Escalation (cache replays carry Escalated without an outcome —
+		// count only live fires here)
+		if e.Escalated && e.EscalationOutcome != "" {
+			escFired++
+			escTotalMs += e.EscalationMs
+			switch e.EscalationOutcome {
+			case "rescued":
+				escRescued++
+			case "hardened":
+				escHardened++
+			case "error":
+				escErrors++
+			}
 		}
 
 		// Instant allows
@@ -164,6 +186,17 @@ func cmdStats() {
 		fmt.Printf("  LLM calls:         %3d (avg %dms)\n", llmCallCount, avgMs)
 	}
 	fmt.Printf("  Instant allows:    %3d (rule/session/cache — no LLM needed)\n", instantAllows)
+
+	// Escalation — the counter that answers "is the second model earning
+	// its keep": how often it fired and how often it spared an ask.
+	if escFired > 0 {
+		avgEscMs := escTotalMs / int64(escFired)
+		fmt.Printf("\n  Escalation:        %3d fired, %d rescued (%d%%), %d hardened, avg %dms\n",
+			escFired, escRescued, int(pct(escRescued, escFired)), escHardened, avgEscMs)
+		if escErrors > 0 {
+			fmt.Printf("    Errors:          %3d (provider failures — ask stood)\n", escErrors)
+		}
+	}
 
 	// Top asked
 	if len(askedCmds) > 0 {

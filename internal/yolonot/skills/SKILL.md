@@ -26,9 +26,9 @@ Parse the user's input to determine which command to run. The argument after `/y
 
 The skill is split into two classes of commands. Match exactly:
 
-**Run directly (read-only):** `status`, `log`, `rules`, `stats`, `check`, `profile` (no args / `list` / `show`), `risk` (show forms), `pre-check` (list), `quiet` (no args).
+**Run directly (read-only):** `status`, `log`, `rules`, `stats`, `check`, `profile` (no args / `list` / `show`), `risk` (show forms), `pre-check` (list), `quiet` (no args), `escalation` (no args / `test`).
 
-**Print the command, do NOT execute (mutating / safety-sensitive):** `pause`, `resume`, `reset`, `approve`, `deny`, `profile use|reset|create|delete`, `risk <h> <tier> <action>` and `risk <h> reset`, `pre-check add|remove|clear`, `quiet on|off`, `suggest`, `init`, `setup`, `install`, `uninstall`, `provider`, `upgrade`.
+**Print the command, do NOT execute (mutating / safety-sensitive):** `pause`, `resume`, `reset`, `approve`, `deny`, `profile use|reset|create|delete`, `risk <h> <tier> <action>` and `risk <h> reset`, `pre-check add|remove|clear`, `quiet on|off`, `escalation on|off|setup`, `suggest`, `init`, `setup`, `install`, `uninstall`, `provider`, `upgrade`.
 
 For mutations, format the response as:
 
@@ -71,6 +71,7 @@ Commands:
   /yolonot profile [...]   — pick risk profile (fast/balanced/strict/paranoid + custom)
   /yolonot risk [...]      — show/set per-harness risk tier → action policy
   /yolonot pre-check       — manage pre-checkers (fast-allow + external hooks like dippy)
+  /yolonot escalation      — second-opinion model status (on|off|setup|test)
   /yolonot quiet [on|off]  — silence banners for allow decisions
   /yolonot init            — create rule files for this project
 ```
@@ -532,3 +533,4 @@ Below is the exact behavior of `init` — explanatory only:
   {"decision":"allow|ask","risk":"safe|low|moderate|high|critical","short":"≤6-word banner","reasoning":"one sentence","compared_to":"optional"}
   ```
   `decision` is a 2-class label; `risk` is a 5-tier categorical tag (reversibility × blast radius). The active harness's RiskMap maps tiers to final actions (allow/ask/deny/passthrough). `deny` never originates from the LLM decision field — it comes from rules or from the risk map. Legacy outputs that emit `confidence` instead of `risk` are mapped to a tier for backward compatibility. Unparseable output falls through to the host's native permission prompt.
+- Escalation (optional second-opinion model, `yolonot escalation`): when the primary classifier's verdict would surface an ask (never confident allows, never `critical`), a configured bigger model re-judges the same prompt once. Adoption guardrails are hard-coded: rescue only on an explicit `allow` + `safe`/`low` verdict; a more dangerous tier hardens the verdict upward; any escalation error keeps the primary ask. `escalation on|off|setup` are mutations (print, don't run); bare `escalation` and `escalation test` are read-only. Decision log lines carry `escalation_*` fields and `⤴esc` markers; `yolonot stats` shows fired/rescued/hardened counters.
