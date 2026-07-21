@@ -645,7 +645,12 @@ func cmdHook() {
 	// directives from the .yolonot walk-up chain. Must stay in sync with
 	// cmdCheck: if this passes the bare SystemPrompt const, `yolonot check`
 	// reports decisions the hook will not actually make.
-	sysPrompt := BuildSystemPrompt(config.Classifier, LoadHints())
+	hints := LoadHints()
+	sysPrompt := BuildSystemPrompt(config.Classifier, hints)
+	// A full base-prompt override is the most likely cause of an
+	// unparseable reply (a malformed custom prompt), so remember it for the
+	// parse-error banner below — the reactive backstop to `classifier verify`.
+	overrideActive := HasSystemPromptOverride(config.Classifier, hints)
 	text, err := CallLLM(cfg, sysPrompt, userPrompt, 4096)
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
@@ -668,11 +673,20 @@ func cmdHook() {
 	d := ParseDecision(text)
 	if d == nil {
 		// Parse error → same envelope shape as LLM-unreachable, with
-		// a parse-specific banner.
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "parse error", DurationMs: ms})
+		// a parse-specific banner. When a custom system_prompt override is
+		// active, name it as the likely cause and point at `verify` — this
+		// is the one signal a wrongly-set override reliably surfaces at
+		// runtime (Verbosef is -v-only and invisible on the hook path).
+		reason := "parse error"
+		banner := "yolonot: 🧑‍🚀 LLM response parse error, falling back to host permissions"
+		if overrideActive {
+			reason = "parse error (custom system_prompt override active)"
+			banner = "yolonot: 🧑‍🚀 LLM reply unparseable — custom system_prompt may be malformed; run `yolonot classifier verify`. Falling back to host permissions"
+		}
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: reason, DurationMs: ms})
 		r := HookResponse{}
 		r.HookSpecificOutput.HookEventName = payload.HookEventName
-		r.SystemMessage = "yolonot: 🧑‍🚀 LLM response parse error, falling back to host permissions"
+		r.SystemMessage = banner
 		emitHook(activeHarnessFormat(r))
 		return
 	}

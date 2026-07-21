@@ -114,6 +114,124 @@ func TestClassifierConfigMarshalObjectShapeWithHints(t *testing.T) {
 	}
 }
 
+// TestBuildSystemPromptFullOverrideReplacesBase confirms a
+// classifier.system_prompt override swaps out the built-in const as the
+// base while user hints still append on top (the chosen semantics:
+// replace-base-but-still-append-hints).
+func TestBuildSystemPromptFullOverrideReplacesBase(t *testing.T) {
+	const override = `Custom classifier. Output ONLY JSON: {"decision":"allow|ask","risk":"safe|low"}`
+	cfg := ClassifierConfig{
+		SystemPrompt: override,
+		AllowHints:   []string{"npm install is routine here"},
+	}
+	got := BuildSystemPrompt(cfg, WalkupHints{})
+	if strings.Contains(got, SystemPrompt) {
+		t.Error("built-in SystemPrompt const leaked into an overridden prompt")
+	}
+	if !strings.HasPrefix(got, override) {
+		t.Error("override is not the base prefix of the assembled prompt")
+	}
+	if !strings.Contains(got, "Project allow hints") || !strings.Contains(got, "npm install is routine here") {
+		t.Error("hints did not append after the override base")
+	}
+}
+
+// TestBuildSystemPromptOverrideVerbatimNoHints confirms an override with no
+// hints is returned byte-for-byte — the user owns 100% of the bytes.
+func TestBuildSystemPromptOverrideVerbatimNoHints(t *testing.T) {
+	const override = `Only JSON: {"decision":"allow|ask","risk":"safe"}`
+	got := BuildSystemPrompt(ClassifierConfig{SystemPrompt: override}, WalkupHints{})
+	if got != override {
+		t.Errorf("override not returned verbatim:\n got: %q\nwant: %q", got, override)
+	}
+}
+
+// TestBuildSystemPromptWalkupOverrideBeatsConfig locks in the precedence:
+// a per-project .yolonot system-prompt directive is more specific than the
+// per-user config.json override and must win.
+func TestBuildSystemPromptWalkupOverrideBeatsConfig(t *testing.T) {
+	cfg := ClassifierConfig{SystemPrompt: `CONFIG {"decision":"","risk":""}`}
+	wu := WalkupHints{SystemPrompt: `WALKUP {"decision":"","risk":""}`}
+	got := BuildSystemPrompt(cfg, wu)
+	if !strings.HasPrefix(got, "WALKUP") {
+		t.Errorf("walk-up override did not beat config override: %q", got)
+	}
+}
+
+// TestClassifierConfigMarshalPreservesSystemPrompt guards the MarshalJSON
+// footgun: a config whose ONLY customization is a system_prompt override
+// must not collapse to the legacy string form, which would silently drop
+// the override on the next Save.
+func TestClassifierConfigMarshalPreservesSystemPrompt(t *testing.T) {
+	c := ClassifierConfig{Impl: "llm", SystemPrompt: "custom base"}
+	out, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"system_prompt":"custom base"`) {
+		t.Fatalf("system_prompt dropped by marshal: %s", out)
+	}
+	var back ClassifierConfig
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.SystemPrompt != "custom base" {
+		t.Errorf("round-trip lost system_prompt: %q", back.SystemPrompt)
+	}
+}
+
+// TestSystemPromptHasContract covers the warn-but-allow guard's detector:
+// both required keys → has contract; either missing → no contract.
+func TestSystemPromptHasContract(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{`{"decision":"allow|ask","risk":"safe|low"}`, true},
+		{`emit "decision" but forget the tier key`, false},
+		{`only "risk":"high" here`, false},
+		{"no json contract at all", false},
+	}
+	for _, tc := range cases {
+		if got := systemPromptHasContract(tc.in); got != tc.want {
+			t.Errorf("systemPromptHasContract(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestLoadHintsSystemPromptDirective covers the walk-up parser: the
+// system-prompt directive is recognized, its \n escapes expand to real
+// newlines (so a one-line directive can carry a multi-line prompt), and
+// ordinary hints on other lines still parse alongside it.
+func TestLoadHintsSystemPromptDirective(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".yolonot")
+	body := "system-prompt \"line1\\nline2 with \\\"decision\\\" and \\\"risk\\\"\"\n" +
+		"context \"trusted example\"\n"
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	hints := loadHintsFromFile(path)
+	var sp, ctx string
+	for _, h := range hints {
+		switch h.Type {
+		case "system-prompt":
+			sp = h.Text
+		case "context":
+			ctx = h.Text
+		}
+	}
+	if !strings.Contains(sp, "\n") || !strings.HasPrefix(sp, "line1") {
+		t.Errorf("system-prompt \\n not expanded: %q", sp)
+	}
+	if !strings.Contains(sp, `"decision"`) || !strings.Contains(sp, `"risk"`) {
+		t.Errorf("system-prompt lost embedded quotes: %q", sp)
+	}
+	if ctx != "trusted example" {
+		t.Errorf("sibling context hint not parsed: %q", ctx)
+	}
+}
+
 // TestExpandDefaultsSentinel covers $defaults expansion, no-sentinel
 // passthrough, and the surrounding-entries-preserved property.
 func TestExpandDefaultsSentinel(t *testing.T) {

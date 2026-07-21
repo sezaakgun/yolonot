@@ -74,6 +74,16 @@ type ClassifierConfig struct {
 	Context    []string `json:"context,omitempty"`     // prose describing trusted infra (repos, buckets, domains)
 	AllowHints []string `json:"allow_hints,omitempty"` // prose nudging classifier toward allow on routine patterns
 	AskHints   []string `json:"ask_hints,omitempty"`   // prose nudging classifier toward ask on environment-specific risks
+	// SystemPrompt fully replaces the built-in classifier base prompt when
+	// non-empty. Unlike the hint slices (which append), this owns the whole
+	// base — but Context/AllowHints/AskHints still append after it, so the
+	// $defaults + walk-up machinery keeps working on top of a custom base.
+	// A per-project .yolonot `system-prompt` directive overrides this. An
+	// override that omits the JSON verdict contract is used anyway with a
+	// Verbosef warning (BuildSystemPrompt); if the model then emits
+	// unparseable output the hook passes through to the host's native
+	// permission layer. Empty = built-in prompt, byte-for-byte.
+	SystemPrompt string `json:"system_prompt,omitempty"`
 }
 
 // UnmarshalJSON accepts either a JSON string ("llm") or a JSON object,
@@ -107,7 +117,7 @@ func (c *ClassifierConfig) UnmarshalJSON(data []byte) error {
 // "classifier": "llm" round-trips unchanged through Save — important so we
 // don't silently rewrite every user's config the first time they upgrade.
 func (c ClassifierConfig) MarshalJSON() ([]byte, error) {
-	if len(c.Context) == 0 && len(c.AllowHints) == 0 && len(c.AskHints) == 0 {
+	if len(c.Context) == 0 && len(c.AllowHints) == 0 && len(c.AskHints) == 0 && c.SystemPrompt == "" {
 		if c.Impl == "" {
 			return []byte(`""`), nil
 		}

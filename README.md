@@ -64,7 +64,7 @@ That's it. Every Bash command now runs through [the pipeline](docs/how-it-works.
 | Risk tiers — per-harness action policy, overrides | [docs/risk-tiers.md](docs/risk-tiers.md) |
 | Risk profiles — `fast`/`balanced`/`strict`/`paranoid` + custom | [docs/risk-profiles.md](docs/risk-profiles.md) |
 | LLM providers — matrix, env vars, response schema, escalation (second-opinion model) | [docs/providers.md](docs/providers.md) |
-| Classifier customization — teach the LLM about your trusted infra (prose hints) | [docs/llm-customization.md](docs/llm-customization.md) |
+| Classifier customization — prose hints or a full `system_prompt` override, plus `classifier verify` | [docs/llm-customization.md](docs/llm-customization.md) |
 | Harnesses — install flags, runtime pinning, per-host caveats | [docs/harnesses.md](docs/harnesses.md) |
 | Analytics — `yolonot log`, `stats`, `suggest`, quiet mode | [docs/analytics.md](docs/analytics.md) |
 | Eval suite — test prompt quality across models | [docs/eval.md](docs/eval.md) |

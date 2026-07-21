@@ -221,12 +221,16 @@ func expandDefaults(input, builtin []string) []string {
 // returns SystemPrompt verbatim — a load-bearing backward-compat
 // invariant covered by TestBuildSystemPromptDefaultByteEqual.
 //
-// When the user has supplied any context/allow/ask hints (via
-// ~/.yolonot/config.json or .yolonot walk-up files), they are appended in
-// labeled sections after the base prompt so the model can tell what's
-// project-specific from what shipped in yolonot. The $defaults sentinel
-// is expanded before assembly.
+// The base prompt is resolved by resolveBasePrompt: a full override (via
+// classifier.system_prompt or a .yolonot `system-prompt` directive)
+// replaces the built-in const, otherwise the const is used. On top of
+// whichever base was chosen, any context/allow/ask hints (via
+// ~/.yolonot/config.json or .yolonot walk-up files) are appended in
+// labeled sections so the model can tell what's project-specific from what
+// shipped in yolonot. The $defaults sentinel is expanded before assembly.
 func BuildSystemPrompt(cfg ClassifierConfig, walkup WalkupHints) string {
+	base := resolveBasePrompt(cfg, walkup)
+
 	context := append([]string{}, expandDefaults(cfg.Context, builtinClassifierContext)...)
 	context = append(context, walkup.Context...)
 	allow := append([]string{}, expandDefaults(cfg.AllowHints, builtinClassifierAllowHints)...)
@@ -235,11 +239,11 @@ func BuildSystemPrompt(cfg ClassifierConfig, walkup WalkupHints) string {
 	ask = append(ask, walkup.AskHints...)
 
 	if len(context) == 0 && len(allow) == 0 && len(ask) == 0 {
-		return SystemPrompt
+		return base
 	}
 
 	var b strings.Builder
-	b.WriteString(SystemPrompt)
+	b.WriteString(base)
 	if len(context) > 0 {
 		b.WriteString("\n\nProject context (from this user's configuration; treat as trusted background):\n")
 		for _, s := range context {
@@ -266,6 +270,65 @@ func BuildSystemPrompt(cfg ClassifierConfig, walkup WalkupHints) string {
 	}
 	b.WriteString("\nUser message overrides allow hints when the user has explicitly and specifically asked for the action that an ask hint would otherwise flag.")
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// resolveBasePrompt selects the classifier's base prompt, honoring full
+// overrides. Precedence, most specific first:
+//
+//  1. A .yolonot `system-prompt` directive (per-project, walk-up).
+//  2. classifier.system_prompt in ~/.yolonot/config.json (per-user).
+//  3. The built-in SystemPrompt const (the default).
+//
+// With no override set it returns SystemPrompt byte-for-byte, preserving
+// the TestBuildSystemPromptDefaultByteEqual invariant. An override that
+// omits the JSON verdict contract is used anyway (warn-but-allow): it earns
+// a Verbosef warning, and if the model then emits unparseable output the
+// hook emits a decisionless passthrough (hook.go) — deferring to the host's
+// native permission layer, never silently allowing.
+func resolveBasePrompt(cfg ClassifierConfig, walkup WalkupHints) string {
+	base, source := resolveBasePromptWithSource(cfg, walkup)
+	if source != "" && !systemPromptHasContract(base) {
+		Verbosef("classifier base prompt override (%s) omits the JSON verdict contract "+
+			`(no "decision"/"risk" keys); model output may be unparseable, in which case `+
+			`the hook passes through to the host's native permission layer`, source)
+	}
+	return base
+}
+
+// resolveBasePromptWithSource is the precedence core behind resolveBasePrompt.
+// It returns the chosen base prompt and a human-readable source label — ""
+// when no override is set (the built-in const is used). Split out so
+// `yolonot classifier verify` can name the override source and gate on its
+// presence without re-implementing the precedence or firing the Verbosef
+// side effect.
+func resolveBasePromptWithSource(cfg ClassifierConfig, walkup WalkupHints) (base, source string) {
+	base = SystemPrompt
+	if strings.TrimSpace(cfg.SystemPrompt) != "" {
+		base = cfg.SystemPrompt
+		source = "config.json classifier.system_prompt"
+	}
+	if strings.TrimSpace(walkup.SystemPrompt) != "" {
+		base = walkup.SystemPrompt
+		source = ".yolonot system-prompt directive"
+	}
+	return base, source
+}
+
+// HasSystemPromptOverride reports whether a full base-prompt override is
+// active (from config.json or a .yolonot directive). False means the
+// built-in SystemPrompt const is in use — known-good, nothing to verify.
+func HasSystemPromptOverride(cfg ClassifierConfig, walkup WalkupHints) bool {
+	_, source := resolveBasePromptWithSource(cfg, walkup)
+	return source != ""
+}
+
+// systemPromptHasContract loosely checks that a custom base prompt still
+// instructs the model to emit the required JSON verdict. Deliberately
+// permissive: it only looks for the two required keys, so a creative
+// rewrite that keeps the contract in different words still passes. Drives
+// the warn-but-allow guard in resolveBasePrompt — never blocks.
+func systemPromptHasContract(s string) bool {
+	return strings.Contains(s, `"decision"`) && strings.Contains(s, `"risk"`)
 }
 
 // ComparePrompt is used for session similarity checking.
