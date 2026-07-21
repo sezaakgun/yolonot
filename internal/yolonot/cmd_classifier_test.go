@@ -550,3 +550,93 @@ func TestExecuteClassifierVerifyDangerAllowNote(t *testing.T) {
 		t.Errorf("stdout missing danger-allow safety note: %s", out)
 	}
 }
+
+// TestExecuteClassifierVerifyTransportErrorNotPromptFail: a provider error on
+// one probe (empty response / 5xx) must NOT be reported as a broken prompt —
+// the other probes prove the prompt works. Regression for the mercury-2
+// "no content in response" flakiness that first surfaced this.
+func TestExecuteClassifierVerifyTransportErrorNotPromptFail(t *testing.T) {
+	cfg, _ := json.Marshal(map[string]any{
+		"provider":   map[string]any{"url": "http://localhost", "model": "x"},
+		"classifier": map[string]any{"impl": "llm", "system_prompt": contractPrompt},
+	})
+	withIsolatedHome(t, string(cfg))
+
+	orig := verifyCallLLM
+	verifyCallLLM = func(c LLMConfig, system, user string, maxTokens int) (string, error) {
+		if strings.Contains(user, "git push --force") {
+			return "", fmt.Errorf("no content in response")
+		}
+		return `{"decision":"ask","risk":"high"}`, nil
+	}
+	t.Cleanup(func() { verifyCallLLM = orig })
+
+	var stdout, stderr bytes.Buffer
+	if code := executeClassifierVerify(&stdout, &stderr); code != 0 {
+		t.Errorf("exit code: got %d, want 0 (transport error is not a prompt failure)", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "PASS") {
+		t.Errorf("stdout missing PASS: %s", out)
+	}
+	if strings.Contains(out, "will NOT work") {
+		t.Errorf("transport error wrongly reported as broken prompt: %s", out)
+	}
+	if !strings.Contains(out, "transient provider error") {
+		t.Errorf("stdout missing provider-error note: %s", out)
+	}
+}
+
+// TestExecuteClassifierVerifyAllTransportError: if EVERY probe hits a provider
+// error, verify can't conclude anything — exit 2 (could-not-verify), distinct
+// from the exit-1 broken-prompt signal.
+func TestExecuteClassifierVerifyAllTransportError(t *testing.T) {
+	cfg, _ := json.Marshal(map[string]any{
+		"provider":   map[string]any{"url": "http://localhost", "model": "x"},
+		"classifier": map[string]any{"impl": "llm", "system_prompt": contractPrompt},
+	})
+	withIsolatedHome(t, string(cfg))
+	withMockVerifyLLM(t, "", fmt.Errorf("upstream 503"))
+
+	var stdout, stderr bytes.Buffer
+	if code := executeClassifierVerify(&stdout, &stderr); code != 2 {
+		t.Errorf("exit code: got %d, want 2 (could not verify)", code)
+	}
+	if !strings.Contains(stdout.String(), "COULD NOT VERIFY") {
+		t.Errorf("stdout missing could-not-verify message: %s", stdout.String())
+	}
+}
+
+// TestExecuteClassifierVerifyRetriesTransient: a transport error that clears on
+// retry must not fail the run. First call errs, the rest succeed → the retry
+// recovers it, every probe passes, and the extra attempt is observable in the
+// call count.
+func TestExecuteClassifierVerifyRetriesTransient(t *testing.T) {
+	cfg, _ := json.Marshal(map[string]any{
+		"provider":   map[string]any{"url": "http://localhost", "model": "x"},
+		"classifier": map[string]any{"impl": "llm", "system_prompt": contractPrompt},
+	})
+	withIsolatedHome(t, string(cfg))
+
+	calls := 0
+	orig := verifyCallLLM
+	verifyCallLLM = func(c LLMConfig, system, user string, maxTokens int) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", fmt.Errorf("transient empty response")
+		}
+		return `{"decision":"ask","risk":"high"}`, nil
+	}
+	t.Cleanup(func() { verifyCallLLM = orig })
+
+	var stdout, stderr bytes.Buffer
+	if code := executeClassifierVerify(&stdout, &stderr); code != 0 {
+		t.Errorf("exit code: got %d, want 0 (retry should recover)", code)
+	}
+	if calls != len(classifierVerifyProbes)+1 {
+		t.Errorf("call count: got %d, want %d (one retry)", calls, len(classifierVerifyProbes)+1)
+	}
+	if !strings.Contains(stdout.String(), "PASS") {
+		t.Errorf("stdout missing PASS after retry: %s", stdout.String())
+	}
+}

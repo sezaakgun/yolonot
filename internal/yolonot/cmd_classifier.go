@@ -273,21 +273,27 @@ func executeClassifierVerify(stdout, stderr io.Writer) int {
 	assembled := BuildSystemPrompt(cfg, walkup)
 	fmt.Fprintf(stdout, "\nLIVE: sending %d probe(s) to %s …\n", len(classifierVerifyProbes), llm.Model)
 
-	failed := 0
+	var ok, parseFail, transportFail int
 	for _, p := range classifierVerifyProbes {
-		raw, err := verifyCallLLM(llm, assembled, BuildAnalyzePrompt(p.cmd, ""), 300)
+		raw, err := verifyProbeWithRetry(llm, assembled, p.cmd)
 		if err != nil {
-			fmt.Fprintf(stdout, "  ✗ %-30s call failed: %v\n", p.cmd, err)
-			failed++
+			// Transport/provider error (empty response, 5xx, timeout) is a
+			// property of the PROVIDER, not the prompt. A flaky model must
+			// not masquerade as a broken override — mark it and move on.
+			fmt.Fprintf(stdout, "  ~ %-30s provider error (skipped): %v\n", p.cmd, err)
+			transportFail++
 			continue
 		}
 		d := ParseDecision(raw)
 		if d == nil || (d.Decision != ActionAllow && d.Decision != ActionAsk) || !isValidRisk(d.Risk) {
+			// The provider DID reply, but the reply doesn't parse — that is
+			// the prompt's fault (the thing verify exists to catch).
 			fmt.Fprintf(stdout, "  ✗ %-30s unparseable / invalid verdict\n", p.cmd)
 			fmt.Fprintf(stdout, "      raw: %s\n", clipOneLine(raw, 160))
-			failed++
+			parseFail++
 			continue
 		}
+		ok++
 		fmt.Fprintf(stdout, "  ✓ %-30s → %s / %s\n", p.cmd, d.Decision, d.Risk)
 		if p.danger && d.Decision == ActionAllow {
 			fmt.Fprintf(stdout, "      ⚠ NOTE: a dangerous command returned allow — this override may have weakened safety.\n")
@@ -295,12 +301,41 @@ func executeClassifierVerify(stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintln(stdout)
-	if failed > 0 {
-		fmt.Fprintf(stdout, "FAIL: %d/%d probe(s) did not produce a valid verdict. This override will NOT work as a classifier prompt.\n", failed, len(classifierVerifyProbes))
+	switch {
+	case parseFail > 0:
+		// Real signal: provider replied, reply didn't parse → prompt broken.
+		fmt.Fprintf(stdout, "FAIL: %d probe(s) returned an unparseable verdict. This override will NOT work as a classifier prompt.\n", parseFail)
 		return 1
+	case ok == 0:
+		// Every probe hit a provider error — nothing can be concluded about
+		// the prompt. A provider/network problem, not a prompt one.
+		fmt.Fprintln(stdout, "COULD NOT VERIFY: the provider returned no usable response for any probe (transport errors, not a prompt problem). Check the provider/network and retry.")
+		return 2
+	default:
+		fmt.Fprintf(stdout, "PASS: every reachable probe produced a valid verdict (%d/%d). The custom prompt works.\n", ok, len(classifierVerifyProbes))
+		if transportFail > 0 {
+			fmt.Fprintf(stdout, "  ⚠ NOTE: %d probe(s) hit a transient provider error and were skipped — not a prompt problem.\n", transportFail)
+		}
+		return 0
 	}
-	fmt.Fprintln(stdout, "PASS: every probe produced a valid verdict. The custom prompt works.")
-	return 0
+}
+
+// verifyProbeWithRetry sends one probe, retrying transient transport errors
+// (empty response, 5xx, timeout) a few times before giving up. Retries ONLY
+// on error: a parseable-but-wrong verdict is the prompt's fault and must not
+// be masked by re-rolling. Nothing varies between attempts — the flakiness
+// is provider-side.
+func verifyProbeWithRetry(llm LLMConfig, systemPrompt, cmd string) (string, error) {
+	const attempts = 3
+	var raw string
+	var err error
+	for i := 0; i < attempts; i++ {
+		raw, err = verifyCallLLM(llm, systemPrompt, BuildAnalyzePrompt(cmd, ""), 300)
+		if err == nil {
+			return raw, nil
+		}
+	}
+	return "", err
 }
 
 // clipOneLine collapses s to a single line and truncates to max runes so a
