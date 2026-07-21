@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-07-21
+
+### Added
+
+- **Full classifier system-prompt override.** Beyond the append-only hints,
+  `classifier.system_prompt` (in `~/.yolonot/config.json`) and a per-project
+  `.yolonot` `system-prompt "..."` directive now fully **replace** yolonot's
+  built-in classifier base prompt; context/allow/ask hints still append on top,
+  and `$defaults` + walk-up keep working over the custom base. Precedence, most
+  specific first: `.yolonot` directive > `config.json` > built-in const. With
+  no override the assembled prompt is byte-for-byte unchanged from the shipped
+  const, so existing setups don't shift on upgrade. A `.yolonot` directive
+  expands `\n` to real newlines so a one-line directive can carry a multi-line
+  prompt. A cloned-repo override replaces the whole safety base (larger blast
+  radius than a hint) — `deny-cmd` rules still fire first and a broken override
+  passes through to the host, never a silent allow. See docs/llm-customization.md.
+- **`yolonot classifier verify`.** Proves a custom `system_prompt` still yields
+  parseable verdicts: a static check that the JSON verdict contract survived the
+  rewrite, then a live round-trip of real probes (`ls`, `rm -rf /`,
+  `git push --force origin main`) through the configured provider, asserting
+  each reply parses to a valid `{decision, risk}`. Transport errors (empty
+  response, 5xx, timeout) are retried and, if persistent, reported as provider
+  errors — never mistaken for a broken prompt; only a parseable-but-invalid
+  reply fails (exit 1), all probes transport-failing is a distinct exit 2
+  (could-not-verify). Skipped-with-note when no provider is configured;
+  a dangerous probe returning `allow` is a safety NOTE, not a failure. The
+  parse-error passthrough banner now names a malformed `system_prompt` as the
+  likely cause and points at `verify` — the runtime backstop, visible without
+  `-v`.
+
 ## [0.21.0] — 2026-07-20
 
 ### Added
