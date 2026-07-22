@@ -44,6 +44,9 @@ func cmdCheck(command string) {
 	// we DO evaluate it inline and show the actual verdict.
 	checkCfg := LoadConfig()
 	fastallow.AddWrappers(checkCfg.Wrappers...)
+	// Dry-run parity: the prompt built further down must match what the hook
+	// path would build (see the invariant note near the hook's LLM step).
+	attachOutsideRoot = checkCfg.AttachOutsideRoot
 	if preChecks := checkCfg.PreCheck; len(preChecks) > 0 {
 		fmt.Printf("  [%d] Pre-check hooks: %d configured\n", step, len(preChecks))
 		fastAllowHit := false

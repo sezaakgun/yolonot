@@ -34,6 +34,12 @@ type Config struct {
 	LocalAllow   bool                         `json:"local_allow,omitempty"`    // DEPRECATED: migrated on load into PreCheck as "fast-allow". Kept for backward-compat read only.
 	Wrappers     []string                     `json:"wrappers,omitempty"`       // user-defined transparent command wrappers (e.g. ["mycli","corp-shim"]). Extend the built-in set (time/timeout/nice/nohup/strace/ltrace/command/builtin/rtk) — never replace it. Applied to both fast_allow unwrapping and session-approval cross-form lookup.
 
+	// AttachOutsideRoot lets script attachment cross the attach root (git
+	// repo root of the session cwd, else the cwd). Sensitive home dirs stay
+	// floored regardless. Config-file only by design: no CLI verb and no
+	// .yolonot directive, so an untrusted clone can never widen the boundary.
+	AttachOutsideRoot bool `json:"attach_outside_root,omitempty"`
+
 	// Profile = global named risk policy bundle. Resolves to a built-in
 	// (fast/balanced/strict/paranoid) or a CustomProfiles entry. Empty →
 	// DefaultProfileName. Translated per-harness in ResolveRiskMap.

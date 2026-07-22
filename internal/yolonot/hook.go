@@ -320,6 +320,19 @@ func cmdHook() {
 		}
 	}
 
+	// Load config once — used by pre-check, risk-map resolution, quiet-on-
+	// allow banner suppression, and the script-attach boundary. Keeps disk
+	// reads down to one per hook invocation. Loaded BEFORE the PostToolUse
+	// branch: saveApproved hashes attached script contents, so the attach
+	// boundary (attachOutsideRoot) must match what PreToolUse used —
+	// otherwise open-mode approvals for outside-root scripts never stick.
+	config := LoadConfig()
+	quietOnAllow = config.QuietOnAllow
+	attachOutsideRoot = config.AttachOutsideRoot
+	// Register user-defined wrappers (Config.Wrappers) with fast_allow so
+	// `mycli ls` unwraps to `ls`. Idempotent — safe to call every hook.
+	fastallow.AddWrappers(config.Wrappers...)
+
 	// PostToolUse: command ran → user approved → save to .approved (plus
 	// the content hash of any attached scripts, so the approval stays
 	// pinned to the contents the user actually saw run).
@@ -346,15 +359,6 @@ func cmdHook() {
 	if command == "" {
 		return
 	}
-
-	// Load config once — used by pre-check, risk-map resolution, and the
-	// quiet-on-allow banner suppression. Keeps disk reads down to one per
-	// hook invocation.
-	config := LoadConfig()
-	quietOnAllow = config.QuietOnAllow
-	// Register user-defined wrappers (Config.Wrappers) with fast_allow so
-	// `mycli ls` unwraps to `ls`. Idempotent — safe to call every hook.
-	fastallow.AddWrappers(config.Wrappers...)
 
 	// User rules reflect the user's *current* intent, so they take priority
 	// over session memory — with one deliberate exception:
