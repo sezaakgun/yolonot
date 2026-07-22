@@ -2995,6 +2995,176 @@ func TestBuildAnalyzePromptRejectsOutsideProject(t *testing.T) {
 	}
 }
 
+// withAttachOutsideRoot opens the attach boundary for one test and restores
+// the closed default afterwards (attach tests don't use t.Parallel()).
+func withAttachOutsideRoot(t *testing.T) {
+	t.Helper()
+	attachOutsideRoot = true
+	t.Cleanup(func() { attachOutsideRoot = false })
+}
+
+func TestBuildAnalyzePromptOutsideRootOpenAttaches(t *testing.T) {
+	withAttachOutsideRoot(t)
+	outside := t.TempDir()
+	scriptPath := filepath.Join(outside, "tool.py")
+	os.WriteFile(scriptPath, []byte("print('outside tool')\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("python3 "+scriptPath, t.TempDir())
+	if !strings.Contains(prompt, "print('outside tool')") {
+		t.Error("open boundary should attach an outside-root script's contents")
+	}
+	if !strings.Contains(prompt, "(resolves outside the project root)") {
+		t.Error("attached outside-root script should carry the origin marker")
+	}
+	if strings.Contains(prompt, "not attached") {
+		t.Error("no withheld note expected when the script attaches")
+	}
+}
+
+func TestBuildAnalyzePromptOutsideRootSensitiveFloor(t *testing.T) {
+	withAttachOutsideRoot(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	os.MkdirAll(sshDir, 0700)
+	scriptPath := filepath.Join(sshDir, "helper.py")
+	os.WriteFile(scriptPath, []byte("key = 'sk-abcdefghijklmnop1234567890'\n"), 0600)
+
+	prompt := BuildAnalyzePrompt("python3 "+scriptPath, t.TempDir())
+	if strings.Contains(prompt, "Contents of") {
+		t.Error("sensitive floor must hold even with the boundary open")
+	}
+	if strings.Contains(prompt, "sk-") {
+		t.Error("must NOT leak a key from a sensitive directory")
+	}
+	if !strings.Contains(prompt, "under a sensitive directory that is never attached") {
+		t.Error("open mode should use the accurate sensitive-directory withhold reason")
+	}
+}
+
+func TestBuildAnalyzePromptSensitiveReasonClosedUnchanged(t *testing.T) {
+	// Default (closed) mode keeps the historical "outside the project"
+	// reason for sensitive paths so default prompts stay byte-identical.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	os.MkdirAll(sshDir, 0700)
+	scriptPath := filepath.Join(sshDir, "helper.py")
+	os.WriteFile(scriptPath, []byte("print('x')\n"), 0600)
+
+	prompt := BuildAnalyzePrompt("python3 "+scriptPath, t.TempDir())
+	if !strings.Contains(prompt, "outside the project directory") {
+		t.Error("closed mode should keep the historical outside-the-project reason")
+	}
+	if strings.Contains(prompt, "under a sensitive directory") {
+		t.Error("sensitive-directory reason must not appear in closed mode")
+	}
+}
+
+func TestScriptHashTogglesWithOutsideRoot(t *testing.T) {
+	outside := t.TempDir()
+	scriptPath := filepath.Join(outside, "job.sh")
+	os.WriteFile(scriptPath, []byte("echo outside\n"), 0644)
+	cwd := t.TempDir()
+	command := "bash " + scriptPath
+
+	if h := scriptHash(command, cwd); h != "" {
+		t.Errorf("closed: outside-only command should have empty hash (cache disabled), got %q", h)
+	}
+	withAttachOutsideRoot(t)
+	openHash := scriptHash(command, cwd)
+	if openHash == "" {
+		t.Error("open: outside script attaches, hash should be non-empty")
+	}
+
+	// In-root + outside pair: both modes yield a hash, but different ones —
+	// the outside ref moves between the attached and withheld sets.
+	inRoot := filepath.Join(cwd, "local.sh")
+	os.WriteFile(inRoot, []byte("echo local\n"), 0644)
+	pair := "bash " + inRoot + " && bash " + scriptPath
+	openPair := scriptHash(pair, cwd)
+	attachOutsideRoot = false
+	closedPair := scriptHash(pair, cwd)
+	attachOutsideRoot = true
+	if openPair == "" || closedPair == "" {
+		t.Fatalf("pair hashes should be non-empty, got open=%q closed=%q", openPair, closedPair)
+	}
+	if openPair == closedPair {
+		t.Error("toggling the boundary must change the cache key for a mixed in/out command")
+	}
+}
+
+func TestBuildAnalyzePromptOutsideRootEnrichmentRef(t *testing.T) {
+	withAttachOutsideRoot(t)
+	outside := t.TempDir()
+	entry := filepath.Join(outside, "run.py")
+	os.WriteFile(entry, []byte("print('entry')\n"), 0644)
+	ref := filepath.Join(outside, "schema.sql")
+	os.WriteFile(ref, []byte("SELECT 1;\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("python3 "+entry+" "+ref, t.TempDir())
+	if !strings.Contains(prompt, "SELECT 1;") {
+		t.Error("open boundary should attach outside enrichment refs too")
+	}
+	if !strings.Contains(prompt, "Contents of a script file the command references: "+ref+" (resolves outside the project root)") {
+		t.Error("enrichment ref should carry the references label plus the origin marker")
+	}
+}
+
+func TestBuildAnalyzePromptOutsideRootCapsStillApply(t *testing.T) {
+	withAttachOutsideRoot(t)
+	outside := t.TempDir()
+	scriptPath := filepath.Join(outside, "big.sh")
+	os.WriteFile(scriptPath, []byte(strings.Repeat("echo padding line\n", 4*1024)), 0644) // > maxAttachBytes
+
+	prompt := BuildAnalyzePrompt("bash "+scriptPath, t.TempDir())
+	if strings.Contains(prompt, "echo padding line") {
+		t.Error("oversize outside file must not attach")
+	}
+	if !strings.Contains(prompt, "exceeds the attach size limit") {
+		t.Error("oversize outside file should get the too-large withhold reason, not the outside one")
+	}
+}
+
+func TestBuildAnalyzePromptOutsideRootRedaction(t *testing.T) {
+	withAttachOutsideRoot(t)
+	outside := t.TempDir()
+	scriptPath := filepath.Join(outside, "deploy.sh")
+	os.WriteFile(scriptPath, []byte("echo start\npassword = 'hunter2secret'\n"), 0644)
+
+	prompt := BuildAnalyzePrompt("bash "+scriptPath, t.TempDir())
+	if !strings.Contains(prompt, "echo start") {
+		t.Error("non-secret lines should attach")
+	}
+	if strings.Contains(prompt, "hunter2secret") {
+		t.Error("secret-looking line must be redacted for outside files too")
+	}
+	if !strings.Contains(prompt, "<redacted line — looks like a secret>") {
+		t.Error("redaction placeholder expected")
+	}
+}
+
+func TestConfigAttachOutsideRootRoundTrip(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{AttachOutsideRoot: true})
+	if !LoadConfig().AttachOutsideRoot {
+		t.Error("true should round-trip through save/load")
+	}
+	SaveConfig(Config{})
+	if LoadConfig().AttachOutsideRoot {
+		t.Error("absent field should load as false")
+	}
+	data, err := json.Marshal(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "attach_outside_root") {
+		t.Error("omitempty should keep the zero value out of serialized configs")
+	}
+}
+
 func TestBuildAnalyzePromptSessionCwd(t *testing.T) {
 	// The harness payload cwd, not the hook process cwd, decides where
 	// relative script paths resolve. No Chdir here on purpose.
@@ -5070,6 +5240,126 @@ func TestCmdHookQuietOnAllowStillShowsAsk(t *testing.T) {
 	// show it in the permission prompt.
 	if !strings.Contains(out, "needs review") {
 		t.Errorf("expected reasoning for ask decision, got: %s", out)
+	}
+}
+
+// attachHookServer is a fake provider that records every prompt body it
+// receives and always answers with the given decision.
+func attachHookServer(t *testing.T, decision string, bodies *[]string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		*bodies = append(*bodies, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"` + decision + `","confidence":0.9,"short":"probe","reasoning":"probe"}`}},
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestCmdHookAttachOutsideRootFromConfig(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	var bodies []string
+	server := attachHookServer(t, "allow", &bodies)
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test"}, AttachOutsideRoot: true})
+
+	outside := t.TempDir()
+	scriptPath := filepath.Join(outside, "tool.py")
+	os.WriteFile(scriptPath, []byte("print('OUTSIDE-HOOK-MARKER')\n"), 0644)
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir) // step out of this repo so its .yolonot rules don't interfere
+	defer os.Chdir(origCwd)
+
+	// Each hook run is a fresh process in real life — the package var starts
+	// closed and only the config load may open it.
+	attachOutsideRoot = false
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"attach-open","cwd":"%s","tool_input":{"command":"python3 %s"}}`, projectDir, scriptPath)
+	runHookWithPayload(t, payload)
+
+	if len(bodies) == 0 {
+		t.Fatal("expected the hook to call the provider")
+	}
+	if !strings.Contains(bodies[0], "OUTSIDE-HOOK-MARKER") {
+		t.Errorf("config attach_outside_root=true should attach the outside script end-to-end, prompt body: %s", bodies[0])
+	}
+}
+
+func TestCmdHookAttachOutsideRootDefaultClosed(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	var bodies []string
+	server := attachHookServer(t, "allow", &bodies)
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test"}})
+
+	outside := t.TempDir()
+	scriptPath := filepath.Join(outside, "tool.py")
+	os.WriteFile(scriptPath, []byte("print('OUTSIDE-HOOK-MARKER')\n"), 0644)
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir) // step out of this repo so its .yolonot rules don't interfere
+	defer os.Chdir(origCwd)
+
+	attachOutsideRoot = false
+	payload := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"attach-closed","cwd":"%s","tool_input":{"command":"python3 %s"}}`, projectDir, scriptPath)
+	runHookWithPayload(t, payload)
+
+	if len(bodies) == 0 {
+		t.Fatal("expected the hook to call the provider")
+	}
+	if strings.Contains(bodies[0], "OUTSIDE-HOOK-MARKER") {
+		t.Error("without the config flag, outside script contents must stay withheld")
+	}
+	if !strings.Contains(bodies[0], "not attached") {
+		t.Errorf("closed mode should carry a withheld note, prompt body: %s", bodies[0])
+	}
+}
+
+func TestCmdHookAttachOutsideRootApprovedHashSticks(t *testing.T) {
+	// Open-mode session approvals must survive the PreToolUse→PostToolUse→
+	// PreToolUse cycle: the config load happens BEFORE the PostToolUse branch
+	// so saveApproved hashes with the same boundary PreToolUse used.
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	var bodies []string
+	server := attachHookServer(t, "ask", &bodies) // provider always asks — a final allow can only come from the session layer
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test"}, AttachOutsideRoot: true})
+
+	outside := t.TempDir()
+	scriptPath := filepath.Join(outside, "tool.py")
+	os.WriteFile(scriptPath, []byte("print('approved outside')\n"), 0644)
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	origCwd, _ := os.Getwd()
+	os.Chdir(projectDir) // step out of this repo so its .yolonot rules don't interfere
+	defer os.Chdir(origCwd)
+
+	command := "python3 " + scriptPath
+	pre := fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"attach-approve","cwd":"%s","tool_input":{"command":"%s"}}`, projectDir, command)
+	post := fmt.Sprintf(`{"hook_event_name":"PostToolUse","tool_name":"Bash","session_id":"attach-approve","cwd":"%s","tool_input":{"command":"%s"}}`, projectDir, command)
+
+	attachOutsideRoot = false // fresh-process simulation for every invocation
+	out := runHookWithPayload(t, pre)
+	if !strings.Contains(out, `"permissionDecision":"ask"`) {
+		t.Fatalf("first run should ask, got: %s", out)
+	}
+	attachOutsideRoot = false
+	runHookWithPayload(t, post) // user approved the run
+
+	attachOutsideRoot = false
+	out = runHookWithPayload(t, pre)
+	if !strings.Contains(out, `"permissionDecision":"allow"`) {
+		t.Errorf("session approval for an outside-script command should stick in open mode, got: %s", out)
 	}
 }
 

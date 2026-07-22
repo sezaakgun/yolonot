@@ -1022,6 +1022,7 @@ const (
 // low-value decoy refs cannot starve them out of the prompt.
 const (
 	whReasonCapReached = iota // an in-root real script we chose not to attach
+	whReasonSensitive         // sensitive home dir — unconditional floor, even with attach_outside_root
 	whReasonOutside           // resolves outside the project
 	whReasonUnreadable        // in-root but not a readable regular file
 	whReasonTooLarge          // in-root but larger than maxAttachBytes
@@ -1032,6 +1033,7 @@ const (
 
 var withholdReasonText = map[int]string{
 	whReasonCapReached: "attachment limit reached",
+	whReasonSensitive:  "under a sensitive directory that is never attached",
 	whReasonOutside:    "outside the project directory",
 	whReasonUnreadable: "file not readable",
 	whReasonTooLarge:   "file exceeds the attach size limit; a truncated view is never attached",
@@ -1060,6 +1062,7 @@ type attachedScript struct {
 	ref     scriptRef
 	content []byte   // the WHOLE file, shown to the LLM (≤ maxAttachBytes)
 	digest  [32]byte // sha256 of the same full content, for the cache key
+	outside bool     // resolves outside the attach root (only reachable with attach_outside_root)
 }
 
 type withheldScript struct {
@@ -1114,8 +1117,9 @@ func readScriptForPrompt(path string) (content []byte, digest [32]byte, err erro
 // executes) is first and outranks enrichment refs for the attach cap.
 // Guards, in order:
 //  1. Path must resolve inside the attach root (git repo root of the session
-//     cwd, else the cwd itself) AND not under a sensitive home dotfile dir —
-//     prevents `python3 ~/.ssh/id_rsa.py` from exfiltrating secrets.
+//     cwd, else the cwd itself) — unless Config.AttachOutsideRoot widens the
+//     boundary — AND never under a sensitive home dotfile dir (unconditional
+//     floor) — prevents `python3 ~/.ssh/id_rsa.py` from exfiltrating secrets.
 //  2. Must be a readable, regular, UTF-8 text file no larger than
 //     maxAttachBytes (non-blocking, symlink-refusing read).
 //
@@ -1166,7 +1170,21 @@ func collectScripts(command, cwd string) ([]attachedScript, []withheldScript) {
 		if seen[ref.abs] {
 			continue
 		}
-		if !isPathInside(ref.abs, root) || isSensitivePath(ref.abs) {
+		if isSensitivePath(ref.abs) {
+			seen[ref.abs] = true
+			if attachOutsideRoot {
+				// Only with the boundary open does "outside the project"
+				// become misleading (other outside files DO attach); closed
+				// mode keeps the historical reason so default prompts are
+				// byte-identical.
+				withhold(ref, whReasonSensitive)
+			} else {
+				withhold(ref, whReasonOutside)
+			}
+			continue
+		}
+		inside := isPathInside(ref.abs, root)
+		if !inside && !attachOutsideRoot {
 			seen[ref.abs] = true
 			withhold(ref, whReasonOutside)
 			continue
@@ -1189,7 +1207,7 @@ func collectScripts(command, cwd string) ([]attachedScript, []withheldScript) {
 			continue
 		}
 		seen[ref.abs] = true
-		attached = append(attached, attachedScript{ref: ref, content: content, digest: digest})
+		attached = append(attached, attachedScript{ref: ref, content: content, digest: digest, outside: !inside})
 	}
 	return attached, withheld
 }
@@ -1239,11 +1257,17 @@ func isSensitivePath(abs string) bool {
 func buildPromptFromCollected(command string, attached []attachedScript, withheld []withheldScript) string {
 	prompt := "Command: " + command
 	for _, a := range attached {
+		// Only reachable with attach_outside_root: flag outside-root origin
+		// as a risk signal for the classifier.
+		marker := ""
+		if a.outside {
+			marker = " (resolves outside the project root)"
+		}
 		if a.ref.executed {
-			prompt += "\n\nContents of the file this command executes: " + a.ref.raw +
+			prompt += "\n\nContents of the file this command executes: " + a.ref.raw + marker +
 				" (entry file only — it may read or run other files not shown)\n" + renderAttachedScript(a.content)
 		} else {
-			prompt += "\n\nContents of a script file the command references: " + a.ref.raw + "\n" + renderAttachedScript(a.content)
+			prompt += "\n\nContents of a script file the command references: " + a.ref.raw + marker + "\n" + renderAttachedScript(a.content)
 		}
 	}
 	shown := append([]withheldScript(nil), withheld...)
@@ -1278,6 +1302,12 @@ func BuildAnalyzePrompt(command, cwd string) string {
 	attached, withheld := collectScripts(command, cwd)
 	return buildPromptFromCollected(command, attached, withheld)
 }
+
+// attachOutsideRoot mirrors Config.AttachOutsideRoot for collectScripts'
+// boundary check. Set once per entry point that loads config (hook, check,
+// classifier verify, Classify, eval --with-hints); the zero value keeps the
+// boundary closed — the safe default for any path that forgets to set it.
+var attachOutsideRoot bool
 
 // attachRoot picks the privacy boundary for script attachment: the git
 // repo root when cwd is inside one (so `python ../tools/gen.py` from a
@@ -1408,7 +1438,9 @@ func (*LLMClassifier) Classify(_ context.Context, cmd string, meta ClassifyMeta)
 	if cfg.URL == "" || cfg.Model == "" {
 		return RiskResult{Backend: "llm"}, fmt.Errorf("llm not configured")
 	}
-	sysPrompt := BuildSystemPrompt(LoadConfig().Classifier, LoadHints())
+	userCfg := LoadConfig()
+	attachOutsideRoot = userCfg.AttachOutsideRoot
+	sysPrompt := BuildSystemPrompt(userCfg.Classifier, LoadHints())
 	raw, err := CallLLM(cfg, sysPrompt, BuildAnalyzePrompt(cmd, meta.Cwd), 300)
 	ms := time.Since(start).Milliseconds()
 	if err != nil {

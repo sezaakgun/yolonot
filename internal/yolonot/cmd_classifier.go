@@ -242,7 +242,10 @@ func runClassifierVerify() {
 // Returns 0 on pass / static-only-pass / no-override, non-zero when the
 // override would not function. Non-zero is scriptable (CI gate).
 func executeClassifierVerify(stdout, stderr io.Writer) int {
-	cfg := LoadConfig().Classifier
+	userCfg := LoadConfig()
+	cfg := userCfg.Classifier
+	// Probe prompts should attach scripts the same way the hook would.
+	attachOutsideRoot = userCfg.AttachOutsideRoot
 	walkup := LoadHints()
 
 	if !HasSystemPromptOverride(cfg, walkup) {

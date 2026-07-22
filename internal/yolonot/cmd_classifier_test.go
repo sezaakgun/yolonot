@@ -640,3 +640,111 @@ func TestExecuteClassifierVerifyRetriesTransient(t *testing.T) {
 		t.Errorf("stdout missing PASS after retry: %s", stdout.String())
 	}
 }
+
+// withVerifyProbes swaps the canned probe set for the duration of a test and
+// restores it via t.Cleanup. Sibling of withMockVerifyLLM — the probe list is
+// a package var so a test can point a probe at a script it controls.
+func withVerifyProbes(t *testing.T, probes []classifierVerifyProbe) {
+	t.Helper()
+	orig := classifierVerifyProbes
+	classifierVerifyProbes = probes
+	t.Cleanup(func() { classifierVerifyProbes = orig })
+}
+
+// captureVerifyProbePrompts swaps verifyCallLLM for a mock that records every
+// user prompt it is handed (the assembled BuildAnalyzePrompt output) and
+// returns a canned allow verdict. Restores the real function via t.Cleanup.
+func captureVerifyProbePrompts(t *testing.T) *[]string {
+	t.Helper()
+	var prompts []string
+	orig := verifyCallLLM
+	verifyCallLLM = func(_ LLMConfig, _, user string, _ int) (string, error) {
+		prompts = append(prompts, user)
+		return `{"decision":"allow","risk":"safe"}`, nil
+	}
+	t.Cleanup(func() { verifyCallLLM = orig })
+	return &prompts
+}
+
+// TestExecuteClassifierVerifyAttachesOutsideProbeWhenFlagOn asserts the
+// attach-boundary line executeClassifierVerify runs (attachOutsideRoot =
+// userCfg.AttachOutsideRoot) actually reaches the probe prompt: with
+// attach_outside_root=true a probe command that runs a script OUTSIDE the
+// project root has that script's contents attached to the prompt the
+// classifier is shown. The 10 existing TestExecuteClassifierVerify* tests
+// execute this wiring but none observe its effect. Verify-path sibling of
+// check_test.go's TestCheckHonorsAttachOutsideRoot.
+func TestExecuteClassifierVerifyAttachesOutsideProbeWhenFlagOn(t *testing.T) {
+	outside := t.TempDir()
+	scriptPath := filepath.Join(outside, "probe_tool.py")
+	if err := os.WriteFile(scriptPath, []byte("print('VERIFY-OUTSIDE-MARKER')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// One probe that runs the outside script; danger=false so an allow verdict
+	// is a clean PASS.
+	withVerifyProbes(t, []classifierVerifyProbe{{"python3 " + scriptPath, false}})
+
+	// contractPrompt passes the static gate; attach_outside_root opens the
+	// boundary. withIsolatedHome chdirs into a git-root repo (the attach root),
+	// so the sibling temp dir holding the script is genuinely outside it.
+	cfg, _ := json.Marshal(map[string]any{
+		"provider":            map[string]any{"url": "http://localhost", "model": "x"},
+		"attach_outside_root": true,
+		"classifier":          map[string]any{"impl": "llm", "system_prompt": contractPrompt},
+	})
+	withIsolatedHome(t, string(cfg))
+	prompts := captureVerifyProbePrompts(t)
+
+	attachOutsideRoot = false // fresh-process simulation; only the config load may reopen it
+	t.Cleanup(func() { attachOutsideRoot = false })
+
+	var stdout, stderr bytes.Buffer
+	if code := executeClassifierVerify(&stdout, &stderr); code != 0 {
+		t.Fatalf("exit code: got %d, want 0\nstdout: %s", code, stdout.String())
+	}
+	if len(*prompts) == 0 {
+		t.Fatal("expected at least one probe call")
+	}
+	if !strings.Contains((*prompts)[0], "VERIFY-OUTSIDE-MARKER") {
+		t.Errorf("attach_outside_root=true should attach the outside probe script to the prompt; got:\n%s", (*prompts)[0])
+	}
+}
+
+// TestExecuteClassifierVerifyWithholdsOutsideProbeWhenFlagOff is the closed-
+// boundary half: with no attach_outside_root the same outside probe script is
+// withheld from the prompt (contents never leave the box) and a withheld note
+// stands in for it. Pre-setting attachOutsideRoot=true proves the config load
+// resets it back for this run, exactly as a fresh process would.
+func TestExecuteClassifierVerifyWithholdsOutsideProbeWhenFlagOff(t *testing.T) {
+	outside := t.TempDir()
+	scriptPath := filepath.Join(outside, "probe_tool.py")
+	if err := os.WriteFile(scriptPath, []byte("print('VERIFY-OUTSIDE-MARKER')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withVerifyProbes(t, []classifierVerifyProbe{{"python3 " + scriptPath, false}})
+
+	// No attach_outside_root key → boundary stays closed.
+	cfg, _ := json.Marshal(map[string]any{
+		"provider":   map[string]any{"url": "http://localhost", "model": "x"},
+		"classifier": map[string]any{"impl": "llm", "system_prompt": contractPrompt},
+	})
+	withIsolatedHome(t, string(cfg))
+	prompts := captureVerifyProbePrompts(t)
+
+	attachOutsideRoot = true // must be closed back by the config load
+	t.Cleanup(func() { attachOutsideRoot = false })
+
+	var stdout, stderr bytes.Buffer
+	if code := executeClassifierVerify(&stdout, &stderr); code != 0 {
+		t.Fatalf("exit code: got %d, want 0\nstdout: %s", code, stdout.String())
+	}
+	if len(*prompts) == 0 {
+		t.Fatal("expected at least one probe call")
+	}
+	if strings.Contains((*prompts)[0], "VERIFY-OUTSIDE-MARKER") {
+		t.Errorf("closed boundary must withhold the outside probe script; got:\n%s", (*prompts)[0])
+	}
+	if !strings.Contains((*prompts)[0], "not attached") {
+		t.Errorf("closed boundary should carry a withheld note for the outside script; got:\n%s", (*prompts)[0])
+	}
+}

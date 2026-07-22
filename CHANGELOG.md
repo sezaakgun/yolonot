@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in script attachment outside the project root.** New
+  `attach_outside_root` field in `~/.yolonot/config.json` lets the classifier
+  attach referenced scripts that resolve outside the attach root (git repo root
+  of the session cwd, else the cwd) — shared tooling in `~/bin`, `/opt/scripts`,
+  sibling checkouts. Default off: absent/false keeps prior behavior byte-for-byte.
+  Sensitive home directories (`~/.ssh`, `~/.aws`, …) are still never attached
+  (now with an accurate "sensitive directory" withhold note when the boundary is
+  open), secret-looking lines are still redacted, size/count caps unchanged, and
+  attached outside files are labeled `(resolves outside the project root)` in
+  the prompt as a risk signal. Config-file only — deliberately no CLI verb and
+  no `.yolonot` directive, so a cloned repo can never widen your privacy
+  boundary. Cache keys and session approval hashes track the attached/withheld
+  split, so toggling re-judges affected commands. See docs/how-it-works.md.
+
 ## [0.22.0] — 2026-07-21
 
 ### Added

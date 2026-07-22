@@ -312,6 +312,14 @@ If you upgrade and don't touch any config, nothing changes.
   override cannot unblock anything a `deny-cmd` rule denies. (A reply that
   doesn't match the JSON verdict contract only passes through to the host's
   native layer — it is not a yolonot-enforced block, so don't rely on it.)
+- **The script-attach boundary cannot be widened from a repo.** The
+  `attach_outside_root` option (see docs/how-it-works.md) that lets script
+  attachment cross the project root lives *only* in
+  `~/.yolonot/config.json` — there is deliberately no `.yolonot` directive
+  for it. A cloned repository can therefore never ship a file that causes
+  content from outside itself to be read and sent to your LLM provider;
+  only you can opt into that, and the sensitive-home-directory floor
+  (`~/.ssh`, `~/.aws`, …) holds even then.
 
 ## Limitations and out-of-scope (today)
 

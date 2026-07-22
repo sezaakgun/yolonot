@@ -28,7 +28,21 @@ When a command references a script file, yolonot reads it and embeds the content
 
 Everything else gets a "contents withheld" note instead of an attachment: compound commands (`cd x && python foo.py`), any flag between the interpreter and the script (`python -u foo.py`), wrapper/runner tools whose operand is not a file path (`bun run`, `npm run`, `go run` package form, `sudo`, `env`), bare names without a slash (`foo.sh` — resolved via PATH, not the current directory), and files over 64 KB or not valid UTF-8 (never truncated — a benign prefix could mask a malicious tail).
 
-The asymmetry is deliberate: withholding costs at most one extra ask prompt, while attaching the *wrong* file would let a benign shadow file get a malicious script auto-allowed. Attachment never crosses the project's git root and never enters sensitive home directories (`~/.ssh`, `~/.aws`, …); credential-looking lines are redacted before the model sees them.
+The asymmetry is deliberate: withholding costs at most one extra ask prompt, while attaching the *wrong* file would let a benign shadow file get a malicious script auto-allowed. Attachment never crosses the project's attach root (the git repo root of the session cwd, else the cwd itself) unless you opt in with `attach_outside_root` (below), and never enters sensitive home directories (`~/.ssh`, `~/.aws`, …) — that floor holds even when the boundary is opened. Credential-looking lines are redacted before the model sees them either way.
+
+### Opting into outside-root attachment
+
+If your commands routinely run scripts that live outside the project — shared tooling in `~/bin` or `/opt/scripts`, sibling checkouts — the default boundary withholds them and the classifier judges a "contents withheld" note instead of real code. To widen the boundary, set in `~/.yolonot/config.json`:
+
+```json
+{
+  "attach_outside_root": true
+}
+```
+
+Default is off: absent or `false` keeps today's behavior exactly. When on, outside-root scripts attach under the same rules as in-root ones (positional proof, size/count caps, secret redaction) and are labeled `(resolves outside the project root)` in the prompt so the classifier sees the origin as a risk signal. Sensitive home directories still never attach — they get their own withheld note.
+
+This is deliberately **config-file only**: there is no CLI verb and no `.yolonot` directive for it, so a cloned repository can never widen your privacy boundary — only you can, in your own home config. Note that opening the boundary means any user-readable script file a command references (outside the sensitive-directory floor) may be sent to your configured LLM provider; redaction is best-effort regex, not a guarantee. Cache keys and session approvals track the attached contents, so toggling the flag re-judges affected commands instead of replaying decisions made on a different view.
 
 > **⚠ The LLM layer is probabilistic, not guaranteed.** Classifications can be wrong — models hallucinate, miss context, and can be talked out of a correct answer by adversarial prompts. Treat yolonot as a safety net that reduces prompt fatigue, not as an authoritative sandbox. If a class of command *must never* run, encode it as a `deny-cmd` rule in `.yolonot` — rules beat the LLM unconditionally. See [rules.md](rules.md#format).
 

@@ -865,7 +865,12 @@ func cmdEval(opts EvalOptions) {
 		if suiteType == "brownfield" {
 			systemPrompt = ComparePrompt
 		} else if opts.WithHints {
-			systemPrompt = BuildSystemPrompt(LoadConfig().Classifier, LoadHints())
+			// --with-hints is the "apply my real config" switch; the attach
+			// boundary follows it too. Default runs keep the zero value so
+			// suite scores stay reproducible across machines.
+			evalCfg := LoadConfig()
+			attachOutsideRoot = evalCfg.AttachOutsideRoot
+			systemPrompt = BuildSystemPrompt(evalCfg.Classifier, LoadHints())
 		} else {
 			systemPrompt = SystemPrompt
 		}
