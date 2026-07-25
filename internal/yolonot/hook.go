@@ -296,37 +296,24 @@ func cmdHook() {
 	// Clean old sessions (background, non-blocking)
 	go CleanOldSessions()
 
-	// Disabled via env var — total bypass (applies to Post too, so paused
-	// sessions don't silently accumulate pre-approvals).
-	if os.Getenv("YOLONOT_DISABLED") == "1" {
-		return
-	}
-
-	// Claude Code --dangerously-skip-permissions — total bypass, same shape
-	// as YOLONOT_DISABLED. User asked the host to skip its own permission
-	// engine; yolonot honors that and stays out of the way. Post writes are
-	// gated too so resuming a normal session doesn't reveal a pile of
-	// "pre-approved" commands yolonot never vetted.
-	if payload.PermissionMode == "bypassPermissions" {
-		return
-	}
-
-	// Paused for this session — total bypass (same: Post writes are gated
-	// too, so unpausing doesn't reveal a pile of "pre-approved" commands
-	// that yolonot never actually vetted).
-	if sessionID != "" {
-		if _, err := os.Stat(filepath.Join(YolonotDir(), "sessions", sessionID+".paused")); err == nil {
-			return
-		}
-	}
-
-	// Load config once — used by pre-check, risk-map resolution, quiet-on-
-	// allow banner suppression, and the script-attach boundary. Keeps disk
-	// reads down to one per hook invocation. Loaded BEFORE the PostToolUse
-	// branch: saveApproved hashes attached script contents, so the attach
-	// boundary (attachOutsideRoot) must match what PreToolUse used —
-	// otherwise open-mode approvals for outside-root scripts never stick.
+	// Load config once — used by the bypass gate, pre-check, risk-map
+	// resolution, quiet-on-allow banner suppression, and the script-attach
+	// boundary. Keeps disk reads down to one per hook invocation. Loaded
+	// BEFORE the PostToolUse branch: saveApproved hashes attached script
+	// contents, so the attach boundary (attachOutsideRoot) must match what
+	// PreToolUse used — otherwise open-mode approvals for outside-root
+	// scripts never stick.
 	config := LoadConfig()
+
+	// One gate for every reason yolonot stands down: env var, host
+	// bypassPermissions, `pause --global`, or this session's pause marker.
+	// Total bypass in all four cases. Returning here also gates the
+	// PostToolUse branch below, so a bypassed session never accumulates
+	// "pre-approved" commands yolonot did not actually vet.
+	if reason := bypassReason(config, payload); reason != "" {
+		Verbosef("bypass: %s — deferring to host permissions", reason)
+		return
+	}
 	quietOnAllow = config.QuietOnAllow
 	attachOutsideRoot = config.AttachOutsideRoot
 	// Register user-defined wrappers (Config.Wrappers) with fast_allow so
