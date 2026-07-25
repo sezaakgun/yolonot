@@ -58,6 +58,13 @@ type Config struct {
 	// Escalation is the optional bigger-model second opinion. Pointer so an
 	// absent block stays absent through Save (old configs byte-identical).
 	Escalation *EscalationConfig `json:"escalation,omitempty"`
+
+	// Disabled is the global kill switch: `yolonot pause --global`. When
+	// true, every hook invocation in every session steps aside and the host
+	// CLI's own permission engine handles the call. Cleared by
+	// `yolonot resume --global`. No expiry — off until explicitly
+	// re-enabled. omitempty keeps untouched configs byte-identical.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // ClassifierConfig holds the classifier backend choice plus prose tuning that

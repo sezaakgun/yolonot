@@ -26,6 +26,34 @@ func isPaused(sessionID string) bool {
 	return err == nil
 }
 
+// bypassReason reports why yolonot is standing down for this invocation:
+//
+//	"env"                — YOLONOT_DISABLED=1, the pre-launch escape hatch
+//	"bypass-permissions" — the host is already skipping its own permission engine
+//	"global"             — `yolonot pause --global` (Config.Disabled)
+//	"session"            — `yolonot pause` marker for this session
+//
+// Empty means yolonot is active. Ordered most explicit first: the env var
+// has to win even when config.json is unreadable, and the narrowest scope
+// (a single session) is checked last. A zero Config — what LoadConfig
+// returns for a missing or corrupt file — yields no bypass, so a broken
+// config fails safe rather than silently disabling the safety layer.
+func bypassReason(cfg Config, payload HookPayload) string {
+	if os.Getenv("YOLONOT_DISABLED") == "1" {
+		return "env"
+	}
+	if payload.PermissionMode == "bypassPermissions" {
+		return "bypass-permissions"
+	}
+	if cfg.Disabled {
+		return "global"
+	}
+	if isPaused(payload.SessionID) {
+		return "session"
+	}
+	return ""
+}
+
 // resolveSessionID resolves the session ID from args (--session-id flag),
 // --current flag (most recent session), then the active harness's session
 // env var (CLAUDE_SESSION_ID, CODEX_SESSION_ID, ...). Returns empty if none
