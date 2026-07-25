@@ -1,6 +1,7 @@
 package yolonot
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,5 +91,145 @@ func TestConfigOmitsDisabledWhenFalse(t *testing.T) {
 	}
 	if strings.Contains(string(data), "disabled") {
 		t.Errorf("a default config must not serialize a disabled key, got:\n%s", data)
+	}
+}
+
+// readDecisionLayers returns the (layer, decision) pairs recorded in
+// decisions.jsonl, so tests can assert on the audit trail.
+func readDecisionLayers(t *testing.T, home string) [][2]string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, ".yolonot", "decisions.jsonl"))
+	if err != nil {
+		return nil
+	}
+	var out [][2]string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var e DecisionEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("bad decision line %q: %v", line, err)
+		}
+		out = append(out, [2]string{e.Layer, e.Decision})
+	}
+	return out
+}
+
+func TestGlobalPauseRequiresConfirmBypass(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	out := captureStdout(func() { cmdPause([]string{"--global"}) })
+
+	if LoadConfig().Disabled {
+		t.Error("pause --global without --confirm-bypass must not disable yolonot")
+	}
+	if !strings.Contains(out, "--confirm-bypass") {
+		t.Errorf("guidance should name the opt-in flag, got:\n%s", out)
+	}
+	if len(readDecisionLayers(t, home)) != 0 {
+		t.Error("a refused pause must not write an audit entry")
+	}
+}
+
+func TestGlobalPauseSetsFlagAndLogs(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	captureStdout(func() { cmdPause([]string{"--global", "--confirm-bypass"}) })
+
+	if !LoadConfig().Disabled {
+		t.Fatal("pause --global --confirm-bypass should set Disabled")
+	}
+	got := readDecisionLayers(t, home)
+	if len(got) != 1 || got[0] != [2]string{"pause", "bypass_enabled"} {
+		t.Errorf("expected one pause/bypass_enabled entry, got %v", got)
+	}
+}
+
+func TestGlobalPauseIsIdempotent(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	captureStdout(func() { cmdPause([]string{"--global", "--confirm-bypass"}) })
+	out := captureStdout(func() { cmdPause([]string{"--global", "--confirm-bypass"}) })
+
+	if !LoadConfig().Disabled {
+		t.Error("second pause --global must leave yolonot disabled")
+	}
+	if got := readDecisionLayers(t, home); len(got) != 1 {
+		t.Errorf("a redundant pause must not add an audit entry, got %v", got)
+	}
+	if !strings.Contains(out, "already") {
+		t.Errorf("second call should say it is already disabled, got:\n%s", out)
+	}
+}
+
+func TestGlobalResumeClearsFlagAndLogs(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	captureStdout(func() { cmdPause([]string{"--global", "--confirm-bypass"}) })
+	captureStdout(func() { cmdResume([]string{"--global"}) })
+
+	if LoadConfig().Disabled {
+		t.Fatal("resume --global should clear Disabled")
+	}
+	got := readDecisionLayers(t, home)
+	if len(got) != 2 || got[1] != [2]string{"pause", "bypass_disabled"} {
+		t.Errorf("expected a trailing pause/bypass_disabled entry, got %v", got)
+	}
+}
+
+func TestGlobalResumeWhenNotDisabled(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	out := captureStdout(func() { cmdResume([]string{"--global"}) })
+
+	if !strings.Contains(out, "not globally disabled") {
+		t.Errorf("expected a not-disabled message, got:\n%s", out)
+	}
+	if len(readDecisionLayers(t, home)) != 0 {
+		t.Error("a no-op resume must not write an audit entry")
+	}
+}
+
+func TestSessionResumeHintsAtGlobalPause(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	sid := "int-hint-session"
+	os.WriteFile(filepath.Join(home, ".yolonot", "sessions", sid+".paused"), []byte{}, 0644)
+	captureStdout(func() { cmdPause([]string{"--global", "--confirm-bypass"}) })
+
+	out := captureStdout(func() { cmdResume([]string{"--session-id", sid}) })
+
+	if !strings.Contains(out, "resume --global") {
+		t.Errorf("a session resume under a global pause must point at resume --global, got:\n%s", out)
+	}
+	if isPaused(sid) {
+		t.Error("the session marker should still have been removed")
+	}
+}
+
+func TestGlobalFlagIgnoresSessionFlags(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	sid := "int-global-with-session"
+	out := captureStdout(func() {
+		cmdPause([]string{"--global", "--session-id", sid, "--confirm-bypass"})
+	})
+
+	if !LoadConfig().Disabled {
+		t.Error("--global should win and disable globally")
+	}
+	if isPaused(sid) {
+		t.Error("--global must not also write a session marker")
+	}
+	if !strings.Contains(out, "ignored") {
+		t.Errorf("should note that the session flag was ignored, got:\n%s", out)
 	}
 }

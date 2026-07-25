@@ -98,7 +98,109 @@ func hasConfirmBypass(args []string) bool {
 	return os.Getenv("YOLONOT_CONFIRM_BYPASS") == "1"
 }
 
+// hasGlobalFlag reports whether --global was passed. The flag switches
+// pause/resume from one session to the persistent, machine-wide switch.
+func hasGlobalFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--global" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSessionFlag reports whether a session-targeting flag was passed, so
+// `pause --global --current` can say the session flag was ignored rather
+// than silently doing something other than what was typed.
+func hasSessionFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--current" || a == "--session-id" || strings.HasPrefix(a, "--session-id=") {
+			return true
+		}
+	}
+	return false
+}
+
+// cmdPauseGlobal sets the persistent global kill switch. Unlike the session
+// marker this never expires — it is off until `yolonot resume --global`.
+func cmdPauseGlobal(args []string) {
+	if hasSessionFlag(args) {
+		fmt.Println("Note: --global is machine-wide; the session flag was ignored.")
+	}
+
+	if !hasConfirmBypass(args) {
+		fmt.Println("yolonot: --global disables the safety layer for EVERY session, current and future.")
+		fmt.Println("  Prefer: yolonot approve '<exact command>' — unblocks one command only.")
+		fmt.Println("  This session only: yolonot pause --current --confirm-bypass")
+		fmt.Println("  If you really want to disable yolonot everywhere:")
+		fmt.Println("    yolonot pause --global --confirm-bypass")
+		return
+	}
+
+	cfg := LoadConfig()
+	if cfg.Disabled {
+		fmt.Println("yolonot is already globally disabled.")
+		fmt.Println("Run 'yolonot resume --global' to re-enable.")
+		return
+	}
+
+	cfg.Disabled = true
+	SaveConfig(cfg)
+
+	// SaveConfig reports failure only through Verbosef, so confirm the flag
+	// actually reached disk before claiming it in the audit log.
+	if !LoadConfig().Disabled {
+		fmt.Fprintln(os.Stderr, "Error: could not write config — yolonot is still active.")
+		fmt.Fprintln(os.Stderr, "Re-run with -v to see the underlying write error.")
+		return
+	}
+
+	// Log the switch so an audit can spot the safety layer going off, and
+	// pair it with the resume entry to measure how long it stayed off.
+	LogDecision(DecisionEntry{
+		SessionID: resolveSessionID(args), Command: "yolonot pause --global", Cwd: ".",
+		Layer: "pause", Decision: "bypass_enabled",
+		Reasoning: "global pause via --confirm-bypass",
+	})
+
+	fmt.Println("yolonot globally disabled — every session, current and future.")
+	fmt.Println("All commands bypass yolonot (no rules, no LLM, no session memory).")
+	fmt.Println("Run 'yolonot resume --global' to re-enable.")
+}
+
+// cmdResumeGlobal clears the global kill switch. Session pause markers are
+// deliberately left alone — the two scopes are independent.
+func cmdResumeGlobal() {
+	cfg := LoadConfig()
+	if !cfg.Disabled {
+		fmt.Println("yolonot is not globally disabled.")
+		return
+	}
+
+	cfg.Disabled = false
+	SaveConfig(cfg)
+
+	if LoadConfig().Disabled {
+		fmt.Fprintln(os.Stderr, "Error: could not write config — yolonot is still globally disabled.")
+		fmt.Fprintln(os.Stderr, "Re-run with -v to see the underlying write error.")
+		return
+	}
+
+	LogDecision(DecisionEntry{
+		Command: "yolonot resume --global", Cwd: ".",
+		Layer: "pause", Decision: "bypass_disabled",
+		Reasoning: "global pause cleared",
+	})
+
+	fmt.Println("yolonot re-enabled globally.")
+}
+
 func cmdPause(args []string) {
+	if hasGlobalFlag(args) {
+		cmdPauseGlobal(args)
+		return
+	}
+
 	sid := resolveSessionID(args)
 	if sid == "" {
 		printSessionIDError("pause")
@@ -138,6 +240,11 @@ func cmdPause(args []string) {
 }
 
 func cmdResume(args []string) {
+	if hasGlobalFlag(args) {
+		cmdResumeGlobal()
+		return
+	}
+
 	sid := resolveSessionID(args)
 	if sid == "" {
 		printSessionIDError("resume")
@@ -160,4 +267,10 @@ func cmdResume(args []string) {
 	}
 
 	fmt.Printf("yolonot resumed for session %s\n", sid)
+
+	// Without this the user resumes, sees nothing change, and concludes
+	// yolonot is broken — the global switch is still holding it off.
+	if LoadConfig().Disabled {
+		fmt.Println("Note: yolonot is still globally disabled — run: yolonot resume --global")
+	}
 }
