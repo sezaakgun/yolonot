@@ -105,7 +105,9 @@ Run this when you're ready:
 
     yolonot pause --global --confirm-bypass
 
-What it does: disables yolonot for EVERY session, now and in the future, until you run `yolonot resume --global`. No rules, no LLM, no session memory anywhere. Your host CLI's own permissions handle everything.
+What it does: disables yolonot for EVERY session, now and in the future, until you run `yolonot resume --global`. No rules, no LLM, no session memory anywhere.
+
+This does NOT approve commands. yolonot stops voting, so your host CLI's own permission prompts decide everything — in Claude Code's default mode you will still be asked about risky commands. It removes yolonot's judgment, not your host's.
 ```
 
 Only print this when the user explicitly asks to disable yolonot globally / everywhere / for all sessions. If they only mean the current session, print the `yolonot pause --current --confirm-bypass` form instead. Never print either to work around a deny or ask.

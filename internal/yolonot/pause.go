@@ -164,7 +164,9 @@ func cmdPauseGlobal(args []string) {
 	})
 
 	fmt.Println("yolonot globally disabled — every session, current and future.")
-	fmt.Println("All commands bypass yolonot (no rules, no LLM, no session memory).")
+	fmt.Println("No rules, no LLM, no session memory. This is NOT an allow-all:")
+	fmt.Println("yolonot stops voting, so your host CLI's own permission prompts")
+	fmt.Println("decide every command, exactly as if yolonot were not installed.")
 	fmt.Println("Run 'yolonot resume --global' to re-enable.")
 }
 

@@ -16,7 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool call without a restart. No expiry, unlike the 24h session pause marker.
   While off, yolonot is completely transparent (no rules, no LLM, no session
   memory, no banners) and the host CLI's own permission engine handles every
-  command — the same contract as session pause. The state is surfaced in
+  command — the same contract as session pause. **This is not an allow-all:**
+  yolonot returns without emitting a `permissionDecision`, so the host treats
+  it as "no opinion" and applies its own rules — in Claude Code's default mode
+  you are still prompted for risky commands. `PostToolUse` is gated by the same
+  bypass, so a paused session records no session approvals. The state is surfaced in
   `yolonot`, `yolonot status`, and `yolonot check`, and both endpoints are
   recorded in `yolonot log` (`layer:"pause"`, `bypass_enabled` /
   `bypass_disabled`) so the off-window is auditable. Global and per-session

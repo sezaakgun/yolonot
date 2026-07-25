@@ -69,7 +69,11 @@ Sometimes you want to run commands without yolonot's interference — for a quic
 
 **Pre-launch (env var)** — `YOLONOT_DISABLED=1 claude`. Disables yolonot for the entire session at launch. Useful for CI / automation.
 
-When paused, yolonot is **completely transparent** — no deny rules, no LLM, no session memory. The host CLI's native permissions handle everything as if yolonot weren't installed.
+When paused — by any of the three mechanisms above — yolonot is **completely transparent**: no deny rules, no LLM, no session memory. The host CLI's native permissions handle everything as if yolonot weren't installed.
+
+**Pausing is not the same as allowing.** yolonot does not approve the command; it declines to answer. The hook returns without emitting a `permissionDecision`, and the host CLI treats a decisionless hook as "no opinion" and applies its own permission rules. In Claude Code's default mode that means you still get prompted for risky commands — you have removed yolonot's judgment, not your host's. (Compare a yolonot `allow` verdict, which actively suppresses the host's prompt.)
+
+`PostToolUse` is gated by the same bypass, so a paused session records no session approvals — resuming never surfaces a backlog of "pre-approved" commands yolonot never vetted.
 
 ## Dry-run check
 

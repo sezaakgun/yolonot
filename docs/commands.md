@@ -63,7 +63,17 @@ yolonot resume --global                   # back on
 
 This writes `"disabled": true` to `~/.yolonot/config.json`. The hook reads the config on every invocation, so already-running sessions go quiet at their next tool call — no restart. There is no expiry: it stays off until `resume --global`.
 
-While globally disabled, yolonot is completely transparent — no rules, no LLM, no session memory, no banners — and your host CLI's own permission engine handles every command. The state is shown in `yolonot`, `yolonot status`, and `yolonot check`, and both the pause and the resume are recorded in `yolonot log`.
+**This is not an allow-all.** A global pause does not approve anything — it stops yolonot from voting at all. The hook returns without emitting a decision, so your host CLI falls back to its own permission engine and decides every command exactly as it would if yolonot had never been installed:
+
+| your host CLI's mode | what happens while yolonot is globally paused |
+|---|---|
+| Claude Code, default | Claude Code still prompts you for risky commands — its own rules, not yolonot's |
+| Claude Code, `acceptEdits` | edits auto-accept; Bash is still gated by Claude Code |
+| `--dangerously-skip-permissions` | everything runs — but that was already true, yolonot self-disables in that mode anyway |
+
+The difference matters: a yolonot `allow` verdict actively *suppresses* your host's prompt. A global pause is the opposite — it removes yolonot from the chain and gives the decision back to the host.
+
+While globally disabled yolonot is completely transparent — no rules, no LLM, no session memory, no banners. `PostToolUse` is gated too, so commands you run while paused are not recorded as session approvals; resuming never reveals a pile of "pre-approved" commands yolonot did not actually vet. The state is shown in `yolonot`, `yolonot status`, and `yolonot check`, and both the pause and the resume are recorded in `yolonot log`.
 
 `--global` and the per-session pause are independent: `resume --global` does not clear a session marker you set separately.
 
