@@ -65,6 +65,8 @@ Sometimes you want to run commands without yolonot's interference — for a quic
 
 **Per-session (interactive)** — `yolonot pause` or `/yolonot pause`. Creates a pause marker for the current session. Run `yolonot resume` to re-enable. Marker auto-cleans after 24h.
 
+**Global (persistent)** — `yolonot pause --global --confirm-bypass`. Sets `"disabled": true` in `~/.yolonot/config.json`, which disables yolonot for every session, current and future. The hook re-reads config on every invocation, so running sessions go quiet at their next tool call. No expiry — `yolonot resume --global` turns it back on.
+
 **Pre-launch (env var)** — `YOLONOT_DISABLED=1 claude`. Disables yolonot for the entire session at launch. Useful for CI / automation.
 
 When paused, yolonot is **completely transparent** — no deny rules, no LLM, no session memory. The host CLI's native permissions handle everything as if yolonot weren't installed.

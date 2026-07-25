@@ -18,8 +18,8 @@ yolonot classifier   Inspect/validate the LLM prompt customization (defaults|con
 yolonot pre-check    Manage pre-checkers (fast-allow + external hooks)
 yolonot escalation   Second-opinion model consulted before surfacing an ask
 yolonot quiet        Silence banners for allow decisions (only show ask/deny)
-yolonot pause        Disable yolonot for current session (total bypass)
-yolonot resume       Re-enable yolonot for current session
+yolonot pause        Disable yolonot for current session (--global: every session)
+yolonot resume       Re-enable yolonot for current session (--global: every session)
 yolonot uninstall    Remove hooks from the active harness(es)
 yolonot upgrade      Update to latest release
 yolonot version      Show version
@@ -51,6 +51,21 @@ yolonot quiet off      # restore default
 ```
 
 Quiet mode only affects the user-facing `systemMessage`. The underlying `permissionDecision` + `permissionDecisionReason` still flow to the host CLI, and the decision log (`yolonot log`) is unchanged.
+
+### Global pause
+
+`yolonot pause` covers one session and its marker is reaped after 24 hours. To turn yolonot off everywhere — current sessions and future ones — until you say otherwise:
+
+```bash
+yolonot pause --global --confirm-bypass   # off everywhere
+yolonot resume --global                   # back on
+```
+
+This writes `"disabled": true` to `~/.yolonot/config.json`. The hook reads the config on every invocation, so already-running sessions go quiet at their next tool call — no restart. There is no expiry: it stays off until `resume --global`.
+
+While globally disabled, yolonot is completely transparent — no rules, no LLM, no session memory, no banners — and your host CLI's own permission engine handles every command. The state is shown in `yolonot`, `yolonot status`, and `yolonot check`, and both the pause and the resume are recorded in `yolonot log`.
+
+`--global` and the per-session pause are independent: `resume --global` does not clear a session marker you set separately.
 
 ### Classifier customization
 
@@ -84,4 +99,6 @@ After install, `/yolonot` is available as a Claude Code skill:
 /yolonot risk        Show/set per-harness risk tier → action policy
 /yolonot pause       Disable yolonot for current session
 /yolonot resume      Re-enable yolonot for current session
+/yolonot pause --global    Disable yolonot for every session
+/yolonot resume --global   Re-enable yolonot for every session
 ```

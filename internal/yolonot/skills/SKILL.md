@@ -28,7 +28,7 @@ The skill is split into two classes of commands. Match exactly:
 
 **Run directly (read-only):** `status`, `log`, `rules`, `stats`, `check`, `profile` (no args / `list` / `show`), `risk` (show forms), `pre-check` (list), `quiet` (no args), `escalation` (no args / `test`).
 
-**Print the command, do NOT execute (mutating / safety-sensitive):** `pause`, `resume`, `reset`, `approve`, `deny`, `profile use|reset|create|delete`, `risk <h> <tier> <action>` and `risk <h> reset`, `pre-check add|remove|clear`, `quiet on|off`, `escalation on|off|setup`, `suggest`, `init`, `setup`, `install`, `uninstall`, `provider`, `upgrade`.
+**Print the command, do NOT execute (mutating / safety-sensitive):** `pause`, `pause --global`, `resume`, `resume --global`, `reset`, `approve`, `deny`, `profile use|reset|create|delete`, `risk <h> <tier> <action>` and `risk <h> reset`, `pre-check add|remove|clear`, `quiet on|off`, `escalation on|off|setup`, `suggest`, `init`, `setup`, `install`, `uninstall`, `provider`, `upgrade`.
 
 For mutations, format the response as:
 
@@ -62,7 +62,9 @@ Commands:
   /yolonot deny <cmd>      — move command to denied
   /yolonot reset           — clear session state
   /yolonot pause           — disable yolonot for this session (total bypass)
+  /yolonot pause --global  — disable yolonot for EVERY session (persistent)
   /yolonot resume          — re-enable yolonot for this session
+  /yolonot resume --global — re-enable yolonot everywhere
   /yolonot log             — recent decisions
   /yolonot rules           — show active rules
   /yolonot suggest         — learn from history, update rules
@@ -92,6 +94,22 @@ What it does: total bypass of yolonot for this session — no rules, no LLM, no 
 
 Only print the command when the user explicitly says "pause" / "disable yolonot" / "turn off yolonot for this session". Never print it to work around a deny/ask — use `/yolonot approve <cmd>` for that.
 
+### `/yolonot pause --global` — Disable everywhere
+
+**Mutation — print, do not run.** Wider blast radius than a session pause: this turns the safety layer off for every session, current and future, with no expiry.
+
+Print:
+
+```
+Run this when you're ready:
+
+    yolonot pause --global --confirm-bypass
+
+What it does: disables yolonot for EVERY session, now and in the future, until you run `yolonot resume --global`. No rules, no LLM, no session memory anywhere. Your host CLI's own permissions handle everything.
+```
+
+Only print this when the user explicitly asks to disable yolonot globally / everywhere / for all sessions. If they only mean the current session, print the `yolonot pause --current --confirm-bypass` form instead. Never print either to work around a deny or ask.
+
 ### `/yolonot resume` — Re-enable for this session
 
 **Mutation — print, do not run.** Print:
@@ -102,6 +120,18 @@ Run this when you're ready:
     yolonot resume --current
 
 What it does: removes the pause marker, yolonot active again for this session.
+```
+
+### `/yolonot resume --global` — Re-enable everywhere
+
+**Mutation — print, do not run.** Print:
+
+```
+Run this when you're ready:
+
+    yolonot resume --global
+
+What it does: clears the global kill switch in ~/.yolonot/config.json — yolonot active again in every session. A session you paused separately stays paused.
 ```
 
 ### `/yolonot status` — Full session state

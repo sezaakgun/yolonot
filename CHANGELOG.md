@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Global pause.** `yolonot pause --global --confirm-bypass` disables yolonot
+  for **every** session — current and future — until `yolonot resume --global`.
+  Backed by a new top-level `disabled` field in `~/.yolonot/config.json`, read
+  on every hook invocation, so already-running sessions go quiet at their next
+  tool call without a restart. No expiry, unlike the 24h session pause marker.
+  While off, yolonot is completely transparent (no rules, no LLM, no session
+  memory, no banners) and the host CLI's own permission engine handles every
+  command — the same contract as session pause. The state is surfaced in
+  `yolonot`, `yolonot status`, and `yolonot check`, and both endpoints are
+  recorded in `yolonot log` (`layer:"pause"`, `bypass_enabled` /
+  `bypass_disabled`) so the off-window is auditable. Global and per-session
+  pause are independent. Internally the env var, host `bypassPermissions`,
+  the global switch, and the session marker now resolve through one
+  `bypassReason` gate; the session check picked up `IsValidSessionID`
+  validation in the process. Absent from existing configs and default false,
+  so nothing changes on upgrade. See docs/how-it-works.md.
+
 ## [0.23.0] — 2026-07-22
 
 ### Added
