@@ -14,6 +14,20 @@ import (
 func cmdCheck(command string) {
 	fmt.Printf("Command: %s\n\n", command)
 
+	// A dry-run has no session and no host permission mode, so only the env
+	// var and the global switch can apply here. The trailing note is
+	// deferred: cmdCheck returns from 13 different places, and a deferred
+	// print covers every one of them — including any added later.
+	if reason := bypassReason(LoadConfig(), HookPayload{}); reason != "" {
+		label := "globally disabled"
+		if reason == "env" {
+			label = "disabled via YOLONOT_DISABLED=1"
+		}
+		fmt.Printf("  ⚠ yolonot is %s — at runtime this command passes through\n", label)
+		fmt.Printf("    to the host CLI regardless of the verdict below.\n\n")
+		defer fmt.Printf("\n  ⚠ NOT APPLIED — yolonot is bypassed (%s); the host CLI decides.\n", reason)
+	}
+
 	rules := LoadRules()
 	sensitive := LoadSensitivePatterns()
 

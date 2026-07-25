@@ -1143,6 +1143,13 @@ func cmdRulesTrace() {
 }
 
 func cmdStatus() {
+	// Printed before the no-session early return below: a user with no
+	// session files still needs to know the layer is off.
+	if LoadConfig().Disabled {
+		fmt.Println("⚠ GLOBALLY DISABLED — all sessions (run: yolonot resume --global)")
+		fmt.Println()
+	}
+
 	sessionID := GetSessionIDFromEnv()
 	if sessionID == "" {
 		sessionID = FindSessionID()

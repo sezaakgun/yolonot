@@ -233,3 +233,71 @@ func TestGlobalFlagIgnoresSessionFlags(t *testing.T) {
 		t.Errorf("should note that the session flag was ignored, got:\n%s", out)
 	}
 }
+
+func TestDefaultOutputWarnsWhenGloballyDisabled(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Setenv("YOLONOT_DISABLED", "")
+
+	SaveConfig(Config{Disabled: true})
+	out := captureStdout(cmdDefault)
+	if !strings.Contains(out, "GLOBALLY DISABLED") {
+		t.Errorf("cmdDefault should warn when globally disabled, got:\n%s", out)
+	}
+
+	SaveConfig(Config{Disabled: false})
+	out = captureStdout(cmdDefault)
+	if strings.Contains(out, "GLOBALLY DISABLED") {
+		t.Errorf("cmdDefault must not warn when enabled, got:\n%s", out)
+	}
+}
+
+func TestStatusWarnsWhenGloballyDisabledWithNoSession(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Setenv("YOLONOT_DISABLED", "")
+	t.Setenv("CLAUDE_SESSION_ID", "")
+
+	SaveConfig(Config{Disabled: true})
+
+	// No session files exist, so cmdStatus takes its early return — the
+	// warning has to print above it or it is invisible exactly when the
+	// user is most likely to be confused.
+	out := captureStdout(cmdStatus)
+	if !strings.Contains(out, "GLOBALLY DISABLED") {
+		t.Errorf("cmdStatus should warn even with no session, got:\n%s", out)
+	}
+}
+
+func TestCheckNotesGlobalPauseOnEarlyReturn(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Setenv("YOLONOT_DISABLED", "")
+
+	// A deny rule makes cmdCheck return at its very first exit point.
+	writeGlobalRules(t, home, "deny-cmd *\n")
+	SaveConfig(Config{Disabled: true})
+
+	out := captureStdout(func() { cmdCheck("rm -rf /") })
+
+	if !strings.Contains(out, "globally disabled") {
+		t.Errorf("check should lead with the bypass notice, got:\n%s", out)
+	}
+	if !strings.Contains(out, "NOT APPLIED") {
+		t.Errorf("check should trail with NOT APPLIED even on an early return, got:\n%s", out)
+	}
+}
+
+func TestCheckSilentWhenEnabled(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Setenv("YOLONOT_DISABLED", "")
+
+	writeGlobalRules(t, home, "deny-cmd *\n")
+	SaveConfig(Config{Disabled: false})
+
+	out := captureStdout(func() { cmdCheck("rm -rf /") })
+	if strings.Contains(out, "NOT APPLIED") {
+		t.Errorf("check must not claim a bypass when yolonot is active, got:\n%s", out)
+	}
+}

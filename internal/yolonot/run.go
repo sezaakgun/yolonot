@@ -153,6 +153,14 @@ func cmdDefault() {
 	fmt.Println("yolonot — smart auto-mode for Claude Code")
 	fmt.Println()
 
+	// Above the not-installed early return: the global switch is a
+	// persistent config state, so it outlives an uninstall and needs to be
+	// visible when the user comes back and wonders why nothing is gated.
+	if config.Disabled {
+		fmt.Println("  ⚠ GLOBALLY DISABLED — all sessions (run: yolonot resume --global)")
+		fmt.Println()
+	}
+
 	if !installed {
 		fmt.Println("  Status: not installed")
 		fmt.Println()
@@ -236,8 +244,8 @@ func cmdDefault() {
 	fmt.Println("  classifier  Inspect/review LLM classifier prompt customization")
 	fmt.Println("  escalation  Second-opinion model consulted before surfacing an ask")
 	fmt.Println("  quiet       Silence banners for allow decisions (only show ask/deny)")
-	fmt.Println("  pause       Disable yolonot for current session (total bypass)")
-	fmt.Println("  resume      Re-enable yolonot for current session")
+	fmt.Println("  pause       Disable yolonot for current session (--global: all sessions)")
+	fmt.Println("  resume      Re-enable yolonot for current session (--global: all sessions)")
 	fmt.Println("  uninstall   Remove hooks from Claude Code")
 	fmt.Println("  upgrade     Update to latest version")
 	fmt.Println("  version     Show version")
