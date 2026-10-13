@@ -1,7 +1,6 @@
 package yolonot
 
 import (
-	"os"
 	"testing"
 )
 
@@ -155,28 +154,6 @@ func TestResolveRiskMap_EnvOverridesConfig(t *testing.T) {
 	m := ResolveRiskMap(&ClaudeHarness{})
 	if m[RiskModerate] != ActionAllow {
 		t.Errorf("env should win: got %q, want %q", m[RiskModerate], ActionAllow)
-	}
-}
-
-func TestActiveClassifier_HonoursEnvOverride(t *testing.T) {
-	// LLM classifier is registered via llm.go's init(). An unknown env
-	// value must fall back rather than returning nil.
-	orig := os.Getenv("YOLONOT_CLASSIFIER")
-	defer os.Setenv("YOLONOT_CLASSIFIER", orig)
-
-	os.Setenv("YOLONOT_CLASSIFIER", "does-not-exist")
-	c := ActiveClassifier()
-	if c == nil {
-		t.Fatal("unknown classifier name should fall back to default, got nil")
-	}
-	if c.Name() != "llm" {
-		t.Errorf("fallback classifier = %q, want llm", c.Name())
-	}
-}
-
-func TestClassifierRegistry_RegistersLLM(t *testing.T) {
-	if c := GetClassifier("llm"); c == nil {
-		t.Fatal("LLMClassifier must be registered at init")
 	}
 }
 

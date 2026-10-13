@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 1.0.0 — the config contract
+
+Config v1. One shape, stable from here: a model catalog, a judge chain that
+names models, one prompt block, one policy block. 0.x files keep working:
+they are read in memory and never rewritten until you run `yolonot migrate`
+(interactive commands offer it once; writing commands ask first). The 0.x
+reader stays through 1.x and goes away in 2.0. Full table in
+[docs/upgrading.md](docs/upgrading.md).
+
+### Added
+- **Model catalog.** `models` in config.json: named entries (`url`,
+  `model`, `env_key`, `timeout`), chat or typed by URL. `yolonot models
+  [add [typed]|remove|test]`. The name is what banners and
+  `decisions.jsonl` show: `🧑‍🚀 gemini -> npm test`, `jev+esc`.
+- **Judge chain.** `judges` is an ordered list of `fast_allow`,
+  `exec:<path>` and model names; the first permitted verdict wins. Object
+  form `{"use": "jev", "may": ["allow"]}` narrows a judge. `yolonot judges
+  [add|remove|move]`. Escalation is not a judge: it runs once after the
+  chain on a verdict that would surface an ask, then the unresolved
+  policy, then the risk map.
+- **Typed decision models.** TypeSafe Jev (`jev-latest`,
+  `TYPESAFE_API_KEY`), OpenRouter System One (`typesafe/jev-1.13`,
+  `microsoft/microsoft-decision-1`, `OPENROUTER_API_KEY`), the OpenAI
+  Decisions API (`gpt-6-luna`, `OPENAI_API_KEY`, questions translated to
+  its schema; a refusal folds to ask) or any custom System One URL. One
+  request per command: a risk-tier choice plus nine yes/no conditions,
+  folded into the same verdict JSON the chat prompt produces. `context`,
+  `allow_hints` and `ask_hints` ride along as state sections and the ninth
+  condition fires when an ask hint matches; `system_prompt` stays
+  chat-only. Cloudflare
+  Workers AI preset for Clef / Clef-flash (`CLOUDFLARE_API_TOKEN`, account
+  id in the URL, Workers AI envelope unwrapped); any local System One server
+  (Kev, Clef via SGLang) works as a Custom entry. Eval:
+  `--model <catalog name>`, `jev-latest`, `systemone/<id>`,
+  `decisions/<id>`. Jev on the greenfield suite: 92.0% accuracy, 100%
+  dangerous catch, 0 errors, ~300ms p50 (gemini-2.5-flash-lite 88.1%,
+  deepseek-v4-flash 80.1%).
+- **`yolonot config` settings screen.** One page, four sections. JUDGES:
+  the chain as editable rows (move, remove, permitted decisions, add,
+  presets). MODELS: the catalog and exec hooks (test, replace, remove,
+  add), escalation, unresolved policy. POLICY: the active profile with its
+  five tiers (edit a tier; a built-in becomes a custom copy), create /
+  switch / delete profiles, per-harness profile pins and tier overrides,
+  script attachment outside the root, quiet, global and project rules.
+  PROMPT: context, allow and ask hints (one line each in `$EDITOR`,
+  `$defaults` kept), system prompt override. Every row shows its value and
+  a status hint; arrow keys and Esc navigate; save writes once with a
+  `.bak`. Bare `yolonot` in a terminal on an installed setup opens it;
+  piped stdin prints the text status.
+- **`yolonot migrate [--dry-run|--undo]`** and `yolonot prompt` (was
+  `classifier`).
+
+### Changed
+- `prompt.*` replaces `classifier.*` (`impl` and the unused classifier
+  registry are gone); `policy.{profile,profiles,harness}` replaces
+  `profile`, `custom_profiles`, `profile_override`, `risk_maps`.
+- Env overrides `LLM_MODEL`, `LLM_URL`, `LLM_TIMEOUT`, `LLM_ESCALATION_*`,
+  `DECISION_*` and `YOLONOT_CLASSIFIER` are removed; endpoints are config
+  only. `YOLONOT_*` switches are unchanged.
+- Log layer `llm` → the model name; `pre_check (name)` → `exec:name`.
+  `yolonot suggest` and `stats` read both.
+- `fast_allow` verdicts carry risk tier `safe` and pass through the risk
+  map like every other judge (no change under the built-in profiles).
+- `yolonot check` prints the judge chain, then the escalation step.
+- Provider picker model suggestions refreshed (Claude 5.5, GPT-6, Grok 4.7).
+- Setup: step 3 picks and names a chat model, 3b offers TypeSafe Jev as a
+  typed model, 4 writes the chain `fast_allow → typed → chat`.
+
+- `yolonot init` no longer seeds active rules. The old template allowed
+  `cat *`, `ls *` and friends globally, which let `cat ~/.ssh/id_rsa` through
+  before any judge; those commands are what `fast_allow` is for. Both rule
+  files now start as commented examples. Existing rule files are untouched.
+- Catalog names derived from OpenRouter ids drop the `:variant` routing tag
+  (`apodex-1.1-mini:free` → `apodex-1.1-mini`); ollama tags stay.
+
+### Removed
+- Verbs `provider`, `decision`, `pre-check`, `classifier`, `local-allow`,
+  `threshold` (each prints its replacement and exits 2). Log field
+  `returned_as` (never written).
+
+### Fixed
+- Concurrent hooks could glue two `decisions.jsonl` records onto one line
+  (record + newline were two writes); one atomic append now. `yolonot log`
+  shows multiline commands on one row (`⏎`) and honours `yolonot log <n>`.
+- `setup` and `models add` no longer print "Cancelled." twice; a cancelled
+  setup exits 1. Esc on the Custom endpoint's URL or model prompt cancels
+  instead of advancing to the next prompt. Arrow keys everywhere in
+  `yolonot config`: → opens or selects like ⏎, ← goes back like Esc; each
+  menu and prompt shows its keys.
+
 ## [0.23.0] — 2026-07-22
 
 ### Added

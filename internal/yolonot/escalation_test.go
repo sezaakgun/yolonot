@@ -510,8 +510,8 @@ func TestCmdEscalationOnOff(t *testing.T) {
 	if cfg.Escalation == nil || !cfg.Escalation.Disabled {
 		t.Fatalf("off should set Disabled, got %+v", cfg.Escalation)
 	}
-	if cfg.Escalation.Provider.Model != "big-model" {
-		t.Errorf("off must keep the provider config, got %+v", cfg.Escalation.Provider)
+	if cfg.Escalation.Model != "big-model" {
+		t.Errorf("off must keep the model reference, got %+v", cfg.Escalation)
 	}
 
 	captureStdout(func() { cmdEscalation([]string{"on"}) })
@@ -548,7 +548,7 @@ func TestCmdEscalationStatus(t *testing.T) {
 		Escalation: &EscalationConfig{Provider: ProviderConfig{URL: "http://localhost:1/v1", Model: "small-model"}},
 	})
 	out = captureStdout(func() { cmdEscalation(nil) })
-	if !strings.Contains(out, "SAME provider+model") {
+	if !strings.Contains(out, "SAME endpoint+model") {
 		t.Errorf("same-model config should warn, got %q", out)
 	}
 }
@@ -805,8 +805,8 @@ func TestCmdCheckEscalationParity(t *testing.T) {
 	if !strings.Contains(out, "rescued") {
 		t.Errorf("check should show the rescued outcome:\n%s", out)
 	}
-	if !strings.Contains(out, "Result: ALLOW") || !strings.Contains(out, "llm+esc") {
-		t.Errorf("check final verdict should be ALLOW via llm+esc:\n%s", out)
+	if !strings.Contains(out, "Result: ALLOW") || !strings.Contains(out, "small-model+esc") {
+		t.Errorf("check final verdict should be ALLOW via small-model+esc:\n%s", out)
 	}
 }
 

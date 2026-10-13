@@ -64,9 +64,9 @@ ask-hint    "Never modify files under infra/k8s/prod/ without confirmation"
 
 Hints stack across the walk-up chain (no first-match) and merge with the
 personal global config in `~/.yolonot/config.json`. See
-[docs/llm-customization.md](llm-customization.md) for the full schema,
+[docs/prompt.md](prompt.md) for the full schema,
 the `$defaults` sentinel, and the inspection commands
-(`yolonot classifier defaults | config | review`).
+(`yolonot prompt defaults | config | review`).
 
 ## `allow-redirect` — pre-approved write targets
 
@@ -79,7 +79,7 @@ allow-redirect ./build/**
 allow-redirect /var/log/myapp/*
 ```
 
-With `fast-allow` in the pre-check list + these rules:
+With `fast_allow` in the judge chain + these rules:
 
 | Command | Result |
 |---------|--------|

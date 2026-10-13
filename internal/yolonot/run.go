@@ -56,6 +56,12 @@ func Run() {
 	os.Args = append([]string{os.Args[0]}, stripGlobalFlags(os.Args[1:])...)
 
 	if len(os.Args) < 2 {
+		// Bare `yolonot` in a terminal on an installed setup opens the
+		// settings screen; scripts and fresh installs get the text status.
+		if IsInstalled() && stdinIsTerminal() {
+			cmdConfigTUI()
+			return
+		}
 		cmdDefault()
 		return
 	}
@@ -63,8 +69,15 @@ func Run() {
 	switch os.Args[1] {
 	case "setup":
 		cmdSetup()
-	case "provider":
-		cmdProvider()
+	case "models", "model":
+		cmdModels(os.Args[2:])
+	case "migrate":
+		cmdMigrate(os.Args[2:])
+	case "prompt":
+		cmdClassifier(os.Args[2:])
+	case "provider", "decision":
+		fmt.Fprintln(os.Stderr, "yolonot: `"+os.Args[1]+"` was replaced by the model catalog. Use: yolonot models add")
+		os.Exit(2)
 	case "rules":
 		cmdRules()
 	case "status":
@@ -72,10 +85,12 @@ func Run() {
 	case "log":
 		n := 20
 		if len(os.Args) > 2 {
-			if os.Args[2] == "-n" && len(os.Args) > 3 {
-				if v, err := strconv.Atoi(os.Args[3]); err == nil {
-					n = v
-				}
+			arg := os.Args[2]
+			if arg == "-n" && len(os.Args) > 3 {
+				arg = os.Args[3]
+			}
+			if v, err := strconv.Atoi(arg); err == nil && v > 0 {
+				n = v
 			}
 		}
 		cmdLog(n)
@@ -96,19 +111,25 @@ func Run() {
 		cmdRisk(os.Args[2:])
 	case "profile":
 		cmdProfile(os.Args[2:])
+	case "config", "settings":
+		cmdConfigTUI()
+	case "judges", "judge":
+		cmdJudges(os.Args[2:])
 	case "pre-check", "precheck":
-		cmdPreCheck(os.Args[2:])
+		fmt.Fprintln(os.Stderr, "yolonot: `pre-check` was replaced by the judge chain. Use: yolonot judges [add|remove|move]")
+		os.Exit(2)
 	case "classifier":
-		cmdClassifier(os.Args[2:])
+		fmt.Fprintln(os.Stderr, "yolonot: `classifier` was renamed. Use: yolonot prompt [defaults|config|review|verify]")
+		os.Exit(2)
 	case "escalation":
 		cmdEscalation(os.Args[2:])
 	case "quiet":
 		cmdQuiet(os.Args[2:])
 	case "local-allow", "localallow":
-		fmt.Fprintln(os.Stderr, "yolonot: `local-allow` was replaced by the unified pre-check list.")
-		fmt.Fprintln(os.Stderr, "  enable:  yolonot pre-check add fast-allow")
-		fmt.Fprintln(os.Stderr, "  disable: yolonot pre-check remove fast-allow")
-		fmt.Fprintln(os.Stderr, "  status:  yolonot pre-check")
+		fmt.Fprintln(os.Stderr, "yolonot: `local-allow` was replaced by the judge chain.")
+		fmt.Fprintln(os.Stderr, "  enable:  yolonot judges add fast_allow")
+		fmt.Fprintln(os.Stderr, "  disable: yolonot judges remove fast_allow")
+		fmt.Fprintln(os.Stderr, "  status:  yolonot judges")
 		os.Exit(2)
 	case "check":
 		if len(os.Args) < 3 {
@@ -147,54 +168,63 @@ func Run() {
 func cmdDefault() {
 	installed := IsInstalled()
 	config := LoadConfig()
-	model := envOr("LLM_MODEL", config.Provider.Model)
 
 	// Status overview
 	fmt.Println("yolonot — smart auto-mode for Claude Code")
 	fmt.Println()
 
+	offerMigration(config)
+	config = LoadConfig()
+
 	if !installed {
 		fmt.Println("  Status: not installed")
+		if config.Legacy {
+			fmt.Println("  Config:   v0 format (run: yolonot migrate)")
+		}
 		fmt.Println()
 		fmt.Println("  Get started:")
-		fmt.Println("    yolonot setup      First-run wizard (install + rules + provider)")
+		fmt.Println("    yolonot setup      First-run wizard (install + rules + models)")
 		fmt.Println()
 		return
 	}
 
-	provider := model
-	if provider == "" {
-		provider = "not configured"
-	}
-
 	fmt.Printf("  Status:   installed\n")
 	fmt.Printf("  Version:  %s\n", Version)
-	fmt.Printf("  Provider: %s\n", provider)
+	if config.Legacy {
+		fmt.Printf("  Config:   v0 format (run: yolonot migrate)\n")
+	}
+	if names := config.ModelNames(); len(names) > 0 {
+		parts := make([]string, 0, len(names))
+		for _, n := range names {
+			parts = append(parts, n+" ("+config.Models[n].Model+")")
+		}
+		fmt.Printf("  Models:   %s\n", strings.Join(parts, ", "))
+	} else {
+		fmt.Printf("  Models:   none (run: yolonot models add)\n")
+	}
+	if len(config.Judges) > 0 {
+		fmt.Printf("  Judges:   %s\n", judgeNames(config.Judges))
+	} else {
+		fmt.Printf("  Judges:   none — commands pass through to the host (run: yolonot judges add)\n")
+	}
 	if esc := GetEscalationConfig(); esc.URL != "" && esc.Model != "" {
 		switch escalationGateReason(config, esc) {
 		case "":
-			fmt.Printf("  Escalation: on — %s\n", esc.Model)
+			fmt.Printf("  Escalation: on — %s\n", config.Escalation.Model)
 		default:
-			fmt.Printf("  Escalation: off (configured: %s)\n", esc.Model)
+			fmt.Printf("  Escalation: off (configured: %s)\n", config.Escalation.Model)
 		}
 	}
 	fmt.Printf("  Data:     %s\n", YolonotDir())
 	{
-		profileName := config.Profile
+		profileName := config.Policy.Profile
 		if profileName == "" {
 			profileName = DefaultProfileName + " (default)"
 		}
-		if len(config.ProfileOverride) > 0 {
-			profileName += fmt.Sprintf(" (+%d harness override(s))", len(config.ProfileOverride))
+		if n := len(harnessProfilePins(config)); n > 0 {
+			profileName += fmt.Sprintf(" (+%d harness override(s))", n)
 		}
 		fmt.Printf("  Profile:  %s\n", profileName)
-	}
-	if n := len(config.PreCheck); n > 0 {
-		if n == 1 {
-			fmt.Printf("  PreCheck: %s\n", config.PreCheck[0])
-		} else {
-			fmt.Printf("  PreCheck: %d hooks (run: yolonot pre-check)\n", n)
-		}
 	}
 	printUpdateHint()
 
@@ -222,8 +252,10 @@ func cmdDefault() {
 
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  setup       First-run wizard (install + rules + provider)")
-	fmt.Println("  provider    Change LLM provider")
+	fmt.Println("  setup       First-run wizard (install + rules + models)")
+	fmt.Println("  config      Settings screen (judges, models, policy)")
+	fmt.Println("  models      Model catalog: list, add, remove, test")
+	fmt.Println("  judges      The judge chain: list, add, remove, move")
 	fmt.Println("  rules       Show active rules + sensitive patterns")
 	fmt.Println("  status      Show session state (approved/asked/denied)")
 	fmt.Println("  log         Show recent decisions")
@@ -232,12 +264,12 @@ func cmdDefault() {
 	fmt.Println("  suggest     Analyze history, suggest permanent rules")
 	fmt.Println("  profile     Pick a named risk policy (fast/balanced/strict/paranoid + custom)")
 	fmt.Println("  risk        Show/set per-harness risk tier → action policy")
-	fmt.Println("  pre-check   Manage pre-checkers (fast-allow + external hooks like dippy)")
-	fmt.Println("  classifier  Inspect/review LLM classifier prompt customization")
+	fmt.Println("  prompt      Inspect/review the chat-model prompt customization")
 	fmt.Println("  escalation  Second-opinion model consulted before surfacing an ask")
 	fmt.Println("  quiet       Silence banners for allow decisions (only show ask/deny)")
 	fmt.Println("  pause       Disable yolonot for current session (total bypass)")
 	fmt.Println("  resume      Re-enable yolonot for current session")
+	fmt.Println("  migrate     Rewrite a v0 config.json in the v1 format (--dry-run, --undo)")
 	fmt.Println("  uninstall   Remove hooks from Claude Code")
 	fmt.Println("  upgrade     Update to latest version")
 	fmt.Println("  version     Show version")
@@ -260,33 +292,60 @@ func cmdSetup() {
 	fmt.Println("  [2/4] Creating rule files...")
 	cmdInit()
 
-	// Step 3: Provider
+	// Step 3: chat model
 	fmt.Println()
-	fmt.Println("  [3/4] Configure LLM provider")
+	fmt.Println("  [3/4] Chat model")
 	fmt.Println()
-	cmdProvider()
-
-	// Step 4: Fast-allow pre-check — recommend on by default. Saves LLM
-	// calls on the bulk of safe read-only commands (ls, cat, git status, ...)
-	// without depending on any external tool. Lives in the pre-check list
-	// so users can reorder it alongside Dippy or other external hooks.
-	fmt.Println()
-	fmt.Println("  [4/4] Enabling built-in fast-allow for read-only commands...")
 	cfg := LoadConfig()
-	hasFastAllow := false
-	for _, p := range cfg.PreCheck {
-		if p == FastAllowSentinel {
-			hasFastAllow = true
-			break
+	if cfg.Legacy {
+		fmt.Println("      config.json is in the v0 format; setup writes v1.")
+		if !tuiConfirm("Migrate config.json to v1 now? A backup is kept at config.json.bak") {
+			fmt.Println("      Setup stopped. Run `yolonot migrate` first, then `yolonot setup` again.")
+			return
+		}
+		migrateConfig(cfg)
+		cfg = LoadConfig()
+	}
+	chat := cfg.ChatModelName()
+	if chat != "" {
+		fmt.Println("      Chat model: " + chat + " (" + cfg.Models[chat].Model + ")")
+	} else {
+		name, m, ok := pickModel(cfg, false)
+		if !ok {
+			fmt.Println("Setup stopped: no chat model chosen. Run `yolonot setup` again when ready.")
+			os.Exit(1)
+		}
+		cfg.putModel(name, m)
+		chat = name
+		SaveConfig(cfg)
+		fmt.Printf("\nModel %s set: %s via %s\n", name, m.Model, m.URL)
+		testProviderConnection(m)
+	}
+
+	// Step 3b: typed decision model, in front of the chat model.
+	fmt.Println()
+	typed := offerDecisionModel(&cfg)
+
+	// Step 4: the chain. fast_allow first (saves model calls on the bulk of
+	// read-only commands), then the typed model, then the chat model.
+	fmt.Println()
+	fmt.Println("  [4/4] Judge chain")
+	var judges JudgeList
+	for _, name := range []string{judgeFastAllow, typed, chat} {
+		if name == "" {
+			continue
+		}
+		if sp := (JudgeSpec{Use: name}); !hasJudgeUse(cfg.Judges, name) {
+			judges = append(judges, sp)
 		}
 	}
-	if !hasFastAllow {
-		cfg.PreCheck = append(PreCheckList{FastAllowSentinel}, cfg.PreCheck...)
-		SaveConfig(cfg)
-		fmt.Println("      fast-allow: ON (yolonot pre-check remove fast-allow to disable)")
+	if len(cfg.Judges) == 0 {
+		cfg.Judges = judges
 	} else {
-		fmt.Println("      fast-allow: already ON")
+		cfg.Judges = append(cfg.Judges, judges...)
 	}
+	SaveConfig(cfg)
+	fmt.Println("      judges: " + judgeNames(cfg.Judges))
 
 	fmt.Println()
 	fmt.Println("Setup complete. Restart Claude Code to activate.")
@@ -297,4 +356,46 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// offerDecisionModel asks whether to add a typed decision model. Returns
+// the catalog name to put in the chain ("" when declined or unavailable).
+func offerDecisionModel(cfg *Config) string {
+	for _, n := range cfg.ModelNames() {
+		if isDecisionURL(cfg.Models[n].URL) {
+			fmt.Println("  [3b] Typed model: " + n + " (" + cfg.Models[n].Model + ")")
+			return n
+		}
+	}
+	fmt.Println("  [3b] Typed decision model")
+	fmt.Println("       A typed decision model (TypeSafe Jev) answers in ~300ms and runs")
+	fmt.Println("       before the chat model, which then only sees what it could not decide.")
+	if os.Getenv("TYPESAFE_API_KEY") == "" {
+		fmt.Println("       (needs TYPESAFE_API_KEY; export it and run `yolonot models add typed` to enable)")
+		return ""
+	}
+	if !tuiConfirm("Use TypeSafe Jev as a typed decision model?") {
+		return ""
+	}
+	name := cfg.addModel(typesafeDecision)
+	SaveConfig(*cfg)
+	fmt.Println("       added model: " + name)
+	return name
+}
+
+func hasJudgeUse(specs []JudgeSpec, use string) bool {
+	for _, sp := range specs {
+		if sp.Use == use {
+			return true
+		}
+	}
+	return false
+}
+
+func judgeNames(specs []JudgeSpec) string {
+	names := make([]string, 0, len(specs))
+	for _, sp := range specs {
+		names = append(names, sp.Use)
+	}
+	return strings.Join(names, " → ")
 }

@@ -135,9 +135,6 @@ func TestGetEscalationConfigInheritance(t *testing.T) {
 	if esc.Timeout != 12 {
 		t.Errorf("model-only should inherit primary timeout, got %d", esc.Timeout)
 	}
-	if esc.TimeoutEnvKey != "LLM_ESCALATION_TIMEOUT" {
-		t.Errorf("escalation config must carry its own timeout env key, got %q", esc.TimeoutEnvKey)
-	}
 
 	// Case 2: explicit URL → inherit NOTHING; primary credential must not
 	// leak to the different endpoint.
@@ -160,35 +157,6 @@ func TestGetEscalationConfigInheritance(t *testing.T) {
 	esc = GetEscalationConfig()
 	if esc.APIKey != "esc-secret" {
 		t.Errorf("own EnvKey should win over inherited credential, got %q", esc.APIKey)
-	}
-}
-
-// Env-only setups (no escalation block in config.json) must resolve and
-// enable, mirroring the primary's LLM_URL/LLM_MODEL semantics.
-func TestEscalationEnvOnlyEnablement(t *testing.T) {
-	isolateEscalationEnv(t)
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-
-	SaveConfig(Config{Provider: ProviderConfig{URL: "http://localhost/v1", Model: "small-model"}})
-
-	t.Setenv("LLM_ESCALATION_URL", "https://api.example.com/v1")
-	t.Setenv("LLM_ESCALATION_MODEL", "big-model")
-
-	cfg := LoadConfig()
-	esc := GetEscalationConfig()
-	if esc.URL != "https://api.example.com/v1" || esc.Model != "big-model" {
-		t.Fatalf("env-only resolution failed: %+v", esc)
-	}
-	if !EscalationEnabled(cfg, esc) {
-		t.Errorf("env-only escalation should be enabled")
-	}
-
-	// Model-only env + configured primary inherits the primary endpoint.
-	t.Setenv("LLM_ESCALATION_URL", "")
-	esc = GetEscalationConfig()
-	if esc.URL != "http://localhost/v1" {
-		t.Errorf("model-only env should inherit primary URL, got %q", esc.URL)
 	}
 }
 

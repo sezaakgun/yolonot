@@ -40,14 +40,14 @@ func cmdClassifier(args []string) {
 	case "help", "-h", "--help":
 		printClassifierUsage(os.Stdout)
 	default:
-		fmt.Fprintf(os.Stderr, "yolonot classifier: unknown subcommand %q\n\n", args[0])
+		fmt.Fprintf(os.Stderr, "yolonot prompt: unknown subcommand %q\n\n", args[0])
 		printClassifierUsage(os.Stderr)
 		os.Exit(2)
 	}
 }
 
 func printClassifierUsage(w *os.File) {
-	fmt.Fprintln(w, "Usage: yolonot classifier [defaults|config|review|verify]")
+	fmt.Fprintln(w, "Usage: yolonot prompt [defaults|config|review|verify]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Inspect and validate the LLM classifier's prompt customization.")
 	fmt.Fprintln(w)
@@ -57,7 +57,7 @@ func printClassifierUsage(w *os.File) {
 	fmt.Fprintln(w, "  review     Ask the active LLM provider to flag ambiguous or redundant custom hints")
 	fmt.Fprintln(w, "  verify     Check a custom system_prompt still yields parseable verdicts (round-trips real probes)")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Customize via ~/.yolonot/config.json (classifier.{context,allow_hints,ask_hints,system_prompt})")
+	fmt.Fprintln(w, "Customize via ~/.yolonot/config.json (prompt.{context,allow_hints,ask_hints,system_prompt})")
 	fmt.Fprintln(w, "or per-project .yolonot files (context \"...\" / allow-hint \"...\" / ask-hint \"...\" / system-prompt \"...\").")
 	fmt.Fprintln(w, "system_prompt fully replaces the built-in base prompt; hints still append on top.")
 }
@@ -104,7 +104,7 @@ type classifierEffectivePayload struct {
 }
 
 func printClassifierEffective(w *os.File) {
-	cfg := LoadConfig().Classifier
+	cfg := LoadConfig().Prompt
 	walkup := LoadHints()
 
 	context := expandDefaults(cfg.Context, builtinClassifierContext)
@@ -114,13 +114,8 @@ func printClassifierEffective(w *os.File) {
 	ask := expandDefaults(cfg.AskHints, builtinClassifierAskHints)
 	ask = append(ask, walkup.AskHints...)
 
-	backend := cfg.Impl
-	if backend == "" {
-		backend = "llm"
-	}
-
 	payload := classifierEffectivePayload{
-		Backend:      backend,
+		Backend:      LoadConfig().ChatModelName(),
 		Context:      context,
 		AllowHints:   allow,
 		AskHints:     ask,
@@ -172,13 +167,13 @@ func executeClassifierReview(stdout, stderr io.Writer) int {
 	cfg := LoadConfig()
 	llm := GetLLMConfig()
 	if llm.URL == "" || llm.Model == "" {
-		fmt.Fprintln(stderr, "yolonot classifier review: LLM provider not configured. Run `yolonot provider`.")
+		fmt.Fprintln(stderr, "yolonot prompt review: no chat model in the judge chain. Run `yolonot models add`.")
 		return 1
 	}
 	walkup := LoadHints()
-	user := buildClassifierReviewUserPrompt(cfg.Classifier, walkup)
+	user := buildClassifierReviewUserPrompt(cfg.Prompt, walkup)
 	if user == "" {
-		fmt.Fprintln(stdout, "yolonot classifier review: no custom hints to review.")
+		fmt.Fprintln(stdout, "yolonot prompt review: no custom hints to review.")
 		return 0
 	}
 
@@ -186,9 +181,13 @@ func executeClassifierReview(stdout, stderr io.Writer) int {
 	// produce one finding per hint plus prose, so cap higher. Timeout is
 	// governed by the provider's LLMConfig.TimeoutSeconds (set per
 	// provider in setup), not a separate context here.
+	if err := requireChatModel(llm); err != nil {
+		fmt.Fprintf(stderr, "yolonot prompt review: %v\n", err)
+		return 1
+	}
 	raw, err := reviewCallLLM(llm, classifierReviewPrompt, user, 1500)
 	if err != nil {
-		fmt.Fprintf(stderr, "yolonot classifier review: LLM call failed: %v\n", err)
+		fmt.Fprintf(stderr, "yolonot prompt review: LLM call failed: %v\n", err)
 		return 1
 	}
 	// Try to pretty-print the JSON if the model obeyed the schema; otherwise
@@ -243,7 +242,7 @@ func runClassifierVerify() {
 // override would not function. Non-zero is scriptable (CI gate).
 func executeClassifierVerify(stdout, stderr io.Writer) int {
 	userCfg := LoadConfig()
-	cfg := userCfg.Classifier
+	cfg := userCfg.Prompt
 	// Probe prompts should attach scripts the same way the hook would.
 	attachOutsideRoot = userCfg.AttachOutsideRoot
 	walkup := LoadHints()
@@ -352,7 +351,7 @@ func clipOneLine(s string, max int) string {
 	return s
 }
 
-func buildClassifierReviewUserPrompt(cfg ClassifierConfig, walkup WalkupHints) string {
+func buildClassifierReviewUserPrompt(cfg PromptConfig, walkup WalkupHints) string {
 	context := expandDefaults(cfg.Context, builtinClassifierContext)
 	context = append(context, walkup.Context...)
 	allow := expandDefaults(cfg.AllowHints, builtinClassifierAllowHints)

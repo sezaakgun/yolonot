@@ -101,22 +101,6 @@ func TestResolveTimeoutSeconds(t *testing.T) {
 	if got := resolveTimeoutSeconds(LLMConfig{Timeout: 25}, 10); got != 25 {
 		t.Errorf("cfg.Timeout: got %d, want 25", got)
 	}
-
-	t.Setenv("LLM_TIMEOUT", "7")
-	if got := resolveTimeoutSeconds(LLMConfig{Timeout: 25}, 10); got != 7 {
-		t.Errorf("LLM_TIMEOUT override: got %d, want 7", got)
-	}
-
-	t.Setenv("LLM_ESCALATION_TIMEOUT", "42")
-	esc := LLMConfig{Timeout: 25, TimeoutEnvKey: "LLM_ESCALATION_TIMEOUT"}
-	if got := resolveTimeoutSeconds(esc, 10); got != 42 {
-		t.Errorf("custom TimeoutEnvKey: got %d, want 42", got)
-	}
-	// And the custom key must NOT read LLM_TIMEOUT.
-	t.Setenv("LLM_ESCALATION_TIMEOUT", "")
-	if got := resolveTimeoutSeconds(esc, 10); got != 25 {
-		t.Errorf("custom key isolation: got %d, want 25 (cfg), not 7 (LLM_TIMEOUT)", got)
-	}
 }
 
 // callClaudeCLI must kill a hung `claude` process at the resolved timeout

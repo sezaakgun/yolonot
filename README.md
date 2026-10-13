@@ -25,17 +25,18 @@ yolonot sits between your AI coding assistant and your shell. It uses an LLM to 
 
 ## Quick start
 
-### 1. Pick an LLM provider
+### 1. Pick a model
 
-| Provider | Cost | Latency | Key |
-|----------|------|--------:|-----|
-| **OpenAI** `gpt-5.4-mini` | ~10¢/day | ~500ms | `OPENAI_API_KEY` |
-| **Ollama** `gemma4:e4b` | free | 2–10s | — (local) |
-| **Claude Code** (default) | free | ~10s | — (subscription) |
+| Model | Kind | Cost | Latency | Key |
+|-------|------|------|--------:|-----|
+| **TypeSafe Jev** `jev-latest` | typed | <1¢/day | ~300ms | `TYPESAFE_API_KEY` |
+| **OpenAI** `gpt-5.4-mini` | chat | ~10¢/day | ~500ms | `OPENAI_API_KEY` |
+| **Ollama** `gemma4:e4b` | chat | free | 2–10s | — (local) |
+| **Claude Code** (default) | chat | free | ~10s | — (subscription) |
 
-Full matrix in [docs/providers.md](docs/providers.md).
+Full matrix in [docs/models.md](docs/models.md). Models live in a named catalog; the judge chain and the escalation step refer to them by name. A typed decision model answers in ~300ms and runs before the chat model, which then only sees what it could not decide. After setup, `yolonot config` opens a settings screen for judges, models, policy and prompt.
 
-### 2. Install
+### 2. Install and run setup
 
 ```bash
 go install github.com/sezaakgun/yolonot@latest
@@ -43,9 +44,11 @@ go install github.com/sezaakgun/yolonot@latest
 # Make sure Go bin is in PATH
 export PATH="$PATH:$(go env GOPATH)/bin"
 
-# First-run wizard: hooks + rules + provider pick
+# First-run wizard: hooks + rules + models + judge chain
 yolonot setup
 ```
+
+Upgrading from 0.x? Your config keeps working; `yolonot migrate` rewrites it in the 1.x shape when you are ready. See [docs/upgrading.md](docs/upgrading.md).
 
 ### 3. Restart your host CLI
 
@@ -60,11 +63,12 @@ That's it. Every Bash command now runs through [the pipeline](docs/how-it-works.
 | How the pipeline decides — layers, hook ordering, pausing, dry-run | [docs/how-it-works.md](docs/how-it-works.md) |
 | All CLI + `/yolonot` skill commands | [docs/commands.md](docs/commands.md) |
 | `.yolonot` rule files — format, walk-up, messages, redirects, sensitive files | [docs/rules.md](docs/rules.md) |
-| Pre-check hooks — `fast-allow` internals, Dippy integration, security model | [docs/pre-check.md](docs/pre-check.md) |
+| Judges — the chain, `fast_allow` internals, Dippy and other hooks, security model | [docs/judges.md](docs/judges.md) |
 | Risk tiers — per-harness action policy, overrides | [docs/risk-tiers.md](docs/risk-tiers.md) |
 | Risk profiles — `fast`/`balanced`/`strict`/`paranoid` + custom | [docs/risk-profiles.md](docs/risk-profiles.md) |
-| LLM providers — matrix, env vars, response schema, escalation (second-opinion model) | [docs/providers.md](docs/providers.md) |
-| Classifier customization — prose hints or a full `system_prompt` override, plus `classifier verify` | [docs/llm-customization.md](docs/llm-customization.md) |
+| Models — catalog, chat providers, typed decision models, env vars, escalation (second-opinion model) | [docs/models.md](docs/models.md) |
+| Prompt customization — prose hints or a full `system_prompt` override, plus `prompt verify` | [docs/prompt.md](docs/prompt.md) |
+| Upgrading from 0.x — what changed in config.json and the CLI, `yolonot migrate` | [docs/upgrading.md](docs/upgrading.md) |
 | Harnesses — install flags, runtime pinning, per-host caveats | [docs/harnesses.md](docs/harnesses.md) |
 | Analytics — `yolonot log`, `stats`, `suggest`, quiet mode | [docs/analytics.md](docs/analytics.md) |
 | Eval suite — test prompt quality across models | [docs/eval.md](docs/eval.md) |
@@ -80,7 +84,7 @@ Data at `~/.yolonot/` is preserved. Delete manually if wanted.
 
 ## Acknowledgements
 
-The built-in `fast-allow` pre-checker is heavily inspired by [**Dippy**](https://github.com/lilydayton/dippy) by Lily Dayton — specifically its `SIMPLE_SAFE` allowlist, subcommand-gating approach for multiplex tools (`git`, `docker`, `kubectl`, …), and its hostile-input test corpus. yolonot ports the allowlist tables into Go and re-walks the AST via [`mvdan.cc/sh`](https://github.com/mvdan/sh) instead of Dippy's hand-written Python bash parser (Parable). Where yolonot's parser reaches ambiguity it defers to the LLM — a fallback Dippy doesn't rely on — so the Go port can be stricter (reject-to-LLM) without hurting UX. The `dippy_parity_test.go` corpus and the rules system owe a direct debt to the Dippy project. MIT-licensed, credited in file headers.
+The built-in `fast_allow` judge is heavily inspired by [**Dippy**](https://github.com/lilydayton/dippy) by Lily Dayton — specifically its `SIMPLE_SAFE` allowlist, subcommand-gating approach for multiplex tools (`git`, `docker`, `kubectl`, …), and its hostile-input test corpus. yolonot ports the allowlist tables into Go and re-walks the AST via [`mvdan.cc/sh`](https://github.com/mvdan/sh) instead of Dippy's hand-written Python bash parser (Parable). Where yolonot's parser reaches ambiguity it defers to the LLM — a fallback Dippy doesn't rely on — so the Go port can be stricter (reject-to-LLM) without hurting UX. The `dippy_parity_test.go` corpus and the rules system owe a direct debt to the Dippy project. MIT-licensed, credited in file headers.
 
 ## License
 

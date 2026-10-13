@@ -190,7 +190,7 @@ func TestCustomProfile_LookupAndUse(t *testing.T) {
 	defer cleanup()
 	cfg := Config{
 		Profile: "my-prof",
-		CustomProfiles: map[string]map[string]string{
+		Policy: PolicyConfig{Profiles: map[string]map[string]string{
 			"my-prof": {
 				RiskSafe:     ActionAllow,
 				RiskLow:      ActionAllow,
@@ -198,7 +198,7 @@ func TestCustomProfile_LookupAndUse(t *testing.T) {
 				RiskHigh:     ActionAsk,
 				RiskCritical: ActionDeny,
 			},
-		},
+		}},
 	}
 	SaveConfig(cfg)
 
@@ -353,7 +353,7 @@ func TestSessionProfile_RejectsPathTraversal(t *testing.T) {
 // action that would later misroute in applyRiskMap.
 func TestLookupProfile_DropsInvalidHandEditedActions(t *testing.T) {
 	cfg := Config{
-		CustomProfiles: map[string]map[string]string{
+		Policy: PolicyConfig{Profiles: map[string]map[string]string{
 			"hand-edited": {
 				RiskSafe:     ActionAllow,
 				RiskLow:      "passthrough", // invalid in profile
@@ -361,7 +361,7 @@ func TestLookupProfile_DropsInvalidHandEditedActions(t *testing.T) {
 				RiskHigh:     ActionDeny,
 				RiskCritical: ActionDeny,
 			},
-		},
+		}},
 	}
 	p := LookupProfile(cfg, "hand-edited")
 	if p == nil {

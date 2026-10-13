@@ -86,7 +86,7 @@ Output ONLY JSON: {"action": "<one of the six>", "text": "<prose or glob>", "rea
 // not load-bearing safety.
 func suggestSmart(f evolveFinding) (SmartSuggestion, bool) {
 	llm := GetLLMConfig()
-	if llm.URL == "" || llm.Model == "" {
+	if llm.URL == "" || llm.Model == "" || requireChatModel(llm) != nil {
 		return SmartSuggestion{}, false
 	}
 

@@ -228,7 +228,7 @@ func expandDefaults(input, builtin []string) []string {
 // ~/.yolonot/config.json or .yolonot walk-up files) are appended in
 // labeled sections so the model can tell what's project-specific from what
 // shipped in yolonot. The $defaults sentinel is expanded before assembly.
-func BuildSystemPrompt(cfg ClassifierConfig, walkup WalkupHints) string {
+func BuildSystemPrompt(cfg PromptConfig, walkup WalkupHints) string {
 	base := resolveBasePrompt(cfg, walkup)
 
 	context := append([]string{}, expandDefaults(cfg.Context, builtinClassifierContext)...)
@@ -285,7 +285,7 @@ func BuildSystemPrompt(cfg ClassifierConfig, walkup WalkupHints) string {
 // a Verbosef warning, and if the model then emits unparseable output the
 // hook emits a decisionless passthrough (hook.go) — deferring to the host's
 // native permission layer, never silently allowing.
-func resolveBasePrompt(cfg ClassifierConfig, walkup WalkupHints) string {
+func resolveBasePrompt(cfg PromptConfig, walkup WalkupHints) string {
 	base, source := resolveBasePromptWithSource(cfg, walkup)
 	if source != "" && !systemPromptHasContract(base) {
 		Verbosef("classifier base prompt override (%s) omits the JSON verdict contract "+
@@ -301,7 +301,7 @@ func resolveBasePrompt(cfg ClassifierConfig, walkup WalkupHints) string {
 // `yolonot classifier verify` can name the override source and gate on its
 // presence without re-implementing the precedence or firing the Verbosef
 // side effect.
-func resolveBasePromptWithSource(cfg ClassifierConfig, walkup WalkupHints) (base, source string) {
+func resolveBasePromptWithSource(cfg PromptConfig, walkup WalkupHints) (base, source string) {
 	base = SystemPrompt
 	if strings.TrimSpace(cfg.SystemPrompt) != "" {
 		base = cfg.SystemPrompt
@@ -317,7 +317,7 @@ func resolveBasePromptWithSource(cfg ClassifierConfig, walkup WalkupHints) (base
 // HasSystemPromptOverride reports whether a full base-prompt override is
 // active (from config.json or a .yolonot directive). False means the
 // built-in SystemPrompt const is in use — known-good, nothing to verify.
-func HasSystemPromptOverride(cfg ClassifierConfig, walkup WalkupHints) bool {
+func HasSystemPromptOverride(cfg PromptConfig, walkup WalkupHints) bool {
 	_, source := resolveBasePromptWithSource(cfg, walkup)
 	return source != ""
 }
@@ -424,100 +424,32 @@ type LLMConfig struct {
 	Model   string
 	APIKey  string
 	Timeout int // seconds, 0 = use default
-	// TimeoutEnvKey names the env var that overrides Timeout at call time.
-	// Empty means LLM_TIMEOUT (the primary provider's knob). The escalation
-	// resolver sets LLM_ESCALATION_TIMEOUT so a user's LLM_TIMEOUT tuned for
-	// a fast primary model can't silently clamp the bigger model's call.
-	TimeoutEnvKey string
 }
 
-// resolveTimeoutSeconds returns the effective call timeout: cfg.Timeout,
-// falling back to def when unset, overridable by the env var named in
-// cfg.TimeoutEnvKey (default LLM_TIMEOUT).
+// resolveTimeoutSeconds returns cfg.Timeout, or def when unset.
 func resolveTimeoutSeconds(cfg LLMConfig, def int) int {
-	timeout := cfg.Timeout
-	if timeout == 0 {
-		timeout = def
+	if cfg.Timeout > 0 {
+		return cfg.Timeout
 	}
-	envKey := cfg.TimeoutEnvKey
-	if envKey == "" {
-		envKey = "LLM_TIMEOUT"
-	}
-	if t := os.Getenv(envKey); t != "" {
-		fmt.Sscanf(t, "%d", &timeout)
-	}
-	return timeout
+	return def
 }
 
-// GetLLMConfig resolves provider config from env vars > config.json.
-// Returns empty fields if not configured — the hook goes transparent.
+// GetLLMConfig is the first chat model in the judge chain: the model
+// used for session similarity, suggest, prompt review and anything else
+// that needs generated text. Empty fields when none is configured.
 func GetLLMConfig() LLMConfig {
 	cfg := LoadConfig()
-	p := cfg.Provider
-
-	url := envOr("LLM_URL", p.URL)
-	model := envOr("LLM_MODEL", p.Model)
-
-	envKey := p.EnvKey
-	apiKey := ""
-	if envKey != "" {
-		apiKey = os.Getenv(envKey)
-	}
-	if apiKey == "" {
-		apiKey = p.APIKey
-	}
-
-	return LLMConfig{URL: url, Model: model, APIKey: apiKey, Timeout: p.Timeout}
+	return cfg.ModelLLM(cfg.ChatModelName())
 }
 
-// GetEscalationConfig resolves the escalation (bigger second model)
-// provider from env vars > config.json, mirroring GetLLMConfig. Returns
-// empty URL/Model when unresolvable — escalation is then off.
-//
-// Inheritance: an escalation provider with no URL runs against the
-// primary's endpoint and inherits its credentials and timeout (the common
-// "same endpoint, bigger model" case). An explicit URL inherits nothing —
-// the primary's credential must never be sent to a different endpoint.
+// GetEscalationConfig resolves the escalation model from the catalog.
+// Empty URL/Model when unconfigured — escalation is then off.
 func GetEscalationConfig() LLMConfig {
 	cfg := LoadConfig()
-	var p ProviderConfig
-	if cfg.Escalation != nil {
-		p = cfg.Escalation.Provider
+	if cfg.Escalation == nil || cfg.Escalation.Model == "" {
+		return LLMConfig{}
 	}
-
-	url := envOr("LLM_ESCALATION_URL", p.URL)
-	model := envOr("LLM_ESCALATION_MODEL", p.Model)
-
-	envKey := p.EnvKey
-	explicitKey := p.APIKey
-	timeout := p.Timeout
-
-	if url == "" {
-		prim := GetLLMConfig() // env-resolved primary, credentials included
-		url = prim.URL
-		if envKey == "" && explicitKey == "" {
-			explicitKey = prim.APIKey
-		}
-		if timeout == 0 {
-			timeout = prim.Timeout
-		}
-	}
-
-	apiKey := ""
-	if envKey != "" {
-		apiKey = os.Getenv(envKey)
-	}
-	if apiKey == "" {
-		apiKey = explicitKey
-	}
-
-	return LLMConfig{
-		URL:           url,
-		Model:         model,
-		APIKey:        apiKey,
-		Timeout:       timeout,
-		TimeoutEnvKey: "LLM_ESCALATION_TIMEOUT",
-	}
+	return cfg.ModelLLM(cfg.Escalation.Model)
 }
 
 // EscalationEnabled reports whether the escalation layer should run for
@@ -547,7 +479,7 @@ func EscalationUnresolved(cfg Config) string {
 // needsNewTokenParam checks if the model requires max_completion_tokens.
 func needsNewTokenParam(model string) bool {
 	m := strings.ToLower(model)
-	for _, prefix := range []string{"gpt-5", "o1", "o3", "o4"} {
+	for _, prefix := range []string{"gpt-5", "gpt-6", "o1", "o3", "o4"} {
 		if strings.HasPrefix(m, prefix) {
 			return true
 		}
@@ -560,6 +492,9 @@ func needsNewTokenParam(model string) bool {
 func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (string, error) {
 	if cfg.URL == "claude-cli" {
 		return callClaudeCLI(cfg, systemPrompt, userPrompt)
+	}
+	if isDecisionURL(cfg.URL) {
+		return callDecision(cfg, userPrompt)
 	}
 
 	timeout := resolveTimeoutSeconds(cfg, 10)
@@ -1420,42 +1355,4 @@ func ParseDecision(text string) *Decision {
 		}
 	}
 	return nil
-}
-
-// LLMClassifier is the Phase 1 Classifier: delegates to the existing
-// CallLLM + BuildAnalyzePrompt + ParseDecision pipeline and produces a
-// RiskResult. Future classifiers (heuristic, distilled, knn) live in
-// sibling files behind the same interface — see classifier.go docblock.
-type LLMClassifier struct{}
-
-func init() { RegisterClassifier(&LLMClassifier{}) }
-
-func (*LLMClassifier) Name() string { return "llm" }
-
-func (*LLMClassifier) Classify(_ context.Context, cmd string, meta ClassifyMeta) (RiskResult, error) {
-	start := time.Now()
-	cfg := GetLLMConfig()
-	if cfg.URL == "" || cfg.Model == "" {
-		return RiskResult{Backend: "llm"}, fmt.Errorf("llm not configured")
-	}
-	userCfg := LoadConfig()
-	attachOutsideRoot = userCfg.AttachOutsideRoot
-	sysPrompt := BuildSystemPrompt(userCfg.Classifier, LoadHints())
-	raw, err := CallLLM(cfg, sysPrompt, BuildAnalyzePrompt(cmd, meta.Cwd), 300)
-	ms := time.Since(start).Milliseconds()
-	if err != nil {
-		return RiskResult{Backend: "llm", LatencyMs: ms}, err
-	}
-	d := ParseDecision(raw)
-	if d == nil {
-		return RiskResult{Backend: "llm", LatencyMs: ms}, fmt.Errorf("unparseable LLM response")
-	}
-	return RiskResult{
-		Decision:  d.Decision,
-		Risk:      d.Risk,
-		Short:     d.Short,
-		Reason:    d.Reasoning,
-		Backend:   "llm",
-		LatencyMs: ms,
-	}, nil
 }

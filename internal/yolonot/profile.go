@@ -131,7 +131,7 @@ func LookupProfile(cfg Config, name string) *RiskProfile {
 	if p := GetBuiltinProfile(name); p != nil {
 		return p
 	}
-	m, ok := cfg.CustomProfiles[name]
+	m, ok := cfg.Policy.Profiles[name]
 	if !ok {
 		return nil
 	}
@@ -177,14 +177,14 @@ func LookupProfile(cfg Config, name string) *RiskProfile {
 // active baseline.
 func ResolveActiveProfile(cfg Config, h Harness) *RiskProfile {
 	name := DefaultProfileName
-	if cfg.Profile != "" {
-		name = cfg.Profile
+	if cfg.Policy.Profile != "" {
+		name = cfg.Policy.Profile
 	}
 	if v := os.Getenv("YOLONOT_PROFILE"); v != "" {
 		name = v
 	}
 	if h != nil {
-		if v, ok := cfg.ProfileOverride[h.Name()]; ok && v != "" {
+		if v := cfg.harnessPolicy(h.Name()).Profile; v != "" {
 			name = v
 		}
 		envKey := "YOLONOT_" + strings.ToUpper(h.Name()) + "_PROFILE"
@@ -396,24 +396,24 @@ func profileUsage(w *os.File) {
 
 func printActiveProfile() {
 	cfg := LoadConfig()
-	globalName := cfg.Profile
+	globalName := cfg.Policy.Profile
 	if globalName == "" {
 		globalName = DefaultProfileName
 	}
-	if cfg.Profile == "" {
+	if cfg.Policy.Profile == "" {
 		fmt.Printf("Active profile: %s (default — set with: yolonot profile use <name>)\n", globalName)
 	} else {
 		fmt.Printf("Active profile: %s (global)\n", globalName)
 	}
-	if len(cfg.ProfileOverride) > 0 {
+	if pins := harnessProfilePins(cfg); len(pins) > 0 {
 		fmt.Println("Per-harness overrides:")
-		names := make([]string, 0, len(cfg.ProfileOverride))
-		for k := range cfg.ProfileOverride {
+		names := make([]string, 0, len(pins))
+		for k := range pins {
 			names = append(names, k)
 		}
 		sort.Strings(names)
 		for _, h := range names {
-			fmt.Printf("  %-10s → %s\n", h, cfg.ProfileOverride[h])
+			fmt.Printf("  %-10s → %s\n", h, pins[h])
 		}
 	}
 
@@ -540,15 +540,20 @@ func cmdProfileUse(args []string) {
 			fmt.Fprintf(os.Stderr, "Unknown harness %q.\n", harness)
 			os.Exit(1)
 		}
-		if cfg.ProfileOverride == nil {
-			cfg.ProfileOverride = map[string]string{}
+		if !requireV1(&cfg) {
+			return
 		}
-		cfg.ProfileOverride[harness] = name
+		hp := cfg.harnessPolicy(harness)
+		hp.Profile = name
+		cfg.setHarnessPolicy(harness, hp)
 		SaveConfig(cfg)
 		fmt.Printf("%s profile → %s (per-harness override)\n", harness, name)
 		return
 	}
-	cfg.Profile = name
+	if !requireV1(&cfg) {
+		return
+	}
+	cfg.Policy.Profile = name
 	SaveConfig(cfg)
 	fmt.Printf("Global profile → %s\n", name)
 }
@@ -580,27 +585,28 @@ func cmdProfileReset(args []string) {
 	}
 	cfg := LoadConfig()
 	if harness != "" {
-		if cfg.ProfileOverride == nil {
+		hp := cfg.harnessPolicy(harness)
+		if hp.Profile == "" {
 			fmt.Printf("No override for %s.\n", harness)
 			return
 		}
-		if _, ok := cfg.ProfileOverride[harness]; !ok {
-			fmt.Printf("No override for %s.\n", harness)
+		if !requireV1(&cfg) {
 			return
 		}
-		delete(cfg.ProfileOverride, harness)
-		if len(cfg.ProfileOverride) == 0 {
-			cfg.ProfileOverride = nil
-		}
+		hp.Profile = ""
+		cfg.setHarnessPolicy(harness, hp)
 		SaveConfig(cfg)
 		fmt.Printf("Cleared profile override for %s. Falling back to global %s.\n", harness, effectiveGlobal(cfg))
 		return
 	}
-	if cfg.Profile == "" {
+	if cfg.Policy.Profile == "" {
 		fmt.Printf("Global profile already at default (%s).\n", DefaultProfileName)
 		return
 	}
-	cfg.Profile = ""
+	if !requireV1(&cfg) {
+		return
+	}
+	cfg.Policy.Profile = ""
 	SaveConfig(cfg)
 	fmt.Printf("Global profile reset → %s\n", DefaultProfileName)
 }
@@ -644,15 +650,18 @@ func cmdProfileCreate(args []string) {
 		os.Exit(1)
 	}
 
-	if _, exists := cfg.CustomProfiles[name]; exists {
+	if _, exists := cfg.Policy.Profiles[name]; exists {
 		fmt.Fprintf(os.Stderr, "Custom profile %q already exists. Delete it first.\n", name)
 		os.Exit(1)
 	}
 
-	if cfg.CustomProfiles == nil {
-		cfg.CustomProfiles = map[string]map[string]string{}
+	if !requireV1(&cfg) {
+		return
 	}
-	cfg.CustomProfiles[name] = tierMap
+	if cfg.Policy.Profiles == nil {
+		cfg.Policy.Profiles = map[string]map[string]string{}
+	}
+	cfg.Policy.Profiles[name] = tierMap
 	SaveConfig(cfg)
 
 	fmt.Printf("Created custom profile %q:\n", name)
@@ -674,23 +683,26 @@ func cmdProfileDelete(args []string) {
 		os.Exit(1)
 	}
 	cfg := LoadConfig()
-	if _, ok := cfg.CustomProfiles[name]; !ok {
+	if _, ok := cfg.Policy.Profiles[name]; !ok {
 		fmt.Fprintf(os.Stderr, "Unknown custom profile %q.\n", name)
 		os.Exit(1)
 	}
-	if cfg.Profile == name {
+	if cfg.Policy.Profile == name {
 		fmt.Fprintf(os.Stderr, "Profile %q is the active global profile. Switch first: yolonot profile use <other>\n", name)
 		os.Exit(1)
 	}
-	for h, p := range cfg.ProfileOverride {
+	for h, p := range harnessProfilePins(cfg) {
 		if p == name {
 			fmt.Fprintf(os.Stderr, "Profile %q is the active override for harness %q. Reset first: yolonot profile reset --harness=%s\n", name, h, h)
 			os.Exit(1)
 		}
 	}
-	delete(cfg.CustomProfiles, name)
-	if len(cfg.CustomProfiles) == 0 {
-		cfg.CustomProfiles = nil
+	if !requireV1(&cfg) {
+		return
+	}
+	delete(cfg.Policy.Profiles, name)
+	if len(cfg.Policy.Profiles) == 0 {
+		cfg.Policy.Profiles = nil
 	}
 	SaveConfig(cfg)
 	fmt.Printf("Deleted custom profile %q.\n", name)
@@ -767,23 +779,34 @@ func parseProfileFlags(args []string) (map[string]string, error) {
 }
 
 func effectiveGlobal(cfg Config) string {
-	if cfg.Profile != "" {
-		return cfg.Profile
+	if cfg.Policy.Profile != "" {
+		return cfg.Policy.Profile
 	}
 	return DefaultProfileName
+}
+
+// harnessProfilePins is the harness → profile view of policy.harness.
+func harnessProfilePins(cfg Config) map[string]string {
+	out := map[string]string{}
+	for h, hp := range cfg.Policy.Harness {
+		if hp.Profile != "" {
+			out[h] = hp.Profile
+		}
+	}
+	return out
 }
 
 // ListProfiles returns built-in + custom profiles, built-ins first then
 // custom in alphabetical order. Used by `yolonot profile list`.
 func ListProfiles(cfg Config) []RiskProfile {
 	out := BuiltinProfiles()
-	customNames := make([]string, 0, len(cfg.CustomProfiles))
-	for k := range cfg.CustomProfiles {
+	customNames := make([]string, 0, len(cfg.Policy.Profiles))
+	for k := range cfg.Policy.Profiles {
 		customNames = append(customNames, k)
 	}
 	sort.Strings(customNames)
 	for _, name := range customNames {
-		m := cfg.CustomProfiles[name]
+		m := cfg.Policy.Profiles[name]
 		cp := map[string]string{}
 		for k, v := range m {
 			cp[k] = v

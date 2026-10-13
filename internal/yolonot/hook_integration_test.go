@@ -317,8 +317,8 @@ func TestIntegration_LLM_Allow(t *testing.T) {
 	if resp.HookSpecificOutput.PermissionDecision != "allow" {
 		t.Errorf("expected allow from LLM, got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
-	if !strings.Contains(resp.SystemMessage, "llm") {
-		t.Errorf("systemMessage should mention llm layer, got %q", resp.SystemMessage)
+	if !strings.Contains(resp.SystemMessage, "test-model") {
+		t.Errorf("systemMessage should carry the model name as layer, got %q", resp.SystemMessage)
 	}
 
 	// Should also save to session approved (under project-scoped session ID)
@@ -638,8 +638,8 @@ func TestIntegration_PreCheck_AllowShortCircuits(t *testing.T) {
 	if resp.HookSpecificOutput.PermissionDecisionReason != "" {
 		t.Errorf("allow should leave reason empty, got %q", resp.HookSpecificOutput.PermissionDecisionReason)
 	}
-	if !strings.HasPrefix(resp.SystemMessage, "🧑\u200d🚀 pre_check (") {
-		t.Errorf("systemMessage should start with pre_check layer banner, got %q", resp.SystemMessage)
+	if !strings.HasPrefix(resp.SystemMessage, "🧑\u200d🚀 exec:") {
+		t.Errorf("systemMessage should start with the exec layer banner, got %q", resp.SystemMessage)
 	}
 	if !strings.Contains(resp.SystemMessage, "pre-allow.sh") {
 		t.Errorf("systemMessage should include hook short name, got %q", resp.SystemMessage)
@@ -671,8 +671,8 @@ func TestIntegration_PreCheck_AllowBannerIncludesHookName(t *testing.T) {
 	out := runHookWithStruct(t, payload)
 
 	resp := parseResponse(t, out)
-	if !strings.Contains(resp.SystemMessage, "pre_check (pre-allow-nomsg.sh)") {
-		t.Errorf("systemMessage should include pre_check layer with hook name, got %q", resp.SystemMessage)
+	if !strings.Contains(resp.SystemMessage, "exec:pre-allow-nomsg.sh") {
+		t.Errorf("systemMessage should include the exec layer with hook name, got %q", resp.SystemMessage)
 	}
 	if !strings.Contains(resp.SystemMessage, "-> ls") {
 		t.Errorf("systemMessage should include the command, got %q", resp.SystemMessage)
@@ -799,8 +799,8 @@ func TestIntegration_PreCheck_LegacyStringConfigStillParses(t *testing.T) {
 	os.WriteFile(filepath.Join(home, ".yolonot", "config.json"), []byte(configJSON), 0600)
 
 	cfg := LoadConfig()
-	if len(cfg.PreCheck) != 1 || cfg.PreCheck[0] != script {
-		t.Fatalf("legacy string config should parse into one-element list, got %v", cfg.PreCheck)
+	if len(cfg.Judges) != 1 || cfg.Judges[0].Use != "exec:"+script {
+		t.Fatalf("legacy string pre_check should fold into one exec judge, got %v", cfg.Judges)
 	}
 
 	payload := makePrePayload("int-precheck-legacy", "ls -la", "/tmp")
@@ -1223,16 +1223,17 @@ func TestIntegration_LocalAllowConfigMigrates(t *testing.T) {
 
 	cfg := LoadConfig()
 	if cfg.LocalAllow {
-		t.Error("LocalAllow should be cleared after migration")
+		t.Error("LocalAllow should be cleared after the fold")
 	}
-	if len(cfg.PreCheck) == 0 || cfg.PreCheck[0] != FastAllowSentinel {
-		t.Errorf("fast-allow should be prepended to PreCheck, got %v", cfg.PreCheck)
+	if len(cfg.Judges) != 1 || cfg.Judges[0].Use != judgeFastAllow {
+		t.Errorf("local_allow should fold into a fast_allow judge, got %v", cfg.Judges)
 	}
-
-	// And it should have been persisted — a second load should not re-migrate.
-	cfg2 := LoadConfig()
-	if len(cfg2.PreCheck) != 1 {
-		t.Errorf("migration should run exactly once, got %v", cfg2.PreCheck)
+	if !cfg.Legacy {
+		t.Error("a v0 file must be flagged Legacy")
+	}
+	// Loading never writes: the file stays v0 until the user migrates.
+	if data, _ := os.ReadFile(configPath()); string(data) != string(legacy) {
+		t.Errorf("LoadConfig must not rewrite config.json, got %s", data)
 	}
 }
 
@@ -1378,49 +1379,27 @@ func TestWalkUpScopedToGitRepo(t *testing.T) {
 	}
 }
 
-func TestCmdPreCheckAddFastAllow(t *testing.T) {
+func TestCmdJudgesAddRemoveFastAllow(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()
+	SaveConfig(Config{Provider: ProviderConfig{URL: "https://x/v1/chat/completions", Model: "m"}})
 
-	// default: no pre-check entries
+	captureStdout(func() { cmdJudges([]string{"add", "fast_allow"}) })
 	cfg := LoadConfig()
-	for _, p := range cfg.PreCheck {
-		if p == FastAllowSentinel {
-			t.Fatal("expected fast-allow NOT to be set by default")
-		}
+	if judgeNames(cfg.Judges) != "m → fast_allow" {
+		t.Fatalf("after add: %q", judgeNames(cfg.Judges))
 	}
-
-	captureStdout(func() { cmdPreCheck([]string{"add", FastAllowSentinel}) })
-	cfg = LoadConfig()
-	found := false
-	for _, p := range cfg.PreCheck {
-		if p == FastAllowSentinel {
-			found = true
-		}
+	captureStdout(func() { cmdJudges([]string{"add", "fast_allow"}) })
+	if cfg = LoadConfig(); judgeNames(cfg.Judges) != "m → fast_allow" {
+		t.Fatalf("add must dedupe: %q", judgeNames(cfg.Judges))
 	}
-	if !found {
-		t.Errorf("fast-allow should be in PreCheck after add, got %v", cfg.PreCheck)
+	captureStdout(func() { cmdJudges([]string{"move", "fast_allow", "up"}) })
+	if cfg = LoadConfig(); judgeNames(cfg.Judges) != "fast_allow → m" {
+		t.Fatalf("after move up: %q", judgeNames(cfg.Judges))
 	}
-
-	// Adding again should be a no-op (dedup), not a duplicate.
-	captureStdout(func() { cmdPreCheck([]string{"add", FastAllowSentinel}) })
-	cfg = LoadConfig()
-	count := 0
-	for _, p := range cfg.PreCheck {
-		if p == FastAllowSentinel {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("fast-allow should appear exactly once, got %d (%v)", count, cfg.PreCheck)
-	}
-
-	captureStdout(func() { cmdPreCheck([]string{"remove", FastAllowSentinel}) })
-	cfg = LoadConfig()
-	for _, p := range cfg.PreCheck {
-		if p == FastAllowSentinel {
-			t.Error("fast-allow should be gone after remove")
-		}
+	captureStdout(func() { cmdJudges([]string{"remove", "fast_allow"}) })
+	if cfg = LoadConfig(); judgeNames(cfg.Judges) != "m" {
+		t.Fatalf("after remove: %q", judgeNames(cfg.Judges))
 	}
 }
 

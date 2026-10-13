@@ -33,7 +33,7 @@ The three suites are split by **classifier path**, not just by data:
   --model gpt-5.4-mini --filter-expected ask --filter-category adversarial
 
 # Test with Claude Code subscription
-./yolonot eval --all --model claude-cli/claude-haiku-4-5-20251001 --runs 1 --verbose
+./yolonot eval --all --model claude-cli/claude-haiku-5-5 --runs 1 --verbose
 
 # Test with OpenRouter free model
 ./yolonot eval --all --model openrouter/google/gemma-3-4b-it:free --runs 1 --verbose
@@ -45,14 +45,14 @@ The three suites are split by **classifier path**, not just by data:
 |------|---------|
 | `--all` | Run every suite in `evals/suites/` |
 | `--suite <path>` | Run a single suite file |
-| `--model <provider/model>` | Model to test. Repeatable — passing multiple runs comparison mode. |
+| `--model <name>` | Model to test: a name from `yolonot models`, or a built-in alias (`gpt-5.4-mini`, `claude-cli/<id>`, `ollama/<id>`, `openrouter/<id>`, `jev-latest`, `systemone/<id>`, `decisions/<id>`). Repeatable — passing multiple runs comparison mode. |
 | `--runs <n>` | Number of runs per case (useful for variance analysis). |
 | `--filter-expected <allow\|ask\|deny>` | Only run cases with this expected decision. |
 | `--filter-category <name>` | Only run cases with this category tag. |
 | `--verbose` | Per-case timing + reasoning output. |
 | `--with-hints` | Apply user classifier hints (`~/.yolonot/config.json` + `.yolonot` walk-up) when building the system prompt. Off by default. See "Reproducibility and hints" below. |
 | `--metric decision\|risk\|action` | What to grade. `decision` (default) grades the LLM's raw `allow`/`ask` field. `risk` grades the policy-neutral risk tier (`safe`/`low`/`moderate`/`high`/`critical`) against `expected_risk`. `action` grades the **actual gate action** — the classifier output run through the active harness/profile risk map, i.e. exactly what the hook emits — see "Which metric reflects the gate" below. |
-| `--escalation-model <provider/model>` | Cascade mode: primary responses that would trigger the hook's [escalation](providers.md#escalation-second-opinion-model) are re-judged by this model with the identical trigger + adoption rules, and a second `<model>+esc` entry appears in the report (and in `--output` JSON) along with the ask-reduction rate. Measures rescue-rate and whether the cascade raises the catastrophic-allow rate (it must not) before you trust the feature. Primary responses are reused — no duplicate primary calls. Greenfield suites only. The trigger runs through your ACTIVE harness/profile risk map — for reproducible published numbers, use the defaults (claude + balanced, no `risk_maps` overrides); the `+esc` entry's timing counts escalation calls only. |
+| `--escalation-model <name>` | Cascade mode: primary responses that would trigger the hook's [escalation](models.md#escalation-second-opinion-model) are re-judged by this model with the identical trigger + adoption rules, and a second `<model>+esc` entry appears in the report (and in `--output` JSON) along with the ask-reduction rate. Measures rescue-rate and whether the cascade raises the catastrophic-allow rate (it must not) before you trust the feature. Primary responses are reused — no duplicate primary calls. Greenfield suites only. The trigger runs through your ACTIVE harness/profile risk map — for reproducible published numbers, use the defaults (claude + balanced, no `risk_maps` overrides); the `+esc` entry's timing counts escalation calls only. |
 
 ## Reproducibility and hints
 

@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -26,13 +25,26 @@ type ProviderConfig struct {
 }
 
 type Config struct {
-	Provider     ProviderConfig               `json:"provider"`
-	Classifier   ClassifierConfig             `json:"classifier,omitempty"`     // backend choice + LLM prompt customization (context / allow_hints / ask_hints). Accepts legacy string form ("llm") for backward compat. Env var YOLONOT_CLASSIFIER overrides backend selection.
-	RiskMaps     map[string]map[string]string `json:"risk_maps,omitempty"`      // per-harness tier→action override. Outer key = harness name; inner key = risk tier; value ∈ {allow, ask, deny, passthrough}. Merged on top of each harness's shipped defaults.
-	PreCheck     PreCheckList                 `json:"pre_check,omitempty"`      // optional pre-checkers run before yolonot's pipeline; "fast-allow" is a reserved sentinel for the built-in Go bash parser, others are external hook binaries (e.g. /opt/homebrew/bin/dippy). First "allow" wins.
-	QuietOnAllow bool                         `json:"quiet_on_allow,omitempty"` // when true, allow decisions emit no systemMessage — only ask/deny show a banner
-	LocalAllow   bool                         `json:"local_allow,omitempty"`    // DEPRECATED: migrated on load into PreCheck as "fast-allow". Kept for backward-compat read only.
-	Wrappers     []string                     `json:"wrappers,omitempty"`       // user-defined transparent command wrappers (e.g. ["mycli","corp-shim"]). Extend the built-in set (time/timeout/nice/nohup/strace/ltrace/command/builtin/rtk) — never replace it. Applied to both fast_allow unwrapping and session-approval cross-form lookup.
+	// ConfigVersion is 1 for the models/judges/prompt/policy shape written
+	// by yolonot 1.x. Absent on v0 files; LoadConfig folds v0 keys into the
+	// v1 fields in memory and SaveConfig writes v1 only.
+	ConfigVersion int `json:"config_version,omitempty"`
+
+	// Models is the catalog every other section refers to by name: judges
+	// name entries, escalation names one. A model is typed (System One or
+	// OpenAI Decisions endpoint) or chat, decided by its URL.
+	Models map[string]ModelConfig `json:"models,omitempty"`
+	// Judges is the ordered chain: fast_allow, exec:<path>, or a model name.
+	Judges JudgeList `json:"judges,omitempty"`
+	// Escalation is the optional second opinion run after the chain.
+	Escalation *EscalationConfig `json:"escalation,omitempty"`
+	// Prompt tunes the chat-model system prompt (context / hints / override).
+	Prompt PromptConfig `json:"prompt,omitzero"`
+	// Policy maps risk tiers to actions: profile, custom profiles, per-harness pins.
+	Policy PolicyConfig `json:"policy,omitzero"`
+
+	QuietOnAllow bool     `json:"quiet_on_allow,omitempty"` // when true, allow decisions emit no systemMessage — only ask/deny show a banner
+	Wrappers     []string `json:"wrappers,omitempty"`       // user-defined transparent command wrappers (e.g. ["mycli","corp-shim"]). Extend the built-in set (time/timeout/nice/nohup/strace/ltrace/command/builtin/rtk) — never replace it. Applied to both fast_allow unwrapping and session-approval cross-form lookup.
 
 	// AttachOutsideRoot lets script attachment cross the attach root (git
 	// repo root of the session cwd, else the cwd). Sensitive home dirs stay
@@ -40,24 +52,55 @@ type Config struct {
 	// .yolonot directive, so an untrusted clone can never widen the boundary.
 	AttachOutsideRoot bool `json:"attach_outside_root,omitempty"`
 
-	// Profile = global named risk policy bundle. Resolves to a built-in
-	// (fast/balanced/strict/paranoid) or a CustomProfiles entry. Empty →
-	// DefaultProfileName. Translated per-harness in ResolveRiskMap.
+	// v0 keys (yolonot ≤ 0.23). Read only: normalize() folds them into the
+	// fields above and clears them, so they never reach disk again.
+	Provider        ProviderConfig               `json:"provider,omitzero"`
+	Decision        ProviderConfig               `json:"decision,omitzero"`
+	Classifier      ClassifierConfig             `json:"classifier,omitzero"`
+	PreCheck        PreCheckList                 `json:"pre_check,omitempty"`
+	LocalAllow      bool                         `json:"local_allow,omitempty"`
+	RiskMaps        map[string]map[string]string `json:"risk_maps,omitempty"`
+	Profile         string                       `json:"profile,omitempty"`
+	ProfileOverride map[string]string            `json:"profile_override,omitempty"`
+	CustomProfiles  map[string]map[string]string `json:"custom_profiles,omitempty"`
+
+	// Legacy is set by LoadConfig when the file on disk still uses v0 keys.
+	Legacy bool `json:"-"`
+}
+
+// ModelConfig is one catalog entry. Same shape as the v0 provider block.
+type ModelConfig = ProviderConfig
+
+// PromptConfig is the chat-model prompt tuning (v0: classifier.*).
+type PromptConfig struct {
+	Context    []string `json:"context,omitempty"`     // prose describing trusted infra (repos, buckets, domains)
+	AllowHints []string `json:"allow_hints,omitempty"` // prose nudging the model toward allow on routine patterns
+	AskHints   []string `json:"ask_hints,omitempty"`   // prose nudging the model toward ask on environment-specific risks
+	// SystemPrompt fully replaces the built-in base prompt when non-empty.
+	// Context/AllowHints/AskHints still append after it. A per-project
+	// .yolonot `system-prompt` directive overrides this. An override that
+	// omits the JSON verdict contract is used anyway with a Verbosef warning
+	// (BuildSystemPrompt); unparseable output then passes through to the
+	// host's permission layer. Empty = built-in prompt, byte-for-byte.
+	SystemPrompt string `json:"system_prompt,omitempty"`
+}
+
+// PolicyConfig is the risk-tier policy (v0: profile, custom_profiles,
+// profile_override, risk_maps).
+type PolicyConfig struct {
+	// Profile names the global profile: a built-in (fast/balanced/strict/
+	// paranoid) or a Profiles entry. Empty → DefaultProfileName.
 	Profile string `json:"profile,omitempty"`
+	// Profiles are user-defined tier→action maps (canonical: allow|ask|deny),
+	// validated via ValidateCustomProfile. Names must not collide with built-ins.
+	Profiles map[string]map[string]string `json:"profiles,omitempty"`
+	// Harness pins a profile and/or overrides single tier cells for one harness.
+	Harness map[string]HarnessPolicy `json:"harness,omitempty"`
+}
 
-	// ProfileOverride lets users pin a different profile per harness.
-	// Outer key = harness name (claude, codex, ...); value = profile name.
-	ProfileOverride map[string]string `json:"profile_override,omitempty"`
-
-	// CustomProfiles holds user-defined named profiles. Outer key = profile
-	// name; inner = tier→action (canonical: allow|ask|deny). Validated via
-	// ValidateCustomProfile at create time. Names must not collide with
-	// built-ins.
-	CustomProfiles map[string]map[string]string `json:"custom_profiles,omitempty"`
-
-	// Escalation is the optional bigger-model second opinion. Pointer so an
-	// absent block stays absent through Save (old configs byte-identical).
-	Escalation *EscalationConfig `json:"escalation,omitempty"`
+type HarnessPolicy struct {
+	Profile string            `json:"profile,omitempty"`
+	RiskMap map[string]string `json:"risk_map,omitempty"` // tier → allow|ask|deny|passthrough, merged on top of the profile
 }
 
 // ClassifierConfig holds the classifier backend choice plus prose tuning that
@@ -140,20 +183,18 @@ func (c ClassifierConfig) MarshalJSON() ([]byte, error) {
 // armed purely via LLM_ESCALATION_URL/LLM_ESCALATION_MODEL env vars with
 // no config block at all, mirroring the primary's LLM_URL/LLM_MODEL.
 type EscalationConfig struct {
+	// Model names a Models entry (a chat model). Empty = not configured.
+	Model string `json:"model,omitempty"`
 	// Disabled is the config-side kill switch: `yolonot escalation off`
-	// sets it instead of deleting Provider, so re-enabling needs no
-	// re-setup. Zero value = active — the field vanishes from disk when on.
+	// sets it instead of deleting Model, so re-enabling needs no re-setup.
 	Disabled bool `json:"disabled,omitempty"`
-	// Provider is the escalation endpoint. With only Model set, the
-	// primary provider's URL/credentials/timeout are inherited (same
-	// endpoint, bigger model). With URL set explicitly, nothing is
-	// inherited — the primary's credential is never sent elsewhere.
-	Provider ProviderConfig `json:"provider"`
 	// Unresolved controls what happens when escalation FIRED and the final
 	// action still resolves to ask (including escalation errors):
 	// "" / "ask" keeps the ask; "deny" degrades it to a deny that carries
 	// both verdicts — for unattended runs where an ask is a stall.
 	Unresolved string `json:"unresolved,omitempty"`
+	// Provider is the v0 inline endpoint; normalize() moves it into Models.
+	Provider ProviderConfig `json:"provider,omitzero"`
 }
 
 // FastAllowSentinel is the reserved entry in Config.PreCheck that dispatches
@@ -206,43 +247,26 @@ func LoadConfig() Config {
 	}
 	var c Config
 	json.Unmarshal(data, &c)
-
-	// Migrate legacy `local_allow: true` into the unified pre-check list by
-	// prepending the fast-allow sentinel. Write the rewritten config back so
-	// the migration happens once, not on every load.
-	if c.LocalAllow {
-		hasFastAllow := false
-		for _, p := range c.PreCheck {
-			if p == FastAllowSentinel {
-				hasFastAllow = true
-				break
-			}
-		}
-		if !hasFastAllow {
-			c.PreCheck = append(PreCheckList{FastAllowSentinel}, c.PreCheck...)
-		}
-		c.LocalAllow = false
-		SaveConfig(c)
-	}
+	c.normalize()
 	return c
 }
 
 func SaveConfig(c Config) {
+	c.normalize()
+	c.ConfigVersion = 1
 	// Never persist APIKey to disk. If a user entered a key via the TUI,
 	// it lives in memory for this process and is expected to come from
 	// the env var on the next run. Plaintext on-disk storage is a weak
 	// default — a same-user process (backup agent, cloud sync, snooper)
-	// could read it. See security-audit: "API key persisted plaintext to
-	// ~/.yolonot/config.json" (Medium).
-	c.Provider.APIKey = ""
-	// Same scrub for the escalation provider — but via a copy: c is a value,
-	// yet c.Escalation is a shared pointer, and writing through it would
-	// erase the caller's in-memory key (e.g. between setup's Save and its
-	// connection test).
-	if c.Escalation != nil && c.Escalation.Provider.APIKey != "" {
-		esc := *c.Escalation
-		esc.Provider.APIKey = ""
-		c.Escalation = &esc
+	// could read it. Scrub on a copy: Models is a shared map and the
+	// caller may still need the key for a connection test.
+	if len(c.Models) > 0 {
+		scrubbed := make(map[string]ModelConfig, len(c.Models))
+		for k, m := range c.Models {
+			m.APIKey = ""
+			scrubbed[k] = m
+		}
+		c.Models = scrubbed
 	}
 	data, _ := json.MarshalIndent(c, "", "  ")
 	// atomicWriteFile does symlink rejection + rename-from-tempfile so
@@ -411,7 +435,7 @@ func cmdInstall() {
 
 	fmt.Println()
 	if isFirstRun() {
-		fmt.Println("First-time setup? Run 'yolonot setup' to seed rules + configure LLM provider.")
+		fmt.Println("First-time setup? Run 'yolonot setup' to seed rules + pick models.")
 		fmt.Println("Already wired up? Restart your AI coding CLI to activate.")
 	} else {
 		fmt.Println("Restart your AI coding CLI to activate.")
@@ -485,99 +509,28 @@ func cmdInit() {
 	// Global rules
 	globalRules := filepath.Join(YolonotDir(), "rules")
 	if _, err := os.Stat(globalRules); os.IsNotExist(err) {
-		os.WriteFile(globalRules, []byte(`# ~/.yolonot/rules — global rules (apply to all projects)
-# Format: <action>-<type> <pattern>
-
-# --- Yolonot self-operations (always allow) ---
-allow-cmd echo $CLAUDE_SESSION_ID*
-allow-cmd *yolonot *
-allow-cmd cat */.yolonot/*
-allow-cmd ls */.yolonot/*
-allow-cmd wc */.yolonot/*
-allow-cmd tail */.yolonot/*
-allow-cmd head */.yolonot/*
-allow-cmd grep */.yolonot/*
-
-# --- Read-only commands (chained commands bypass these → LLM) ---
-allow-cmd cat *
-allow-cmd ls *
-allow-cmd head *
-allow-cmd tail *
-allow-cmd grep *
-allow-cmd rg *
-allow-cmd find *
-allow-cmd wc *
-allow-cmd tree *
-allow-cmd echo *
-allow-cmd pwd*
-allow-cmd which *
-allow-cmd file *
-allow-cmd stat *
-allow-cmd du *
-allow-cmd df *
-allow-cmd env*
-allow-cmd printenv*
-allow-cmd id*
-allow-cmd whoami*
-allow-cmd uname*
-allow-cmd date*
-allow-cmd hostname*
-
-# --- Safe file/dir creation (non-destructive) ---
-allow-cmd mkdir *
-allow-cmd touch *
-
-# --- Safe network (local only) ---
-allow-cmd curl localhost*
-allow-cmd curl 127.0.0.1*
-allow-cmd curl 0.0.0.0*
-allow-cmd curl http://localhost*
-allow-cmd curl http://127.0.0.1*
-allow-cmd curl http://0.0.0.0*
-allow-cmd curl -s localhost*
-allow-cmd curl -s http://localhost*
-
-# --- Dangerous patterns ---
-deny-cmd *rm -rf /*
-deny-cmd *sudo *
-deny-cmd *chmod 777*
-deny-cmd *> /dev/sd*
-deny-cmd *mkfs*
-deny-cmd *dd if=*
-
-# --- Uncertain ---
-ask-cmd *curl *
-ask-cmd *wget *
-
-# --- Sensitive file patterns ---
-# Commands touching these skip allow rules so the LLM evaluates the risk.
-# Disabled by default. Uncomment patterns you want to protect.
-# sensitive .env
-# sensitive .pem
-# sensitive .key
-# sensitive .crt
-# sensitive .p12
-# sensitive .pfx
-# sensitive .jks
-# sensitive .ssh/
-# sensitive .aws/
-# sensitive .gnupg/
-# sensitive .kube/config
-# sensitive credentials
-# sensitive secrets
-# sensitive password
-# sensitive token
-# sensitive /etc/shadow
-# sensitive /etc/passwd
-# sensitive /etc/sudoers
-# sensitive id_rsa
-# sensitive id_ed25519
-# sensitive id_ecdsa
-# sensitive .netrc
-# sensitive .pgpass
-# sensitive .my.cnf
+		os.WriteFile(globalRules, []byte(`# ~/.yolonot/rules — global rules, every project
+# Format: <allow|ask|deny>-<cmd|path> <glob>
+#
+# Nothing is enabled here on purpose. Read-only commands are cleared by the
+# fast_allow judge; everything else is judged by your models (yolonot judges).
+# Rules are for the things you already know the answer to:
+#
+#   deny-cmd  *rm -rf /*        # never. not even if asked nicely.
+#   deny-cmd  *sudo *
+#   ask-cmd   *curl *           # always ask, whatever the model thinks
+#   allow-cmd npm test*         # never ask again
+#
+# Sensitive paths skip allow rules and fast_allow so a model always sees them:
+#
+#   sensitive .ssh/
+#   sensitive .aws/
+#   sensitive .env
+#   sensitive id_rsa
+#
+# yolonot rules --trace shows where every active rule came from.
 `), 0644)
-		fmt.Printf("  Created %s\n", globalRules)
+		fmt.Printf("  Created %s (examples only, nothing enabled)\n", globalRules)
 	} else {
 		rules := LoadRules()
 		fmt.Printf("  Exists  %s (%d rules)\n", globalRules, len(rules))
@@ -591,53 +544,47 @@ ask-cmd *wget *
 	if _, err := os.Stat(projectRules); os.IsNotExist(err) {
 		lines := []string{
 			fmt.Sprintf("# .yolonot — project rules for %s", projectName),
-			"# Format: <action>-<type> <pattern>",
+			"# Format: <allow|ask|deny>-<cmd|path> <glob>",
+			"# Nothing is enabled; uncomment what this project already knows.",
 			"",
 			"# --- Project scripts ---",
-			"allow-path scripts/*",
-			"allow-path tests/*",
-			"allow-path test_*",
+			"# allow-path scripts/*",
+			"# allow-path tests/*",
 		}
 
 		// Detect tech stack
 		if exists(filepath.Join(cwd, "pyproject.toml")) || exists(filepath.Join(cwd, "setup.py")) {
 			lines = append(lines, "", "# --- Python ---")
-			lines = append(lines, `allow-cmd uv run python -c "print*`)
-			lines = append(lines, `allow-cmd python3 -c "print*`)
+			lines = append(lines, `# allow-cmd uv run python -c "print*`)
+			lines = append(lines, `# allow-cmd python3 -c "print*`)
 		}
 		if exists(filepath.Join(cwd, "package.json")) {
 			lines = append(lines, "", "# --- Node.js ---")
-			lines = append(lines, "allow-cmd npm test*", "allow-cmd npm run build*")
+			lines = append(lines, "# allow-cmd npm test*", "# allow-cmd npm run build*")
 		}
 		if exists(filepath.Join(cwd, "go.mod")) {
 			lines = append(lines, "", "# --- Go ---")
-			lines = append(lines, "allow-cmd go test*", "allow-cmd go build*")
+			lines = append(lines, "# allow-cmd go test*", "# allow-cmd go build*")
 		}
 		if exists(filepath.Join(cwd, "Cargo.toml")) {
 			lines = append(lines, "", "# --- Rust ---")
-			lines = append(lines, "allow-cmd cargo test*", "allow-cmd cargo build*")
+			lines = append(lines, "# allow-cmd cargo test*", "# allow-cmd cargo build*")
 		}
 		if exists(filepath.Join(cwd, "Dockerfile")) || exists(filepath.Join(cwd, "docker-compose.yml")) {
 			lines = append(lines, "", "# --- Docker ---")
-			lines = append(lines, "allow-cmd docker build*", "allow-cmd docker compose*")
+			lines = append(lines, "# allow-cmd docker build*", "# allow-cmd docker compose*")
 		}
 		if isDir(filepath.Join(cwd, "deploy")) || isDir(filepath.Join(cwd, "infra")) {
 			lines = append(lines, "", "# --- Deploy/Infra ---")
-			lines = append(lines, "ask-path deploy/*", "ask-path infra/*")
+			lines = append(lines, "# ask-path deploy/*", "# ask-path infra/*")
 		}
 		if isDir(filepath.Join(cwd, "k8s")) || isDir(filepath.Join(cwd, "helm")) {
-			lines = append(lines, "ask-path k8s/*", "ask-path helm/*")
+			lines = append(lines, "# ask-path k8s/*", "# ask-path helm/*")
 		}
 
 		content := strings.Join(lines, "\n") + "\n"
 		os.WriteFile(projectRules, []byte(content), 0644)
-		ruleCount := 0
-		for _, l := range lines {
-			if l != "" && !strings.HasPrefix(l, "#") {
-				ruleCount++
-			}
-		}
-		fmt.Printf("  Created %s (%d rules)\n", projectRules, ruleCount)
+		fmt.Printf("  Created %s (examples only, nothing enabled)\n", projectRules)
 	} else {
 		rules := loadRulesFromFile(projectRules)
 		fmt.Printf("  Exists  %s (%d rules)\n", projectRules, len(rules))
@@ -657,18 +604,6 @@ func isDir(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func cmdProvider() {
-	config := LoadConfig()
-	selected, ok := pickProvider(config, false)
-	if !ok {
-		return
-	}
-	config.Provider = selected
-	SaveConfig(config)
-	fmt.Printf("\nProvider set: %s via %s\n", selected.Model, selected.URL)
-	testProviderConnection(selected)
-}
-
 // pickProvider runs the interactive provider/model picker. escalation=true
 // biases the model suggestions toward bigger models (that's the point of a
 // second opinion) and skips primary-only advice like the claude-cli speed
@@ -684,28 +619,28 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 	}
 	providers := []providerInfo{
 		{"Claude Code (subscription)", "claude-cli", []string{
-			"claude-haiku-4-5", "claude-sonnet-4-6",
+			"claude-haiku-5-5", "claude-sonnet-5-5",
 		}, []string{
 			// Opus first: the escalation slot is the judgment slot, it only
 			// fires on would-be asks, and via the subscription it costs
 			// nothing extra — only latency, which sits in front of an
 			// interruption anyway.
-			"claude-opus-4-8", "claude-sonnet-4-6",
+			"claude-opus-5-5", "claude-sonnet-5-5",
 		}, ""},
 		{"OpenAI", "https://api.openai.com/v1/chat/completions", []string{
-			"gpt-5.6-luna", "gpt-5.4-mini", "gpt-5.4-nano",
+			"gpt-6-luna", "gpt-5.6-luna", "gpt-5.4-mini",
 		}, []string{
-			"gpt-5.6-sol", "gpt-5.6-terra",
+			"gpt-6.1-sol", "gpt-6-sol",
 		}, "OPENAI_API_KEY"},
 		{"Anthropic (API)", "https://api.anthropic.com/v1/messages", []string{
-			"claude-haiku", "claude-sonnet",
+			"claude-haiku-5-5", "claude-sonnet-5-5",
 		}, []string{
-			"claude-opus", "claude-sonnet",
+			"claude-opus-5-5", "claude-sonnet-5-5",
 		}, "ANTHROPIC_API_KEY"},
 		{"xAI", "https://api.x.ai/v1/chat/completions", []string{
-			"grok-4.20-non-reasoning", "grok-4.20-reasoning",
+			"grok-4.3", "grok-4.20-0309-non-reasoning",
 		}, []string{
-			"grok-4.5", "grok-4.3",
+			"grok-4.7", "grok-4.6",
 		}, "XAI_API_KEY"},
 		{"Ollama (local)", "http://localhost:11434/v1/chat/completions", nil, nil, ""},
 		{"OpenRouter", "https://openrouter.ai/api/v1/chat/completions", nil, nil, "OPENROUTER_API_KEY"},
@@ -720,28 +655,23 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 	// Build menu items with status indicators
 	var items []string
 	for _, p := range providers {
-		icon := "✓"
 		status := "ready"
 		if p.URL == "claude-cli" {
 			if _, err := exec.LookPath("claude"); err != nil {
-				icon = "✗"
-				status = "claude not found"
+				status = "not found"
 			} else if escalation {
 				// For escalation, claude-cli is the zero-extra-cost pick and
 				// its latency only sits in front of would-be interruptions.
 				status = "subscription-covered"
 			} else {
-				icon = "⚠"
-				status = "slow — not recommended"
+				status = "slow"
 			}
 		} else if p.EnvKey != "" && os.Getenv(p.EnvKey) == "" && config.Provider.APIKey == "" {
-			icon = "✗"
 			status = "key missing"
 		} else if strings.Contains(p.URL, "localhost") {
 			if checkOllama() {
 				status = "running"
 			} else {
-				icon = "✗"
 				status = "not running"
 			}
 		}
@@ -749,26 +679,18 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 		if models := suggestedModels(p); len(models) > 0 {
 			modelHint = models[0]
 		}
-		items = append(items, fmt.Sprintf("%s %s — %s [%s]", icon, p.Name, modelHint, status))
+		items = append(items, fmt.Sprintf("%-30s %-26s %s", p.Name, modelHint, status))
 	}
 	items = append(items, "Custom endpoint")
 
-	title := "Select LLM provider"
-	curModel := envOr("LLM_MODEL", config.Provider.Model)
+	title := "Model"
 	if escalation {
-		title = "Select escalation provider"
-		curModel = envOr("LLM_ESCALATION_MODEL", "")
-		if curModel == "" && config.Escalation != nil {
-			curModel = config.Escalation.Provider.Model
-		}
-	}
-	if curModel != "" {
-		title = fmt.Sprintf("%s (current: %s)", title, curModel)
+		title = "Escalation model"
 	}
 
 	idx := tuiSelect(title, items, 0)
 	if idx < 0 {
-		fmt.Println("Cancelled.")
+		noteCancelled()
 		return ProviderConfig{}, false
 	}
 
@@ -786,10 +708,10 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 			fmt.Println("  Every command spawns a separate claude process.")
 			fmt.Println("  Recommended alternatives:")
 			fmt.Println("    - Ollama with gemma4:e4b (free, local, fast)")
-			fmt.Println("    - OpenAI gpt-5.4-nano (cheap, fast)")
+			fmt.Println("    - OpenAI gpt-6-luna (cheap, fast)")
 			fmt.Println()
 			if !tuiConfirm("Continue with Claude Code subscription?") {
-				fmt.Println("Cancelled.")
+				noteCancelled()
 				return ProviderConfig{}, false
 			}
 		}
@@ -816,7 +738,7 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 				models = append(models, "Other (type name)")
 				modelIdx := tuiSelect("Select Ollama model", models, 0)
 				if modelIdx < 0 {
-					fmt.Println("Cancelled.")
+					noteCancelled()
 					return ProviderConfig{}, false
 				}
 				if modelIdx == len(models)-1 {
@@ -836,11 +758,13 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 			// escalation the free list is the wrong pool — big models are
 			// the point — so fall through to typed input.
 			if strings.Contains(p.URL, "openrouter") && len(models) == 0 && !escalation {
-				fmt.Print("Fetching free models... ")
+				if !tuiInPage {
+					fmt.Print("Fetching free models... ")
+				}
 				models = fetchOpenRouterFreeModels()
-				if len(models) > 0 {
+				if !tuiInPage && len(models) > 0 {
 					fmt.Printf("found %d\n", len(models))
-				} else {
+				} else if !tuiInPage {
 					fmt.Println("failed")
 				}
 			}
@@ -850,7 +774,7 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 				choices = append(choices, "Other (type name)")
 				modelIdx := tuiSelect(fmt.Sprintf("Select %s model", p.Name), choices, 0)
 				if modelIdx < 0 {
-					fmt.Println("Cancelled.")
+					noteCancelled()
 					return ProviderConfig{}, false
 				}
 				if modelIdx == len(choices)-1 {
@@ -864,7 +788,7 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 		}
 
 		if model == "" {
-			fmt.Println("Cancelled.")
+			noteCancelled()
 			return ProviderConfig{}, false
 		}
 
@@ -883,12 +807,16 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 
 	case idx == len(providers):
 		url := tuiInput("API URL", "https://api.example.com/v1/chat/completions", "")
-		model := tuiInput("Model name", "e.g. my-model", "")
-		envKey := tuiInput("API key env var", "leave empty if none", "")
-		if url == "" || model == "" {
-			fmt.Println("Cancelled.")
+		if url == "" {
+			noteCancelled()
 			return ProviderConfig{}, false
 		}
+		model := tuiInput("Model name", "e.g. my-model", "")
+		if model == "" {
+			noteCancelled()
+			return ProviderConfig{}, false
+		}
+		envKey := tuiInput("API key env var", "leave empty if none", "")
 		selected = ProviderConfig{
 			Name:   "Custom",
 			URL:    url,
@@ -896,7 +824,7 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 			EnvKey: envKey,
 		}
 	default:
-		fmt.Println("Cancelled.")
+		noteCancelled()
 		return ProviderConfig{}, false
 	}
 
@@ -906,6 +834,15 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 // testProviderConnection runs the cheap "Say ok" round-trip against a
 // picked provider and prints the result. Returns true on success.
 func testProviderConnection(selected ProviderConfig) bool {
+	if tuiInPage {
+		// The settings page reports the result as a notice.
+		cfg := LLMConfig{URL: selected.URL, Model: selected.Model, APIKey: selected.APIKey, Timeout: selected.Timeout}
+		if cfg.APIKey == "" && selected.EnvKey != "" {
+			cfg.APIKey = os.Getenv(selected.EnvKey)
+		}
+		text, err := CallLLM(cfg, "Say ok", "ok", 256)
+		return err == nil && text != ""
+	}
 	fmt.Print("Testing connection... ")
 	cfg := LLMConfig{URL: selected.URL, Model: selected.Model, APIKey: selected.APIKey, Timeout: selected.Timeout}
 	if cfg.APIKey == "" && selected.EnvKey != "" {
@@ -1381,7 +1318,7 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 		}
 		w := timeWeight(e.Timestamp)
 
-		if e.Decision == "ask" && e.Layer == "llm" {
+		if e.Decision == "ask" && isModelLayer(e.Layer) {
 			b, ok := askBuckets[pat]
 			if !ok {
 				b = &bucket{}
@@ -1392,7 +1329,7 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 			if len(b.examples) < maxExamples {
 				b.examples = append(b.examples, e.Command)
 			}
-		} else if e.Decision == "allow" && e.Layer == "llm" && e.Confidence > 0 && e.Confidence < 0.8 {
+		} else if e.Decision == "allow" && isModelLayer(e.Layer) && e.Confidence > 0 && e.Confidence < 0.8 {
 			b, ok := allowBuckets[pat]
 			if !ok {
 				b = &bucket{}
@@ -1663,7 +1600,7 @@ suggestLoop:
 	}
 
 	if !tuiConfirm("Apply these changes?") {
-		fmt.Println("Cancelled.")
+		noteCancelled()
 		return
 	}
 
@@ -1692,105 +1629,6 @@ suggestLoop:
 
 }
 
-func cmdPreCheck(args []string) {
-	cfg := LoadConfig()
-
-	printHelp := func() {
-		fmt.Println("Usage:")
-		fmt.Println("  yolonot pre-check                   List configured hooks")
-		fmt.Println("  yolonot pre-check add fast-allow    Append built-in Go bash parser (no subprocess)")
-		fmt.Println("  yolonot pre-check add <path>        Append an external hook binary (e.g. dippy)")
-		fmt.Println("  yolonot pre-check remove <n|path>   Remove by index (1-based) or exact entry")
-		fmt.Println("  yolonot pre-check clear             Remove all hooks")
-		fmt.Println()
-		fmt.Println("Pre-check hooks run after deny rules, before yolonot's own pipeline,")
-		fmt.Println("in the order listed. The first entry that returns permissionDecision=\"allow\"")
-		fmt.Println("wins. Any other outcome (ask/deny/empty/error/timeout) falls through to")
-		fmt.Println("the next entry and eventually to yolonot's own rules + LLM.")
-		fmt.Println()
-		fmt.Println("The reserved entry `fast-allow` dispatches to the built-in Go bash")
-		fmt.Println("parser — cheap, strict, no fork/exec. External binaries receive the")
-		fmt.Println("standard Claude Code PreToolUse JSON on stdin.")
-		fmt.Println()
-		fmt.Println("⚠ Security: external pre-check binaries run with YOUR user privileges on")
-		fmt.Println("  every Bash tool invocation. Only add commands you trust — a malicious or")
-		fmt.Println("  compromised hook can bypass yolonot by returning \"allow\" for anything.")
-	}
-
-	if len(args) == 0 {
-		if len(cfg.PreCheck) == 0 {
-			fmt.Println("Pre-check hooks: none configured")
-		} else {
-			fmt.Println("Pre-check hooks (run in order; first allow wins):")
-			for i, p := range cfg.PreCheck {
-				if p == FastAllowSentinel {
-					fmt.Printf("  [%d] %s  (built-in Go bash parser)\n", i+1, p)
-				} else {
-					fmt.Printf("  [%d] %s\n", i+1, p)
-				}
-			}
-		}
-		fmt.Println()
-		printHelp()
-		return
-	}
-
-	switch args[0] {
-	case "add":
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "Usage: yolonot pre-check add <cmd>")
-			return
-		}
-		entry := strings.Join(args[1:], " ")
-		for _, existing := range cfg.PreCheck {
-			if existing == entry {
-				fmt.Printf("Already configured: %s\n", entry)
-				return
-			}
-		}
-		cfg.PreCheck = append(cfg.PreCheck, entry)
-		SaveConfig(cfg)
-		fmt.Printf("Added pre-check hook: %s\n", entry)
-		fmt.Printf("  (now %d hook(s) configured)\n", len(cfg.PreCheck))
-
-	case "remove", "rm":
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "Usage: yolonot pre-check remove <n|path>")
-			return
-		}
-		target := strings.Join(args[1:], " ")
-		if n, err := strconv.Atoi(target); err == nil && n >= 1 && n <= len(cfg.PreCheck) {
-			removed := cfg.PreCheck[n-1]
-			cfg.PreCheck = append(cfg.PreCheck[:n-1], cfg.PreCheck[n:]...)
-			SaveConfig(cfg)
-			fmt.Printf("Removed [%d]: %s\n", n, removed)
-			return
-		}
-		for i, p := range cfg.PreCheck {
-			if p == target {
-				cfg.PreCheck = append(cfg.PreCheck[:i], cfg.PreCheck[i+1:]...)
-				SaveConfig(cfg)
-				fmt.Printf("Removed: %s\n", p)
-				return
-			}
-		}
-		fmt.Fprintf(os.Stderr, "Not found: %s\n", target)
-
-	case "clear", "off", "none":
-		if len(cfg.PreCheck) == 0 {
-			fmt.Println("Pre-check hooks: already empty")
-			return
-		}
-		cfg.PreCheck = nil
-		SaveConfig(cfg)
-		fmt.Println("Pre-check hooks cleared.")
-
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n\n", args[0])
-		printHelp()
-	}
-}
-
 func cmdQuiet(args []string) {
 	cfg := LoadConfig()
 
@@ -1814,6 +1652,9 @@ func cmdQuiet(args []string) {
 		cfg.QuietOnAllow = false
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown value: %s (expected on|off)\n", args[0])
+		return
+	}
+	if !requireV1(&cfg) {
 		return
 	}
 	SaveConfig(cfg)
@@ -1866,19 +1707,24 @@ func cmdRisk(args []string) {
 
 	if args[1] == "reset" {
 		cfg := LoadConfig()
+		if !requireV1(&cfg) {
+			return
+		}
 		if len(args) == 2 {
-			delete(cfg.RiskMaps, h.Name())
+			hp := cfg.harnessPolicy(h.Name())
+			hp.RiskMap = nil
+			cfg.setHarnessPolicy(h.Name(), hp)
 			SaveConfig(cfg)
 			fmt.Printf("Reset all risk overrides for %s.\n", h.Name())
 			return
 		}
 		tier := args[2]
-		if cfg.RiskMaps != nil {
-			delete(cfg.RiskMaps[h.Name()], tier)
-			if len(cfg.RiskMaps[h.Name()]) == 0 {
-				delete(cfg.RiskMaps, h.Name())
-			}
+		hp := cfg.harnessPolicy(h.Name())
+		delete(hp.RiskMap, tier)
+		if len(hp.RiskMap) == 0 {
+			hp.RiskMap = nil
 		}
+		cfg.setHarnessPolicy(h.Name(), hp)
 		SaveConfig(cfg)
 		fmt.Printf("Reset %s/%s to default.\n", h.Name(), tier)
 		return
@@ -1898,13 +1744,15 @@ func cmdRisk(args []string) {
 		return
 	}
 	cfg := LoadConfig()
-	if cfg.RiskMaps == nil {
-		cfg.RiskMaps = map[string]map[string]string{}
+	if !requireV1(&cfg) {
+		return
 	}
-	if cfg.RiskMaps[h.Name()] == nil {
-		cfg.RiskMaps[h.Name()] = map[string]string{}
+	hp := cfg.harnessPolicy(h.Name())
+	if hp.RiskMap == nil {
+		hp.RiskMap = map[string]string{}
 	}
-	cfg.RiskMaps[h.Name()][tier] = action
+	hp.RiskMap[tier] = action
+	cfg.setHarnessPolicy(h.Name(), hp)
 	SaveConfig(cfg)
 	fmt.Printf("%s/%s → %s\n", h.Name(), tier, action)
 }
@@ -1913,7 +1761,7 @@ func printRiskMap(h Harness) {
 	defaults := h.RiskMap()
 	effective := ResolveRiskMap(h)
 	cfg := LoadConfig()
-	overrides := cfg.RiskMaps[h.Name()]
+	overrides := cfg.harnessPolicy(h.Name()).RiskMap
 	fmt.Printf("Risk map for harness %q:\n", h.Name())
 
 	// Header: which profile is active for this harness, including env / session pins.
@@ -1929,11 +1777,11 @@ func printRiskMap(h Harness) {
 		case os.Getenv("YOLONOT_PROFILE") != "":
 			fmt.Printf("  Profile: %s (env YOLONOT_PROFILE, this session only)\n\n", active.Name)
 		default:
-			globalName := cfg.Profile
+			globalName := cfg.Policy.Profile
 			if globalName == "" {
 				globalName = DefaultProfileName
 			}
-			if v, ok := cfg.ProfileOverride[h.Name()]; ok && v != "" && v != globalName {
+			if v := cfg.harnessPolicy(h.Name()).Profile; v != "" && v != globalName {
 				fmt.Printf("  Profile: %s (global) → %s (override)\n\n", globalName, v)
 			} else {
 				fmt.Printf("  Profile: %s\n\n", active.Name)
@@ -1965,4 +1813,77 @@ func printRiskMap(h Harness) {
 		}
 		fmt.Printf("  %-9s  %-12s  %s\n", tier, effective[tier], source)
 	}
+}
+
+var typesafeDecision = ProviderConfig{Name: "TypeSafe Jev", URL: decisionDefaultURL, Model: "jev-latest", EnvKey: "TYPESAFE_API_KEY", Timeout: 10}
+
+// decisionPresets are the decision endpoints verified live to answer the
+// yolonot question set. OpenRouter serves several models on one URL.
+var decisionPresets = []struct {
+	Name   string
+	URL    string
+	Models []string
+	EnvKey string
+}{
+	{"TypeSafe Jev", decisionDefaultURL, []string{"jev-latest"}, "TYPESAFE_API_KEY"},
+	{"OpenRouter", openRouterSystemOneURL, []string{"typesafe/jev-1.13", "microsoft/microsoft-decision-1"}, "OPENROUTER_API_KEY"},
+	{"OpenAI Decisions", openAIDecisionsURL, []string{"gpt-6-luna"}, "OPENAI_API_KEY"},
+	{"Cloudflare Workers AI", workersAIClefURL, []string{"clef-flash", "clef"}, "CLOUDFLARE_API_TOKEN"},
+}
+
+// pickDecisionProvider chooses the typed decision model. "Custom" takes
+// any System One URL. ok=false on cancel.
+func pickDecisionProvider() (ProviderConfig, bool) {
+	var items []string
+	for _, p := range decisionPresets {
+		status := "ready"
+		if os.Getenv(p.EnvKey) == "" {
+			status = "key missing"
+		}
+		items = append(items, fmt.Sprintf("%-30s %-26s %s", p.Name, p.Models[0], status))
+	}
+	items = append(items, "Custom System One endpoint")
+	idx := tuiSelect("Decision model", items, 0)
+	switch {
+	case idx < 0:
+		return ProviderConfig{}, false
+	case idx == len(decisionPresets):
+		url := tuiInput("API URL", "https://api.example.com/v1/systemone", "")
+		if url == "" {
+			return ProviderConfig{}, false
+		}
+		model := tuiInput("Model name", "e.g. jev-latest", "")
+		if model == "" {
+			return ProviderConfig{}, false
+		}
+		envKey := tuiInput("API key env var", "leave empty if none", "")
+		return ProviderConfig{Name: "custom", URL: url, Model: model, EnvKey: envKey, Timeout: 10}, true
+	}
+	p := decisionPresets[idx]
+	model := p.Models[0]
+	if len(p.Models) > 1 {
+		choices := append(append([]string{}, p.Models...), "Other (type name)")
+		m := tuiSelect("Select "+p.Name+" model", choices, 0)
+		if m < 0 {
+			return ProviderConfig{}, false
+		}
+		if m == len(choices)-1 {
+			model = tuiInput("Model name", "", "")
+		} else {
+			model = choices[m]
+		}
+		if model == "" {
+			return ProviderConfig{}, false
+		}
+	}
+	url := p.URL
+	if strings.Contains(url, "{account_id}") {
+		account := tuiInput("Cloudflare account id", "32 hex characters", os.Getenv("CLOUDFLARE_ACCOUNT_ID"))
+		if account == "" {
+			return ProviderConfig{}, false
+		}
+		// Workers AI addresses the model in the path; the body's "model" is the short name.
+		url = strings.Replace(url, "{account_id}", account, 1) + model
+	}
+	return ProviderConfig{Name: p.Name, URL: url, Model: model, EnvKey: p.EnvKey, Timeout: 10}, true
 }

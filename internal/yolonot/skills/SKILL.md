@@ -26,9 +26,9 @@ Parse the user's input to determine which command to run. The argument after `/y
 
 The skill is split into two classes of commands. Match exactly:
 
-**Run directly (read-only):** `status`, `log`, `rules`, `stats`, `check`, `profile` (no args / `list` / `show`), `risk` (show forms), `pre-check` (list), `quiet` (no args), `escalation` (no args / `test`).
+**Run directly (read-only):** `status`, `log`, `rules`, `stats`, `check`, `profile` (no args / `list` / `show`), `risk` (show forms), `judges` (list), `models` (list / `test`), `prompt` (all forms), `quiet` (no args), `escalation` (no args / `test`).
 
-**Print the command, do NOT execute (mutating / safety-sensitive):** `pause`, `resume`, `reset`, `approve`, `deny`, `profile use|reset|create|delete`, `risk <h> <tier> <action>` and `risk <h> reset`, `pre-check add|remove|clear`, `quiet on|off`, `escalation on|off|setup`, `suggest`, `init`, `setup`, `install`, `uninstall`, `provider`, `upgrade`.
+**Print the command, do NOT execute (mutating / safety-sensitive):** `pause`, `resume`, `reset`, `approve`, `deny`, `profile use|reset|create|delete`, `risk <h> <tier> <action>` and `risk <h> reset`, `judges add|remove|move`, `models add|remove`, `quiet on|off`, `escalation on|off|setup`, `suggest`, `init`, `setup`, `install`, `uninstall`, `migrate`, `upgrade`.
 
 For mutations, format the response as:
 
@@ -70,7 +70,8 @@ Commands:
   /yolonot stats           — show decision analytics
   /yolonot profile [...]   — pick risk profile (fast/balanced/strict/paranoid + custom)
   /yolonot risk [...]      — show/set per-harness risk tier → action policy
-  /yolonot pre-check       — manage pre-checkers (fast-allow + external hooks like dippy)
+  /yolonot judges          — the judge chain: fast_allow, exec:<hook>, model names
+  /yolonot models          — model catalog (chat + typed decision models)
   /yolonot escalation      — second-opinion model status (on|off|setup|test)
   /yolonot quiet [on|off]  — silence banners for allow decisions
   /yolonot init            — create rule files for this project
@@ -334,27 +335,27 @@ What it does: pins codex/moderate → deny in `~/.yolonot/config.json`, beating 
 
 Env vars override config at runtime: `YOLONOT_CODEX_RISK_MODERATE=deny` (single shell session only).
 
-### `/yolonot pre-check [add|remove|clear] [...]` — Manage pre-checkers
+### `/yolonot judges [add|remove|move] [...]` — The judge chain
 
-The pre-check list is yolonot's ordered fast-path layer. Entries can be the reserved `fast-allow` sentinel (built-in Go bash parser, no subprocess) or external hook binaries (e.g. dippy). First `allow` wins; anything else falls through. Added by default at `yolonot setup`: `fast-allow` at the head of the list.
+The chain is the ordered list of judges in `~/.yolonot/config.json`. Entries are `fast_allow` (built-in Go bash parser, no subprocess), `exec:<path>` (an external hook binary such as dippy) or a model name from `yolonot models` (a typed decision model like TypeSafe Jev, or a chat model). The first judge whose verdict is permitted wins; `fast_allow` and `exec:` judges may only allow, models may allow or ask. Rules and session memory run before the chain; escalation and the risk map run once after it.
 
-**Read-only — run directly:** `yolonot pre-check` (lists entries in execution order).
+**Read-only — run directly:** `yolonot judges` (lists entries in execution order with kind and permitted decisions), `yolonot models` (the catalog).
 
-**Mutation — print, do not run.** Print the add/remove/clear command for the user:
+**Mutation — print, do not run.** Print the command for the user:
 
 ```
 Run this when you're ready:
 
-    yolonot pre-check add fast-allow
+    yolonot judges add fast_allow
 
-What it does: enables the built-in bash parser as a pre-check. Skips LLM calls for syntactically safe commands. Remove with `yolonot pre-check remove fast-allow`.
+What it does: appends the built-in bash parser to the chain. Skips model calls for syntactically safe commands. Remove with `yolonot judges remove fast_allow`; reorder with `yolonot judges move fast_allow up`.
 ```
 
-Other mutating forms: `yolonot pre-check add /opt/homebrew/bin/dippy`, `yolonot pre-check remove <n|fast-allow|path>`, `yolonot pre-check clear`.
+Other mutating forms: `yolonot judges add exec:/opt/homebrew/bin/dippy`, `yolonot judges add <model-name>`, `yolonot judges remove <n|entry>`, `yolonot judges move <n|entry> up|down`, `yolonot models add [typed]`, `yolonot models remove <name>`.
 
-External hooks receive the standard Claude Code PreToolUse JSON on stdin and must return a standard hook response on stdout. Only `permissionDecision: "allow"` short-circuits; `ask`/`deny`/empty/timeout/error all fall through. Pre-check runs after yolonot's deny rules but before session memory, rules, cache, and the LLM — a yolonot deny rule always beats a pre-check allow.
+External hooks receive the standard Claude Code PreToolUse JSON on stdin and must return a standard hook response on stdout. Only `permissionDecision: "allow"` short-circuits; `ask`/`deny`/empty/timeout/error all fall through to the next judge. A yolonot deny rule always beats a judge allow.
 
-**`fast-allow` details.** Only fires when the command parses cleanly and contains no command substitution, no redirect except to `/dev/null` (or paths matched by `allow-redirect` rules — see below), no chaining, no subshell, no prefix assignment, and the head command (or `git <sub>` / `docker <sub>` / etc.) is in the built-in allowlist. Multiplex-tool config-injection flags (`git -c`, `git --config-env`, `docker --config`, `kubectl --kubeconfig`, `helm --kube-apiserver` / `--kube-ca-file`, `aws --ca-bundle`, `npm --userconfig` / `--globalconfig`) are rejected — they can execute arbitrary code. Anything else falls through to external pre-checks (if any), then rules / cache / LLM. Decisions show up as `fast_allow` in logs and stats.
+**`fast_allow` details.** Only fires when the command parses cleanly and contains no command substitution, no redirect except to `/dev/null` (or paths matched by `allow-redirect` rules — see below), no chaining, no subshell, no prefix assignment, and the head command (or `git <sub>` / `docker <sub>` / etc.) is in the built-in allowlist. Multiplex-tool config-injection flags (`git -c`, `git --config-env`, `docker --config`, `kubectl --kubeconfig`, `helm --kube-apiserver` / `--kube-ca-file`, `aws --ca-bundle`, `npm --userconfig` / `--globalconfig`) are rejected — they can execute arbitrary code. Anything else falls through to the next judge. Decisions show up as `fast_allow`, `exec:<hook>` or the model name in logs and stats.
 
 ### Rule file syntax — messages, redirects, walk-up
 
@@ -389,7 +390,7 @@ allow-hint  "kubectl read/exec/edit on namespace staging is routine"
 ask-hint    "any kubectl write against namespace api requires confirmation"
 ```
 
-Hints stack across the walk-up chain (no first-match — union) and merge with classifier hints in `~/.yolonot/config.json` (`classifier.context` / `classifier.allow_hints` / `classifier.ask_hints`). Inspect the resolved merged set with `yolonot classifier config` (read-only); audit for ambiguity / redundancy with `yolonot classifier review`. See `docs/llm-customization.md` for the full schema and the `$defaults` sentinel.
+Hints stack across the walk-up chain (no first-match — union) and merge with prompt hints in `~/.yolonot/config.json` (`prompt.context` / `prompt.allow_hints` / `prompt.ask_hints`). Inspect the resolved merged set with `yolonot prompt config` (read-only); audit for ambiguity / redundancy with `yolonot prompt review`. See `docs/prompt.md` for the full schema and the `$defaults` sentinel.
 
 **Skill behavior — hints are AI-suggest-only.** When the user asks the assistant to "add a hint" / "tell yolonot about this namespace" / similar, the assistant must:
 
@@ -405,7 +406,7 @@ What it does: nudges the LLM classifier toward `allow` on commands matching this
 description. Reversible — delete the line.
 ```
 
-Never invoke `Edit`, `Write`, `tee >>`, or `echo >>` against `.yolonot`, `~/.yolonot/rules`, or `~/.yolonot/config.json`. Read-only inspection (`yolonot classifier config`, `yolonot classifier review`) may be invoked directly.
+Never invoke `Edit`, `Write`, `tee >>`, or `echo >>` against `.yolonot`, `~/.yolonot/rules`, or `~/.yolonot/config.json`. Read-only inspection (`yolonot prompt config`, `yolonot prompt review`) may be invoked directly.
 
 A first-class `yolonot hint add|remove|list` binary surface and an interactive `yolonot init` (interview for namespace/service/env when infra dirs detected) are tracked separately — see project issues.
 
@@ -520,15 +521,15 @@ Below is the exact behavior of `init` — explanatory only:
 - For partial match in approve/deny: match if stored command contains user's input as substring
 - All session files live in `~/.yolonot/sessions/`
 - Session files are project-scoped: `{SESSION_ID}_{PROJECT_HASH}.{approved,asked,denied}` — a command approved in project A is NOT auto-approved in project B. Pause is session-wide (not project-scoped).
-- Session similarity (Step 2) pre-filters approved commands by executable prefix before calling the LLM. If no approved commands share the same executable, the LLM similarity call is skipped entirely.
+- Session similarity runs once before the first model judge and pre-filters approved commands by executable prefix before calling the chat model. If no approved commands share the same executable, the LLM similarity call is skipped entirely.
 - When the LLM is unavailable or returns unparseable output, yolonot emits a systemMessage: "yolonot: LLM unreachable, falling back to host permissions" instead of silently falling back.
-- Per-harness risk → action policy (set via `yolonot risk`) decides what each tier does. Defaults ship with the binary; `risk_maps` in `~/.yolonot/config.json` and `YOLONOT_<HARNESS>_RISK_<TIER>` env vars override.
+- Per-harness risk → action policy (set via `yolonot risk`) decides what each tier does. Defaults ship with the binary; `policy.harness.<name>.risk_map` in `~/.yolonot/config.json` and `YOLONOT_<HARNESS>_RISK_<TIER>` env vars override.
 - Display commands truncated to 80 chars with `...` if longer
 - NEVER auto-modify rules without user confirmation
 - NEVER read tool_response content from audit logs (privacy)
 - `.yolonot` rule format: `allow-cmd <pattern>`, `deny-cmd <pattern>`, `ask-cmd <pattern>`, `allow-path <pattern>`, `deny-path <pattern>`, `ask-path <pattern>`
 - For suggest cross-reference: match session_id between decisions.jsonl and audit PermissionRequest events
-- LLM response schema (returned by the configured provider, consumed by the hook):
+- Model response schema (returned by a chat model, consumed by the hook; typed decision models are folded into the same shape):
   ```json
   {"decision":"allow|ask","risk":"safe|low|moderate|high|critical","short":"≤6-word banner","reasoning":"one sentence","compared_to":"optional"}
   ```

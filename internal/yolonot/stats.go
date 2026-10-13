@@ -3,6 +3,7 @@ package yolonot
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -119,7 +120,7 @@ func cmdStats() {
 		}
 
 		// Instant allows
-		if e.Decision == "allow" && (layer == "rule" || layer == "pre_check" || layer == "session" || layer == "cache") {
+		if e.Decision == "allow" && (layer == "rule" || layer == "pre_check" || strings.HasPrefix(layer, "exec:") || layer == "fast_allow" || layer == "session" || layer == "cache") {
 			instantAllows++
 		}
 
@@ -269,7 +270,7 @@ func extractDate(ts string) string {
 
 func sortedLayerKeys(m map[string]int) []string {
 	// Preferred order for known layers
-	preferred := []string{"rule", "pre_check", "session", "session_llm", "cache", "llm", "session_deny"}
+	preferred := []string{"rule", "fast_allow", "pre_check", "session", "session_llm", "cache", "llm", "session_deny"}
 	var result []string
 	seen := map[string]bool{}
 	for _, k := range preferred {

@@ -509,89 +509,29 @@ func cmdHook() {
 		return
 	}
 
-	// Step 1: Pre-check hooks. Fast deterministic gates that run before
-	// yolonot's own pipeline, in the order configured. Only "allow"
-	// short-circuits — ask/deny/empty all fall through to the next hook and
-	// ultimately to yolonot's own rules/LLM (matches the common chain-hook
-	// convention).
-	//
-	// Two kinds of entries share this list:
-	//   1. FastAllowSentinel — dispatches to the built-in Go bash parser
-	//      (no fork/exec). Cheap, strict, always available.
-	//   2. Anything else — treated as an external binary path and invoked
-	//      with the standard Claude Code hook JSON on stdin (e.g. Dippy).
-	for _, preCheck := range config.PreCheck {
-		if preCheck == "" {
-			continue
-		}
-		if preCheck == FastAllowSentinel {
-			// Any rule match already short-circuited at step 0, so reaching
-			// fast_allow means no user rule applies — safe to consult the
-			// built-in parser.
-			if ok, reason := fastallow.IsLocallySafeWith(command, AllowRedirectPatterns(rules)); ok {
-				if sessionID != "" {
-					saveApproved(projSessionID, command, cwd)
-				}
-				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "fast_allow", Decision: "allow", Reasoning: reason})
-				emitHook(hookResponse("allow", "fast_allow", reason, command))
-				return
-			}
-			continue
-		}
-		if _, reason, ok := runPreCheck(preCheck, canonicalInput); ok {
-			if sessionID != "" {
-				saveApproved(projSessionID, command, cwd)
-			}
-			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "pre_check", Decision: "allow", Reasoning: reason})
-			layer := "pre_check (" + preCheckShortName(preCheck) + ")"
-			emitHook(hookResponse("allow", layer, reason, command))
-			return
-		}
+	// The judge chain (prechecks, classifier), then escalation on an
+	// adopted classifier verdict. Session similarity and the script cache
+	// are consulted once, right before the first remote judge.
+	specs := config.JudgeSpecs()
+	in := &JudgeInput{Command: command, Cwd: cwd, Canonical: canonicalInput, Rules: rules,
+		Config: config, Harness: ActiveHarness(), HookStart: hookStart}
+	beforeRemote := func() bool {
+		return hookMemoryLookup(command, cwd, sessionID, projSessionID, contentStale)
 	}
-
-	// Step 2: Session similarity (LLM compare). Skipped when the content
-	// gate flagged this exact command as stale — the identical string sits
-	// in the approved list, so the compare would trivially answer "same
-	// command, allow" and launder the stale approval right back in.
-	if sessionID != "" && !contentStale {
-		approved := ReadLines(projSessionID, "approved")
-		candidates := filterByPrefix(command, approved)
-		if len(candidates) > 0 {
-			cfg := GetLLMConfig()
-			userPrompt := BuildComparePrompt(command, candidates)
-			start := time.Now()
-			text, err := CallLLM(cfg, ComparePrompt, userPrompt, 256)
-			ms := time.Since(start).Milliseconds()
-			if err == nil {
-				d := ParseDecision(text)
-				if d != nil && d.Decision == "allow" {
-					// The compare layer says "similar enough to an already
-					// approved command" — that approval already flowed
-					// through a risk map once. Don't re-map here.
-					saveApproved(projSessionID, command, cwd)
-					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "allow", Short: d.Short, Reasoning: d.Reasoning, DurationMs: ms})
-					emitHook(hookResponse("allow", "session_llm", d.Reasoning, command))
-					return
-				}
-			}
-		}
+	v, jerr, done := RunJudges(specs, in, beforeRemote)
+	if done {
+		return
 	}
+	if v == nil {
+		hookNoVerdict(jerr, payload, command, cwd, sessionID, projSessionID)
+		return
+	}
+	escalateUncertain(in, v)
 
-	// Step 4: Script cache check
-	if cached := checkCache(command, cwd); cached != nil {
-		// Route cached decisions through the risk map so cache + live LLM
-		// paths apply the same policy. Older cache entries without a Risk
-		// tier fall through with their original decision (no map applied).
-		finalDecision, passthrough := applyRiskMap(ActiveHarness(), cached.Decision, cached.Risk)
-		LogDecision(DecisionEntry{
-			SessionID: sessionID, Command: command, Cwd: cwd, Layer: "cache",
-			Decision: finalDecision, Risk: cached.Risk, Confidence: cached.Confidence, Short: cached.Short,
-			Reasoning: fmt.Sprintf("orig=%s → %s (cached) %s", cached.Decision, finalDecision, cached.Reasoning),
-			// A cache hit on a big-model-earned verdict must keep its
-			// provenance — otherwise every replay looks like a plain
-			// primary decision in the audit trail.
-			Escalated: cached.Escalated,
-		})
+	// Non-classifier verdict (fast_allow / exec hook): allow-only today.
+	if v.Dec == nil {
+		finalDecision, passthrough := applyRiskMap(ActiveHarness(), v.Decision, v.Risk)
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: v.Layer, Decision: finalDecision, Risk: v.Risk, Reasoning: v.Reason})
 		if passthrough {
 			emitHook("")
 			return
@@ -601,106 +541,21 @@ func cmdHook() {
 			if sessionID != "" {
 				saveApproved(projSessionID, command, cwd)
 			}
-			emitHook(hookResponse("allow", "cache", cached.Reasoning, command))
+			emitHook(hookResponse("allow", v.Layer, v.Reason, command))
 		case "deny":
-			emitHook(hookResponse("deny", "cache", cached.Reasoning, command))
-		default: // ask
+			emitHook(hookResponse("deny", v.Layer, v.Reason, command))
+		default:
 			if sessionID != "" {
 				AppendLine(projSessionID, "asked", command)
 			}
-			emitHook(hookResponse("ask", "cache", cached.Reasoning, command))
+			emitHook(hookResponse("ask", v.Layer, v.Reason, command))
 		}
 		return
 	}
 
-	// Step 5: LLM analysis. Collect the referenced scripts ONCE so the
-	// prompt the LLM sees and the cache key we later persist are computed
-	// from the same filesystem snapshot — re-reading after the round-trip
-	// could hash bytes the classifier never judged.
-	cfg := GetLLMConfig()
-	attachedScripts, withheldScripts := collectScripts(command, cwd)
-	userPrompt := buildPromptFromCollected(command, attachedScripts, withheldScripts)
-
-	// Oversize guard: if the assembled prompt exceeds the budget, do not ship
-	// it to the LLM. Apply the active profile's abstain action (its critical
-	// policy, never more permissive than ask) instead of silently deferring
-	// to the host — which fails open on ask-less harnesses. Uncached: the
-	// oversized content is exactly what we could not judge.
-	if len(userPrompt) > maxClassifierPromptBytes {
-		act := abstainAction(ActiveHarness())
-		reason := fmt.Sprintf("classifier prompt %d KB exceeds %d KB budget; profile abstain → %s",
-			len(userPrompt)/1024, maxClassifierPromptBytes/1024, act)
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "oversize", Decision: act, Reasoning: reason})
-		if act == "deny" {
-			emitHook(hookResponse("deny", "oversize", reason, command))
-		} else { // abstainAction only ever returns deny or ask
-			if sessionID != "" {
-				AppendLine(projSessionID, "asked", command)
-			}
-			emitHook(hookResponse("ask", "oversize", reason, command))
-		}
-		return
-	}
-
-	cacheKey := hashCollected(command, attachedScripts, withheldScripts)
-	start := time.Now()
-	// Augment the base prompt with the user's classifier hints — the
-	// classifier block from config.json plus context/allow-hint/ask-hint
-	// directives from the .yolonot walk-up chain. Must stay in sync with
-	// cmdCheck: if this passes the bare SystemPrompt const, `yolonot check`
-	// reports decisions the hook will not actually make.
-	hints := LoadHints()
-	sysPrompt := BuildSystemPrompt(config.Classifier, hints)
-	// A full base-prompt override is the most likely cause of an
-	// unparseable reply (a malformed custom prompt), so remember it for the
-	// parse-error banner below — the reactive backstop to `classifier verify`.
-	overrideActive := HasSystemPromptOverride(config.Classifier, hints)
-	text, err := CallLLM(cfg, sysPrompt, userPrompt, 4096)
-	ms := time.Since(start).Milliseconds()
-	if err != nil {
-		// LLM unavailable → emit decisionless envelope with the
-		// incoming hookEventName so Claude Code's schema accepts it
-		// (literal match on hookEventName, permissionDecision omitted
-		// via omitempty so CC defers to host permissions). The
-		// systemMessage banner surfaces the failure in the user's
-		// terminal. Codex/Cursor/Gemini adapters short-circuit on
-		// empty PermissionDecision and emit "" — banner is Claude/
-		// OpenCode-only by design.
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: "LLM unavailable: " + err.Error(), DurationMs: ms})
-		r := HookResponse{}
-		r.HookSpecificOutput.HookEventName = payload.HookEventName
-		r.SystemMessage = "yolonot: 🧑‍🚀 LLM unreachable, falling back to host permissions"
-		emitHook(activeHarnessFormat(r))
-		return
-	}
-
-	d := ParseDecision(text)
-	if d == nil {
-		// Parse error → same envelope shape as LLM-unreachable, with
-		// a parse-specific banner. When a custom system_prompt override is
-		// active, name it as the likely cause and point at `verify` — this
-		// is the one signal a wrongly-set override reliably surfaces at
-		// runtime (Verbosef is -v-only and invisible on the hook path).
-		reason := "parse error"
-		banner := "yolonot: 🧑‍🚀 LLM response parse error, falling back to host permissions"
-		if overrideActive {
-			reason = "parse error (custom system_prompt override active)"
-			banner = "yolonot: 🧑‍🚀 LLM reply unparseable — custom system_prompt may be malformed; run `yolonot classifier verify`. Falling back to host permissions"
-		}
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm", Decision: "passthrough", Reasoning: reason, DurationMs: ms})
-		r := HookResponse{}
-		r.HookSpecificOutput.HookEventName = payload.HookEventName
-		r.SystemMessage = banner
-		emitHook(activeHarnessFormat(r))
-		return
-	}
-
-	// Escalation: when the primary verdict is uncertain in a way a second,
-	// bigger model could improve, consult it once and adopt under the
-	// guardrails in maybeEscalate. Mutates d on adoption, so the cache
-	// write below persists the post-adoption verdict (with provenance) and
-	// the risk map resolves the adopted tier like any other.
-	escOut, escCacheOK := maybeEscalate(ActiveHarness(), config, d, sysPrompt, userPrompt, hookStart)
+	d := v.Dec
+	escOut, escCacheOK := v.Esc, v.CacheOK
+	ms := v.Ms
 
 	// Risk map: classifier gave us (decision, risk). Active harness
 	// decides the final action per its RiskMap. "passthrough" returns an
@@ -726,11 +581,11 @@ func cmdHook() {
 	// policy, and a cached "ask" would contradict this run's deny on every
 	// replay.
 	if escCacheOK && unresolvedReason == "" {
-		saveCacheHash(cacheKey, d)
+		saveCacheHash(v.CacheKey, d)
 	}
 
 	entry := DecisionEntry{
-		SessionID: sessionID, Command: command, Cwd: cwd, Layer: "llm",
+		SessionID: sessionID, Command: command, Cwd: cwd, Layer: strings.TrimSuffix(v.Layer, "+esc"),
 		Decision: finalDecision, Risk: d.Risk, Confidence: d.Confidence, Short: d.Short,
 		Reasoning:  fmt.Sprintf("orig=%s → %s %s", d.Decision, finalDecision, d.Reasoning),
 		DurationMs: ms,
@@ -745,10 +600,7 @@ func cmdHook() {
 		emitHook("")
 		return
 	}
-	layer := "llm"
-	if d.Escalated {
-		layer = "llm+esc"
-	}
+	layer := v.Layer
 	switch finalDecision {
 	case "allow":
 		if sessionID != "" {
@@ -771,6 +623,133 @@ func cmdHook() {
 			AppendLine(projSessionID, "asked", command)
 		}
 		emitHook(hookResponse("ask", layer, d.Reasoning, command))
+	}
+}
+
+// hookMemoryLookup is the former steps 2 and 4: session similarity (LLM
+// compare) and the script cache. Returns true when it emitted a response.
+func hookMemoryLookup(command, cwd, sessionID, projSessionID string, contentStale bool) bool {
+	// Session similarity. Skipped when the content gate flagged this exact
+	// command as stale — the identical string sits in the approved list,
+	// so the compare would trivially answer "same command, allow" and
+	// launder the stale approval right back in.
+	if sessionID != "" && !contentStale {
+		approved := ReadLines(projSessionID, "approved")
+		candidates := filterByPrefix(command, approved)
+		cfg := GetLLMConfig()
+		// A decision model cannot answer a free-text compare; the command falls
+		// through to the cache/classifier like any un-approved one.
+		if len(candidates) > 0 && requireChatModel(cfg) == nil {
+			userPrompt := BuildComparePrompt(command, candidates)
+			start := time.Now()
+			text, err := CallLLM(cfg, ComparePrompt, userPrompt, 256)
+			ms := time.Since(start).Milliseconds()
+			if err == nil {
+				d := ParseDecision(text)
+				if d != nil && d.Decision == "allow" {
+					// The compare layer says "similar enough to an already
+					// approved command" — that approval already flowed
+					// through a risk map once. Don't re-map here.
+					saveApproved(projSessionID, command, cwd)
+					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_llm", Decision: "allow", Short: d.Short, Reasoning: d.Reasoning, DurationMs: ms})
+					emitHook(hookResponse("allow", "session_llm", d.Reasoning, command))
+					return true
+				}
+			}
+		}
+	}
+
+	// Script cache.
+	cached := checkCache(command, cwd)
+	if cached == nil {
+		return false
+	}
+	// Route cached decisions through the risk map so cache + live LLM
+	// paths apply the same policy. Older cache entries without a Risk
+	// tier fall through with their original decision (no map applied).
+	finalDecision, passthrough := applyRiskMap(ActiveHarness(), cached.Decision, cached.Risk)
+	LogDecision(DecisionEntry{
+		SessionID: sessionID, Command: command, Cwd: cwd, Layer: "cache",
+		Decision: finalDecision, Risk: cached.Risk, Confidence: cached.Confidence, Short: cached.Short,
+		Reasoning: fmt.Sprintf("orig=%s → %s (cached) %s", cached.Decision, finalDecision, cached.Reasoning),
+		// A cache hit on a big-model-earned verdict must keep its
+		// provenance — otherwise every replay looks like a plain
+		// primary decision in the audit trail.
+		Escalated: cached.Escalated,
+	})
+	if passthrough {
+		emitHook("")
+		return true
+	}
+	switch finalDecision {
+	case "allow":
+		if sessionID != "" {
+			saveApproved(projSessionID, command, cwd)
+		}
+		emitHook(hookResponse("allow", "cache", cached.Reasoning, command))
+	case "deny":
+		emitHook(hookResponse("deny", "cache", cached.Reasoning, command))
+	default: // ask
+		if sessionID != "" {
+			AppendLine(projSessionID, "asked", command)
+		}
+		emitHook(hookResponse("ask", "cache", cached.Reasoning, command))
+	}
+	return true
+}
+
+// hookNoVerdict handles a chain that produced nothing: an oversize prompt
+// applies the profile abstain action; a classifier failure emits the
+// decisionless envelope so the host's own permission layer takes over.
+func hookNoVerdict(jerr *judgeError, payload HookPayload, command, cwd, sessionID, projSessionID string) {
+	if jerr == nil {
+		// Nothing configured that could decide — transparent.
+		emitHook("")
+		return
+	}
+	switch jerr.Kind {
+	case judgeErrOversize:
+		// Do not ship an oversized prompt to any model. Apply the active
+		// profile's abstain action (its critical policy, never more
+		// permissive than ask) instead of silently deferring to the host —
+		// which fails open on ask-less harnesses. Uncached: the oversized
+		// content is exactly what we could not judge.
+		act := abstainAction(ActiveHarness())
+		reason := fmt.Sprintf("%s; profile abstain → %s", jerr.Msg, act)
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "oversize", Decision: act, Reasoning: reason})
+		if act == "deny" {
+			emitHook(hookResponse("deny", "oversize", reason, command))
+		} else { // abstainAction only ever returns deny or ask
+			if sessionID != "" {
+				AppendLine(projSessionID, "asked", command)
+			}
+			emitHook(hookResponse("ask", "oversize", reason, command))
+		}
+	case judgeErrParse:
+		// When a custom system_prompt override is active, name it as the
+		// likely cause and point at `verify` — this is the one signal a
+		// wrongly-set override reliably surfaces at runtime.
+		reason := "parse error"
+		banner := "yolonot: 🧑‍🚀 LLM response parse error, falling back to host permissions"
+		if jerr.Override {
+			reason = "parse error (custom system_prompt override active)"
+			banner = "yolonot: 🧑‍🚀 LLM reply unparseable — custom system_prompt may be malformed; run `yolonot classifier verify`. Falling back to host permissions"
+		}
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: passthroughLayer(), Decision: "passthrough", Reasoning: reason, DurationMs: jerr.Verdict.Ms})
+		r := HookResponse{}
+		r.HookSpecificOutput.HookEventName = payload.HookEventName
+		r.SystemMessage = banner
+		emitHook(activeHarnessFormat(r))
+	default:
+		// LLM unavailable → decisionless envelope with the incoming
+		// hookEventName so Claude Code's schema accepts it (permissionDecision
+		// omitted via omitempty so CC defers to host permissions). The
+		// systemMessage banner surfaces the failure in the user's terminal.
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: passthroughLayer(), Decision: "passthrough", Reasoning: "LLM unavailable: " + jerr.Msg, DurationMs: jerr.Verdict.Ms})
+		r := HookResponse{}
+		r.HookSpecificOutput.HookEventName = payload.HookEventName
+		r.SystemMessage = "yolonot: 🧑‍🚀 LLM unreachable, falling back to host permissions"
+		emitHook(activeHarnessFormat(r))
 	}
 }
 
@@ -958,4 +937,13 @@ func saveCacheHash(hash string, d *Decision) {
 	cachePath := filepath.Join(dir, hash+".json")
 	os.WriteFile(cachePath, data, 0600)
 	os.Chmod(cachePath, 0600)
+}
+
+// passthroughLayer attributes an unavailable-model passthrough to the first
+// chat model in the chain, or "model" when the chain names none.
+func passthroughLayer() string {
+	if n := LoadConfig().ChatModelName(); n != "" {
+		return n
+	}
+	return "model"
 }

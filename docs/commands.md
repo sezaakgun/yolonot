@@ -3,27 +3,32 @@
 ## CLI
 
 ```
-yolonot              Status overview + session summary + update check
-yolonot setup        First-run wizard (install + rules + provider)
+yolonot              Status overview + session summary + update check (opens the settings screen on a terminal)
+yolonot setup        First-run wizard (install + rules + models + chain)
+yolonot config       Settings screen: judges, models, policy (profiles, harness overrides, rules), prompt
 yolonot install      Install hooks only (see --harness flags)
-yolonot provider     Change LLM provider (interactive TUI)
+yolonot models       Model catalog: list | add [typed] | remove <name> | test <name>
+yolonot judges       Judge chain: list | add <entry> | remove <n|entry> | move <n|entry> up|down
 yolonot rules        Show active rules + sensitive patterns
 yolonot status       Show session state (approved/asked/denied)
-yolonot log          Show recent decisions with LLM timing
+yolonot log          Show recent decisions with model timing
 yolonot suggest      Analyze history, suggest permanent rules
 yolonot stats        Show analytics from decision history
 yolonot check <cmd>  Dry-run: what would the pipeline decide?
 yolonot risk         Show/set per-harness risk tier → action policy
-yolonot classifier   Inspect/validate the LLM prompt customization (defaults|config|review|verify)
-yolonot pre-check    Manage pre-checkers (fast-allow + external hooks)
-yolonot escalation   Second-opinion model consulted before surfacing an ask
+yolonot profile      Pick a named risk policy (fast/balanced/strict/paranoid + custom)
+yolonot prompt       Inspect/validate the chat-model prompt customization (defaults|config|review|verify)
+yolonot escalation   Second-opinion model consulted before surfacing an ask (on|off|setup|test)
 yolonot quiet        Silence banners for allow decisions (only show ask/deny)
+yolonot migrate      Rewrite a 0.x config.json in the 1.x format (--dry-run | --undo)
 yolonot pause        Disable yolonot for current session (total bypass)
 yolonot resume       Re-enable yolonot for current session
 yolonot uninstall    Remove hooks from the active harness(es)
 yolonot upgrade      Update to latest release
 yolonot version      Show version
 ```
+
+Removed in 1.0: `provider`, `decision` (use `models add`), `pre-check` (use `judges`), `classifier` (renamed `prompt`), `local-allow`, `threshold`. Each prints the replacement and exits 2.
 
 ### Verbose mode
 
@@ -52,19 +57,19 @@ yolonot quiet off      # restore default
 
 Quiet mode only affects the user-facing `systemMessage`. The underlying `permissionDecision` + `permissionDecisionReason` still flow to the host CLI, and the decision log (`yolonot log`) is unchanged.
 
-### Classifier customization
+### Prompt customization
 
-All read-only inspectors for the LLM classifier's prompt. Full reference: [llm-customization.md](llm-customization.md).
+Read-only inspectors for the chat model's prompt. Full reference: [prompt.md](prompt.md).
 
 ```bash
-yolonot classifier defaults    # Built-in base prompt + (empty) default hint lists, as JSON
-yolonot classifier config      # Effective prompt actually sent (config + walk-up, $defaults expanded)
-yolonot classifier review      # LLM audits your custom hints for ambiguity/redundancy/over-reach
-yolonot classifier verify      # Prove a custom system_prompt still yields parseable verdicts
-yolonot classifier             # Shorthand for `config`
+yolonot prompt defaults    # Built-in base prompt + (empty) default hint lists, as JSON
+yolonot prompt config      # Effective prompt actually sent (config + walk-up, $defaults expanded)
+yolonot prompt review      # The chat model audits your custom hints for ambiguity/redundancy/over-reach
+yolonot prompt verify      # Prove a custom system_prompt still yields parseable verdicts
+yolonot prompt             # Shorthand for `config`
 ```
 
-Customize via `~/.yolonot/config.json` (`classifier.{context,allow_hints,ask_hints,system_prompt}`) or per-project `.yolonot` directives (`context`/`allow-hint`/`ask-hint`/`system-prompt`). `system_prompt` fully replaces the built-in base; hints still append. **Run `verify` after setting a `system_prompt`** — it static-checks the JSON verdict contract and round-trips real probes through your provider, exiting non-zero if the override wouldn't function.
+Customize via `~/.yolonot/config.json` (`prompt.{context,allow_hints,ask_hints,system_prompt}`) or per-project `.yolonot` directives (`context`/`allow-hint`/`ask-hint`/`system-prompt`). `system_prompt` fully replaces the built-in base; hints still append. **Run `verify` after setting a `system_prompt`** — it static-checks the JSON verdict contract and round-trips real probes through your chat model, exiting non-zero if the override wouldn't function.
 
 ## Skill (`/yolonot`)
 

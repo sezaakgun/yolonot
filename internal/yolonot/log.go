@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -84,8 +85,9 @@ func LogDecision(entry DecisionEntry) {
 	if err != nil {
 		return
 	}
-	f.Write(data)
-	f.WriteString("\n")
+	// One write per record: O_APPEND makes a single write atomic, two
+	// writes from concurrent hooks interleave into a glued line + a blank.
+	f.Write(append(data, '\n'))
 }
 
 // ReadRecentDecisions reads the last n entries from the decision log.
@@ -167,11 +169,11 @@ func cmdLog(n int) {
 				esc = fmt.Sprintf("  ⤴esc %dms", e.EscalationMs)
 			}
 		}
-		cmd := e.Command
+		cmd := strings.ReplaceAll(e.Command, "\n", " ⏎ ")
 		if len(cmd) > 60 {
 			cmd = cmd[:57] + "..."
 		}
-		fmt.Printf("  %s  %-6s %-14s %s%s%s%s\n", ts, e.Decision, e.Layer, cmd, extra, dur, esc)
+		fmt.Printf("  %s  %-6s %-18s %s%s%s%s\n", ts, e.Decision, e.Layer, cmd, extra, dur, esc)
 	}
 
 	// Total count

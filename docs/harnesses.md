@@ -100,7 +100,7 @@ Session id arrives on stdin as `conversation_id`. Cursor does not export a sessi
 
 ## Escalation per harness
 
-The [escalation model](providers.md#escalation-second-opinion-model) triggers on the classifier's *raw* uncertainty (`decision: ask`, any non-critical tier) or on a resolved ask, so it fires consistently across harnesses — but what a rescue or harden buys you differs:
+The [escalation model](models.md#escalation-second-opinion-model) triggers on the classifier's *raw* uncertainty (`decision: ask`, any non-critical tier) or on a resolved ask, so it fires consistently across harnesses — but what a rescue or harden buys you differs:
 
 | Harness | What escalation changes |
 |---------|------------------------|

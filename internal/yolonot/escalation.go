@@ -286,51 +286,47 @@ func cmdEscalation(args []string) {
 
 	switch strings.ToLower(args[0]) {
 	case "on", "true", "1", "yes", "y":
-		if cfg.Escalation == nil {
-			if esc := GetEscalationConfig(); esc.URL != "" && esc.Model != "" {
-				fmt.Println("Escalation is configured via LLM_ESCALATION_* env vars (no config block to toggle).")
-				fmt.Println("It is on unless YOLONOT_ESCALATION=off is set in the environment.")
-				return
-			}
+		if cfg.Escalation == nil || cfg.Escalation.Model == "" {
 			fmt.Println("Escalation is not configured yet. Run: yolonot escalation setup")
+			return
+		}
+		if !requireV1(&cfg) {
 			return
 		}
 		cfg.Escalation.Disabled = false
 		SaveConfig(cfg)
 		fmt.Printf("Escalation: ON — %s consulted before surfacing an ask.\n", GetEscalationConfig().Model)
 	case "off", "false", "0", "no", "n":
-		if cfg.Escalation == nil {
-			if esc := GetEscalationConfig(); esc.URL != "" && esc.Model != "" {
-				fmt.Println("Escalation is configured via LLM_ESCALATION_* env vars.")
-				fmt.Println("Disable it with: export YOLONOT_ESCALATION=off")
-				return
-			}
+		if cfg.Escalation == nil || cfg.Escalation.Model == "" {
 			fmt.Println("Escalation is not configured; nothing to turn off.")
 			return
 		}
-		// Keep the provider block — re-enabling must not need a re-setup.
+		if !requireV1(&cfg) {
+			return
+		}
+		// Keep the model reference — re-enabling must not need a re-setup.
 		cfg.Escalation.Disabled = true
 		SaveConfig(cfg)
-		fmt.Println("Escalation: OFF — provider config kept; re-enable with: yolonot escalation on")
+		fmt.Println("Escalation: OFF — model reference kept; re-enable with: yolonot escalation on")
 	case "setup":
-		selected, ok := pickProvider(cfg, true)
+		if !requireV1(&cfg) {
+			return
+		}
+		name, ok := pickEscalationModel(&cfg)
 		if !ok {
 			return
 		}
-		if cfg.Escalation == nil {
-			cfg.Escalation = &EscalationConfig{}
-		}
-		cfg.Escalation.Provider = selected
-		cfg.Escalation.Disabled = false
+		setEscalationModel(&cfg, name)
 		SaveConfig(cfg)
-		fmt.Printf("\nEscalation provider set: %s via %s\n", selected.Model, selected.URL)
-		testProviderConnection(selected)
+		m := cfg.Models[name]
+		fmt.Printf("\nEscalation model set: %s (%s via %s)\n", name, m.Model, m.URL)
+		testProviderConnection(m)
 	case "test":
 		// Non-interactive connection test (CI preflight): resolves config
 		// including env overrides and inheritance, exits 0/1.
 		esc := GetEscalationConfig()
 		if esc.URL == "" || esc.Model == "" {
-			fmt.Fprintln(os.Stderr, "escalation: not configured (no provider in config.json and no LLM_ESCALATION_URL/LLM_ESCALATION_MODEL)")
+			fmt.Fprintln(os.Stderr, "escalation: not configured (no escalation.model in config.json)")
 			os.Exit(1)
 		}
 		fmt.Printf("Resolved: %s via %s\n", esc.Model, esc.URL)
@@ -374,7 +370,7 @@ func printEscalationStatus(cfg Config) {
 	fmt.Println("  Trigger:    primary classifier uncertain (would ask), except critical")
 	fmt.Printf("  Unresolved: %s\n", EscalationUnresolved(cfg))
 	if prim := GetLLMConfig(); prim.URL == esc.URL && prim.Model == esc.Model {
-		fmt.Println("  ⚠ Escalation resolves to the SAME provider+model as the primary —")
+		fmt.Println("  ⚠ Escalation resolves to the SAME endpoint+model as the chat judge —")
 		fmt.Println("    asking the same model twice is not a second opinion.")
 	}
 

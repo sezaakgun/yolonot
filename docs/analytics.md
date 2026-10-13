@@ -2,7 +2,7 @@
 
 yolonot records every decision to `~/.yolonot/decisions.jsonl` with timestamp, decision, layer that produced it, and LLM timing where applicable. Three tools surface that data.
 
-When [escalation](providers.md#escalation-second-opinion-model) is configured, each affected line also carries the full second-opinion record — built for post-mortems of unattended runs: `escalated`, `escalation_model`, `escalation_decision`, `escalation_risk`, `escalation_reasoning` (truncated), `escalation_ms`, `escalation_error` (`timeout`/`api`/`transport`/`parse`), `escalation_outcome` (`rescued`/`hardened`/`kept`/`error`/`skipped:<reason>`), and `primary_risk` (the pre-adoption tier when a verdict was adopted). Cache replays of an escalation-earned verdict keep `escalated: true` so provenance survives.
+When [escalation](models.md#escalation-second-opinion-model) is configured, each affected line also carries the full second-opinion record — built for post-mortems of unattended runs: `escalated`, `escalation_model`, `escalation_decision`, `escalation_risk`, `escalation_reasoning` (truncated), `escalation_ms`, `escalation_error` (`timeout`/`api`/`transport`/`parse`), `escalation_outcome` (`rescued`/`hardened`/`kept`/`error`/`skipped:<reason>`), and `primary_risk` (the pre-adoption tier when a verdict was adopted). Cache replays of an escalation-earned verdict keep `escalated: true` so provenance survives.
 
 ## Human ask resolutions
 
@@ -15,7 +15,7 @@ These entries are labels, not gate decisions — `yolonot stats` reports them on
 
 ## `yolonot log`
 
-Shows recent decisions with the reason string, layer (rule / session / cache / LLM / fast_allow / pre_check), and LLM latency. Decisions where the [escalation model](providers.md#escalation-second-opinion-model) fired carry a `⤴esc` marker with the escalation latency.
+Shows recent decisions with the reason string, layer (rule / session / cache / fast_allow / exec:<hook> / the model name), and LLM latency. Decisions where the [escalation model](models.md#escalation-second-opinion-model) fired carry a `⤴esc` marker with the escalation latency.
 
 ```bash
 yolonot log
@@ -30,7 +30,7 @@ Aggregate view. Shows:
 
 - Total decisions.
 - Allow / ask / deny percentages.
-- Layer distribution (rule / session / cache / LLM / fast_allow / pre_check).
+- Layer distribution (rule / session / cache / fast_allow / exec:<hook> / model names).
 - Average LLM latency.
 - Instant allows (no LLM needed).
 - Escalation counters when configured: fired / rescued (rescue-%) / hardened / errors / average latency — the numbers that say whether the second model is earning its keep.

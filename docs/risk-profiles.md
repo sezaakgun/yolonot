@@ -100,7 +100,7 @@ Inside Claude, ask the assistant to run `/yolonot profile use fast --session`. T
 
 1. Harness shipped default (`Harness.RiskMap()`).
 2. Active profile (resolved above), translated through the harness's ask-fallback rules.
-3. `~/.yolonot/config.json` `risk_maps` per-cell override for that harness.
+3. `~/.yolonot/config.json` `policy.harness.<name>.risk_map` per-cell override for that harness.
 4. `YOLONOT_<HARNESS>_RISK_<TIER>=<action>` env vars.
 
 This means profile changes are non-destructive: any per-cell tweak you've already made via `yolonot risk <harness> <tier> <action>` keeps winning.

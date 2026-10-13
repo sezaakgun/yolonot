@@ -35,7 +35,7 @@ func TestPrintClassifierDefaultsJSONShape(t *testing.T) {
 // short-circuits when there's nothing to audit — we don't want to burn an
 // LLM call for an empty hint set.
 func TestBuildClassifierReviewUserPromptEmpty(t *testing.T) {
-	got := buildClassifierReviewUserPrompt(ClassifierConfig{}, WalkupHints{})
+	got := buildClassifierReviewUserPrompt(PromptConfig{}, WalkupHints{})
 	if got != "" {
 		t.Errorf("expected empty prompt for empty hints; got %q", got)
 	}
@@ -44,7 +44,7 @@ func TestBuildClassifierReviewUserPromptEmpty(t *testing.T) {
 // TestBuildClassifierReviewUserPromptStructure checks the sectioning of
 // the review prompt: each non-empty bucket gets its own labeled section.
 func TestBuildClassifierReviewUserPromptStructure(t *testing.T) {
-	got := buildClassifierReviewUserPrompt(ClassifierConfig{
+	got := buildClassifierReviewUserPrompt(PromptConfig{
 		Context:    []string{"trusted: x"},
 		AllowHints: []string{"a"},
 		AskHints:   []string{"b"},
@@ -136,8 +136,8 @@ func TestPrintClassifierEffectiveEndToEnd(t *testing.T) {
 	}
 
 	// Backend field
-	if payload["backend"] != "llm" {
-		t.Errorf("backend: got %v, want %q", payload["backend"], "llm")
+	if payload["backend"] != "gpt-5.4-mini" {
+		t.Errorf("backend: got %v, want the chat model name", payload["backend"])
 	}
 
 	// $defaults sentinel must have expanded (no raw "$defaults" leaks)
@@ -258,7 +258,7 @@ func TestExecuteClassifierReviewNoProvider(t *testing.T) {
 	if called {
 		t.Errorf("reviewCallLLM should not be invoked without provider config")
 	}
-	if !strings.Contains(stderr.String(), "LLM provider not configured") {
+	if !strings.Contains(stderr.String(), "no chat model in the judge chain") {
 		t.Errorf("stderr missing provider error: %s", stderr.String())
 	}
 }
@@ -369,10 +369,10 @@ func TestCmdClassifierDispatch(t *testing.T) {
 			`"system_prompt"`, ""},
 		{"help",
 			[]string{"help"},
-			`Usage: yolonot classifier`, ""},
+			`Usage: yolonot prompt`, ""},
 		{"-h flag",
 			[]string{"-h"},
-			`Usage: yolonot classifier`, ""},
+			`Usage: yolonot prompt`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

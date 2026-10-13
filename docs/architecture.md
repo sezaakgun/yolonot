@@ -13,7 +13,11 @@ yolonot/
 │   │   ├── rules.go            # rule loading + chain/redirect/sensitive detection
 │   │   ├── session.go          # approved/asked/denied session files
 │   │   ├── config.go           # config + settings.json + install targets + many cmd* handlers
-│   │   ├── classifier.go       # risk tier → action mapping
+│   │   ├── classifier.go       # risk tiers + risk map resolution
+│   │   ├── config_v1.go        # model catalog, judge list encoding, v0 → v1 fold
+│   │   ├── judge.go            # the judge chain
+│   │   ├── decision.go         # typed decision-model backend (System One / OpenAI Decisions)
+│   │   ├── models.go           # `models` and `migrate` verbs
 │   │   ├── tui.go              # interactive TUI (charmbracelet/huh)
 │   │   ├── update.go           # GitHub release update checker + `upgrade` command
 │   │   ├── embed.go            # embedded SKILL.md + OpenCode plugin TS
@@ -47,7 +51,7 @@ All yolonot data lives at `~/.yolonot/`:
 
 | Path | Purpose |
 |------|---------|
-| `config.json` | Provider, model, timeout, pre-check list, risk overrides, harness settings |
+| `config.json` | Model catalog, judge chain, escalation, prompt hints, policy (see [models.md](models.md)) |
 | `rules` | Global rules (allow/deny/ask) |
 | `sessions/` | Per-session per-project approved/asked/denied lists |
 | `cache/` | Attached-script content hash (command + full-file sha256s) → cached LLM decisions |

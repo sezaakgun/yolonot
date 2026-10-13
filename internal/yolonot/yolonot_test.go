@@ -525,8 +525,8 @@ func TestConfigLoadSave(t *testing.T) {
 	SaveConfig(cfg)
 
 	loaded := LoadConfig()
-	if loaded.Provider.Model != "gpt-5.4-nano" {
-		t.Errorf("got model=%s, want gpt-5.4-nano", loaded.Provider.Model)
+	if name := loaded.ChatModelName(); name != "gpt-5.4-nano" || loaded.Models[name].Model != "gpt-5.4-nano" {
+		t.Errorf("got %+v, want chat model gpt-5.4-nano", loaded.Models)
 	}
 }
 
@@ -693,13 +693,6 @@ func TestGetLLMConfig(t *testing.T) {
 		t.Errorf("config model = %s, want qwen:7b", cfg.Model)
 	}
 
-	// Env var takes top precedence
-	os.Setenv("LLM_MODEL", "gpt-5.4-nano")
-	defer os.Unsetenv("LLM_MODEL")
-	cfg = GetLLMConfig()
-	if cfg.Model != "gpt-5.4-nano" {
-		t.Errorf("env model = %s, want gpt-5.4-nano", cfg.Model)
-	}
 	_ = dir
 }
 
@@ -1079,8 +1072,13 @@ func TestCmdInit(t *testing.T) {
 		t.Error("global rules should exist")
 	}
 	globalContent, _ := os.ReadFile(globalRules)
-	if !strings.Contains(string(globalContent), "deny-cmd *rm -rf /*") {
-		t.Error("global rules should contain rm deny")
+	if !strings.Contains(string(globalContent), "deny-cmd  *rm -rf /*") {
+		t.Error("global rules should show the rm deny example")
+	}
+	for _, line := range strings.Split(string(globalContent), "\n") {
+		if l := strings.TrimSpace(line); l != "" && !strings.HasPrefix(l, "#") {
+			t.Errorf("seeded global rules must be comments only, got %q", line)
+		}
 	}
 
 	// Project rules created with stack detection
@@ -3969,11 +3967,8 @@ func TestCmdProviderSaveAndLoad(t *testing.T) {
 		EnvKey: "OPENAI_API_KEY",
 	}})
 	cfg := LoadConfig()
-	if cfg.Provider.Name != "OpenAI" {
-		t.Errorf("name = %s, want OpenAI", cfg.Provider.Name)
-	}
-	if cfg.Provider.Model != "gpt-4o-mini" {
-		t.Errorf("model = %s, want gpt-4o-mini", cfg.Provider.Model)
+	if m := cfg.Models[cfg.ChatModelName()]; m.Name != "OpenAI" || m.Model != "gpt-4o-mini" {
+		t.Errorf("got %+v, want OpenAI gpt-4o-mini", m)
 	}
 
 	// Custom model override
@@ -3983,8 +3978,8 @@ func TestCmdProviderSaveAndLoad(t *testing.T) {
 		Model: "custom-nano",
 	}})
 	cfg = LoadConfig()
-	if cfg.Provider.Model != "custom-nano" {
-		t.Errorf("model = %s, want custom-nano", cfg.Provider.Model)
+	if m := cfg.Models[cfg.ChatModelName()]; m.Model != "custom-nano" {
+		t.Errorf("model = %s, want custom-nano", m.Model)
 	}
 
 	// Custom endpoint
@@ -3994,11 +3989,8 @@ func TestCmdProviderSaveAndLoad(t *testing.T) {
 		Model: "my-custom-model",
 	}})
 	cfg = LoadConfig()
-	if cfg.Provider.Model != "my-custom-model" {
-		t.Errorf("model = %s, want my-custom-model", cfg.Provider.Model)
-	}
-	if cfg.Provider.URL != server.URL {
-		t.Errorf("url = %s, want %s", cfg.Provider.URL, server.URL)
+	if m := cfg.Models[cfg.ChatModelName()]; m.Model != "my-custom-model" || m.URL != server.URL {
+		t.Errorf("got %+v, want my-custom-model at %s", m, server.URL)
 	}
 
 	// Ollama config
@@ -4008,22 +4000,10 @@ func TestCmdProviderSaveAndLoad(t *testing.T) {
 		Model: "llama3:8b",
 	}})
 	cfg = LoadConfig()
-	if cfg.Provider.Model != "llama3:8b" {
-		t.Errorf("model = %s, want llama3:8b", cfg.Provider.Model)
+	if m := cfg.Models[cfg.ChatModelName()]; m.Model != "llama3:8b" {
+		t.Errorf("model = %s, want llama3:8b", m.Model)
 	}
 	_ = dir
-}
-
-func TestCmdProviderInteractiveRequiresTerminal(t *testing.T) {
-	// cmdProvider uses huh TUI which requires a real terminal.
-	// In piped mode it cancels gracefully.
-	_, cleanup := withFakeHome(t)
-	defer cleanup()
-
-	out := captureStdout(cmdProvider)
-	if !strings.Contains(out, "Cancelled") {
-		t.Errorf("piped stdin should cancel gracefully, got: %s", out)
-	}
 }
 
 // --- cmdEvolve (non-interactive: skip all) ---
@@ -4419,8 +4399,8 @@ func TestCheck_NoRuleMatch_LLMAllow(t *testing.T) {
 	if !strings.Contains(out, "ALLOW") {
 		t.Errorf("expected ALLOW in output, got: %s", out)
 	}
-	if !strings.Contains(out, "layer: llm") {
-		t.Errorf("expected 'layer: llm' in output, got: %s", out)
+	if !strings.Contains(out, "layer: test") {
+		t.Errorf("expected 'layer: test' in output, got: %s", out)
 	}
 	if !strings.Contains(out, "safe read-only command") {
 		t.Errorf("expected reasoning in output, got: %s", out)
@@ -4441,8 +4421,8 @@ func TestCheck_NoProvider(t *testing.T) {
 
 	out := captureStdout(func() { cmdCheck("some random command") })
 
-	if !strings.Contains(out, "no provider configured") {
-		t.Errorf("expected 'no provider configured' in output, got: %s", out)
+	if !strings.Contains(out, "no judge decided") {
+		t.Errorf("expected 'no judge decided' in output, got: %s", out)
 	}
 	if !strings.Contains(out, "PASS-THROUGH") {
 		t.Errorf("expected PASS-THROUGH in output, got: %s", out)
@@ -4574,10 +4554,7 @@ func TestHook_SimilaritySkippedWhenNoPrefix(t *testing.T) {
 	}))
 	defer server.Close()
 
-	os.Setenv("LLM_URL", server.URL)
-	os.Setenv("LLM_MODEL", "test-model")
-	defer os.Unsetenv("LLM_URL")
-	defer os.Unsetenv("LLM_MODEL")
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test-model"}})
 
 	// Empty project dir (no rules to match)
 	projectDir := filepath.Join(dir, "project")
@@ -5090,8 +5067,8 @@ func TestCmdHookLLMAllowBannerOnlyHasLayerAndCommand(t *testing.T) {
 	if strings.Contains(out, "strictly read-only and listing") {
 		t.Errorf("allow banner should not include long Reasoning, got: %s", out)
 	}
-	if !strings.Contains(out, "llm") || !strings.Contains(out, "ls -la") {
-		t.Errorf("expected '🧑‍🚀 llm -> ls -la' banner, got: %s", out)
+	if !strings.Contains(out, "test -") || !strings.Contains(out, "ls -la") {
+		t.Errorf("expected '🧑‍🚀 test -> ls -la' banner, got: %s", out)
 	}
 }
 
