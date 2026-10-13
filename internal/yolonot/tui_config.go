@@ -229,7 +229,18 @@ func projectRulesPath() (string, string) {
 
 // --- chain editors ---
 
-var mayChoices = [][]string{{"allow"}, {"allow", "ask"}, {"allow", "ask", "deny"}, nil}
+var mayChoices = [][]string{{"allow"}, {"allow", "deny"}, {"allow", "ask"}, {"allow", "ask", "deny"}, {"ask", "deny"}, {"deny"}, nil}
+
+var mayLabels = []string{"Allow (else hand to the next judge)", "Allow, deny", "Allow, ask", "Allow, ask, deny", "Ask, deny", "Deny", "Default for this judge kind"}
+
+func mayIndex(may []string) int {
+	for i, c := range mayChoices {
+		if strings.Join(c, ",") == strings.Join(may, ",") {
+			return i
+		}
+	}
+	return len(mayChoices) - 1
+}
 
 func editJudgeAt(i int) func(*Config) {
 	return func(cfg *Config) {
@@ -242,7 +253,7 @@ func editJudgeAt(i int) func(*Config) {
 			return
 		}
 		if choice == 3 {
-			m := tuiSelect("What may "+sp.Use+" decide?", []string{"Allow", "Allow, ask", "Allow, ask, deny", "Default"}, 3)
+			m := tuiSelect("What may "+sp.Use+" decide?", mayLabels, mayIndex(sp.May))
 			if m < 0 {
 				return
 			}

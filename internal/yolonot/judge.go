@@ -170,6 +170,7 @@ func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 		return Verdict{}, false, &judgeError{Kind: judgeErrUnavailable, Msg: "skipped — no provider configured for " + spec.Use}
 	}
 	hints := LoadHints()
+	addPrecedentHints(&hints, in.Command, in.Cwd)
 	sysPrompt := BuildSystemPrompt(in.Config.Prompt, hints)
 	override := HasSystemPromptOverride(in.Config.Prompt, hints)
 

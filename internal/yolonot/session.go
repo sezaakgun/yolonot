@@ -253,7 +253,9 @@ func CleanOldSessions() {
 			strings.HasSuffix(name, ".asked") ||
 			strings.HasSuffix(name, ".denied") ||
 			strings.HasSuffix(name, ".paused") ||
-			strings.HasSuffix(name, ".profile") {
+			strings.HasSuffix(name, ".profile") ||
+			strings.HasSuffix(name, ".mod") ||
+			strings.HasSuffix(name, ".once") {
 			info, err := e.Info()
 			if err != nil {
 				continue

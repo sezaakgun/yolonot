@@ -24,6 +24,7 @@ type HookPayload struct {
 	SessionID      string                 `json:"session_id"`
 	Cwd            string                 `json:"cwd"`
 	ToolInput      map[string]interface{} `json:"tool_input"`
+	ToolUseID      string                 `json:"tool_use_id,omitempty"`
 	PermissionMode string                 `json:"permission_mode,omitempty"` // Claude Code only
 }
 
@@ -213,6 +214,7 @@ func buildHookResponse(decision, layer, reason, command string) HookResponse {
 // no stray newline reaches stdout.
 func hookResponse(decision, layer, reason, command string) string {
 	r := buildHookResponse(decision, layer, reason, command)
+	modRecord(decision, layer, reason)
 	return activeHarnessFormat(r)
 }
 
@@ -279,6 +281,8 @@ func cmdHook() {
 		return
 	}
 	currentPermissionMode = payload.PermissionMode
+	modRun = os.Getenv("YOLONOT_MOD") == "1"
+	modSessionID, modToolUseID, modStart = payload.SessionID, payload.ToolUseID, hookStart
 
 	// Pre-check binaries (Dippy et al.) follow Claude's PreToolUse contract,
 	// so always feed them the canonical Claude JSON — never the raw stdin
@@ -320,6 +324,16 @@ func cmdHook() {
 		}
 	}
 
+	// The Claude mod already judged this call (see mod.go): replay its
+	// verdict, banner-free, instead of judging twice.
+	if !modRun && payload.HookEventName == "PreToolUse" {
+		if e := modLookup(sessionID, payload.ToolUseID); e != nil {
+			quietOnAllow = true
+			emitHook(hookResponse(e.Decision, e.Layer, e.Reason, command))
+			return
+		}
+	}
+
 	// Load config once — used by pre-check, risk-map resolution, quiet-on-
 	// allow banner suppression, and the script-attach boundary. Keeps disk
 	// reads down to one per hook invocation. Loaded BEFORE the PostToolUse
@@ -327,7 +341,7 @@ func cmdHook() {
 	// boundary (attachOutsideRoot) must match what PreToolUse used —
 	// otherwise open-mode approvals for outside-root scripts never stick.
 	config := LoadConfig()
-	quietOnAllow = config.QuietOnAllow
+	quietOnAllow = config.QuietOnAllow && !modRun
 	attachOutsideRoot = config.AttachOutsideRoot
 	// Register user-defined wrappers (Config.Wrappers) with fast_allow so
 	// `mycli ls` unwraps to `ls`. Idempotent — safe to call every hook.
@@ -338,6 +352,9 @@ func cmdHook() {
 	// pinned to the contents the user actually saw run).
 	if payload.HookEventName == "PostToolUse" {
 		if sessionID != "" && command != "" {
+			if dropLineOrVariant(projSessionID, "once", command) {
+				return
+			}
 			// Human verdict: this run resolves a pending ask. The command
 			// sits on the asked list with no approval recorded yet, and
 			// PostToolUse means the user answered yes — log that as a

@@ -86,6 +86,10 @@ func Run() {
 		n := 20
 		if len(os.Args) > 2 {
 			arg := os.Args[2]
+			if arg == "--human" {
+				cmdLogHuman()
+				return
+			}
 			if arg == "-n" && len(os.Args) > 3 {
 				arg = os.Args[3]
 			}
@@ -145,6 +149,10 @@ func Run() {
 	// Hidden commands (still work, not shown in help)
 	case "hook":
 		cmdHook()
+	case "mod":
+		cmdMod(os.Args[2:])
+	case "explain":
+		cmdExplain(os.Args[2:])
 	case "install":
 		cmdInstall()
 	case "init":

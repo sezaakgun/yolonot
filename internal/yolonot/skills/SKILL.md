@@ -248,6 +248,29 @@ ask-cmd *docker compose exec*
 allow-cmd chmod +x scripts/*
 ```
 
+### `/yolonot learn` — Turn the user's answers to asks into classifier hints
+
+Good at the end of a session, or whenever yolonot asked several times. You do the distilling; yolonot only supplies the data.
+
+**Step 1 (run):**
+
+```bash
+yolonot log --human
+```
+
+One line per command the user allowed or denied when asked, in this repository, latest answer per command ("allow once" answers are not included). Nothing listed means nothing to learn yet.
+
+**Step 2:** read the current hints (`.yolonot` in the repo root, `allow-hint` / `ask-hint` lines) and propose at most 6 new ones as a numbered list, each one plain sentence about a kind of command plus the commands it rests on. Rules:
+- An `allow-hint` says what is routine here; an `ask-hint` says what must be confirmed and why. Never write an ask-hint that calls something allowed.
+- Generalise only as far as the evidence goes. A wrapper or prefix (`rtk proxy`, `bash -c`, `sudo`, `env`) is never the kind; the wrapped command is.
+- No hint from a single allowed example. No hint whose evidence contradicts it (the same command both allowed and denied means "leave it to the judges").
+- Never override the user's answer: if they allowed it, do not propose asking for it.
+- Never restate an existing hint; never copy secrets, tokens or account ids into a sentence.
+
+**Step 3:** ask which proposals to keep. Append the accepted ones to the repo's `.yolonot` under a `# Learned by yolonot (YYYY-MM-DD)` line, one `allow-hint <sentence>` / `ask-hint <sentence>` per line. For a hint that should hold in every project, print `yolonot config` (PROMPT section) instead of editing `~/.yolonot/config.json` yourself.
+
+Precedents also reach the judges on their own: the closest past answers in this repository are added to every judge call's hints, so a repeated ask often stops without any hint being written.
+
 ### `/yolonot check <command>` — Dry-run pipeline test
 
 Test what the pipeline would decide for a command without running through Claude Code. Shows each layer's result.

@@ -27,6 +27,24 @@ Uninstall mirrors this: `yolonot uninstall --harness <name>` or `--all`. Without
 
 Restart the host CLI after install so it re-reads hooks.
 
+## Claude Code mod
+
+Claude Code 2.1.296+ loads plugin *function hooks* (mods): a TypeScript module that can gate tool calls, draw in the transcript and above the prompt. `yolonot install --mod` writes one to `~/.yolonot/mod/` and names it in `~/.claude/settings.json` under `env.CLAUDE_CODE_PLUGIN_DIRS`. Restart Claude Code to load it; `yolonot uninstall` (or `yolonot mod uninstall`) removes it. Older builds ignore the module and keep the classic hook.
+
+With the mod loaded:
+
+- **Verdict line.** Under every shell command the transcript folds ("Ran 1 shell command") a dim line shows the deciding layer, the time, and the command: `● yolonot fast_allow · 21 ms · echo hi`. Asks and denies carry the reason. The allow banner is not printed twice.
+- **Four-way ask.** Instead of Claude's yes/no prompt, a yolonot dialog offers *Allow once*, *Allow this session*, *Explain* and *Deny*. Explain asks the chat model for a three-line note (`yolonot explain`) and re-asks. Allow once runs the command without remembering it; Allow this session is the usual session approval; Deny records a session rejection.
+- **No wrapped retries.** A command the user denied is refused again when the model retries it through `bash -c`, `sh -c` or a heredoc, with a note telling the model to ask you instead of rewording the call.
+- **Nothing else.** No status row, no buttons: `yolonot pause` / `resume` and rule suggestions (`yolonot suggest`) stay on the command line; the mod never proposes a rule.
+
+How it works: the mod runs `yolonot hook` itself for every Bash call (before Claude's permission path) and records the verdict per `tool_use_id` in `~/.yolonot/sessions/<session>.mod`; the classic PreToolUse hook then replays that record instead of judging twice. Headless (`claude -p`) sessions load the mod but have no dialog: an ask there is refused. Once installed, every later `yolonot install` refreshes the mod too.
+
+Two differences from the classic hook alone:
+
+- The mod does not see Claude's permission mode, so it judges under `--dangerously-skip-permissions` as well, where the classic hook stays silent. Pause yolonot for the session if that is not what you want.
+- On a machine with managed settings, Claude's `sec-default` module skips user-tier `classic.*` hooks and `prompt.context`; the mod uses neither, which is why it runs the hook itself. The mod was developed and tested on such a machine, Claude Code 2.1.296; unmanaged machines should behave the same but were not tested.
+
 ## Runtime pinning
 
 The hook binary is installed with `--harness <name>` baked into the host's hook command, so it routes to the right adapter automatically. To force-pin from your shell (e.g. for `yolonot check` against a specific harness):

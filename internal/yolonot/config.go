@@ -409,6 +409,18 @@ func cmdInstall() {
 		}
 	}
 
+	// --mod opts in; an existing mod dir is refreshed on every install so an
+	// upgrade never leaves an old register.tsx behind.
+	modPath := ""
+	if _, err := os.Stat(modDir()); hasFlag("--mod") || err == nil {
+		p, err := modInstall(bp)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mod install failed: %v\n", err)
+			os.Exit(1)
+		}
+		modPath = p
+	}
+
 	fmt.Println("yolonot installed.")
 	fmt.Printf("  Hook command → %s hook\n", bp)
 	fmt.Printf("  Data dir     → %s\n", YolonotDir())
@@ -417,6 +429,9 @@ func cmdInstall() {
 	}
 	for _, p := range skillPaths {
 		fmt.Printf("  Skill        → %s\n", p)
+	}
+	if modPath != "" {
+		fmt.Printf("  Mod          → %s (Claude Code function hooks)\n", modPath)
 	}
 
 	// Per-harness caveats: Gemini needs --yolo, Codex/OpenCode don't have
@@ -497,6 +512,7 @@ func cmdUninstall() {
 			Verbosef("skill uninstall for %s failed: %v", h.Name(), err)
 		}
 	}
+	modUninstall()
 
 	fmt.Println("yolonot uninstalled. Restart your AI coding CLI to deactivate.")
 	fmt.Printf("Data preserved at %s — delete manually if wanted.\n", YolonotDir())

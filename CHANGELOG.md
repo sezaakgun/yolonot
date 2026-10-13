@@ -60,8 +60,25 @@ reader stays through 1.x and goes away in 2.0. Full table in
   piped stdin prints the text status.
 - **`yolonot migrate [--dry-run|--undo]`** and `yolonot prompt` (was
   `classifier`).
+- **Claude Code mod** (`yolonot install --mod`, Claude Code 2.1.296+). A
+  function-hooks module under `~/.yolonot/mod/`: a verdict line with layer
+  and timing under every shell command, a four-way ask dialog (allow once,
+  allow this session, explain, deny), refusal of `bash -c`/heredoc retries
+  of a denied command. `yolonot explain <cmd>` backs the Explain button. The classic hook replays the
+  mod's verdict per `tool_use_id` (session `.mod` file) instead of judging
+  twice. See [docs/harnesses.md](docs/harnesses.md#claude-code-mod).
+- **Precedents and `/yolonot learn`.** Your answers to asks (allow this
+  session, deny) are kept in `~/.yolonot/precedents.jsonl`; the closest
+  ones from the same repository are added to every judge call's hints, for
+  chat and typed models alike. `yolonot log --human` lists them per
+  project; the `/yolonot learn` skill turns them into `allow-hint` /
+  `ask-hint` lines for the project `.yolonot`, with the harness's own
+  model doing the distilling. "Allow once" answers are never learned from.
 
 ### Changed
+- The settings screen's "what may this judge decide" chooser lists every
+  combination (allow-only, allow+deny, ask+deny, deny-only, ...) and opens
+  on the judge's current value instead of always on Default.
 - `prompt.*` replaces `classifier.*` (`impl` and the unused classifier
   registry are gone); `policy.{profile,profiles,harness}` replaces
   `profile`, `custom_profiles`, `profile_override`, `risk_maps`.

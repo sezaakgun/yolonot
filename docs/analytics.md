@@ -22,6 +22,7 @@ Shows recent decisions with the reason string, layer (rule / session / cache / f
 ```bash
 yolonot log          # last 20
 yolonot log 50       # last 50 (also: yolonot log -n 50)
+yolonot log --human  # your answers to asks in this repository, latest per command
 ```
 
 Useful when you want to understand why a specific command was allowed/asked/denied.

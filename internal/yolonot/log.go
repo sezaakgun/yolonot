@@ -65,6 +65,7 @@ func LogDecision(entry DecisionEntry) {
 	if entry.PermissionMode == "" {
 		entry.PermissionMode = currentPermissionMode
 	}
+	recordPrecedent(entry)
 
 	dir := YolonotDir()
 	os.MkdirAll(dir, 0700)

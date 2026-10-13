@@ -47,6 +47,10 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 
 # First-run wizard: hooks + rules + models + judge chain
 yolonot setup
+
+# Optional, Claude Code 2.1.296+: verdicts in the transcript, a status row above
+# the prompt, and a four-way ask (allow once / this session / explain / deny)
+yolonot install --mod
 ```
 
 Upgrading from 0.x? Your config keeps working; `yolonot migrate` rewrites it in the 1.x shape when you are ready. See [docs/upgrading.md](docs/upgrading.md).
