@@ -9,9 +9,10 @@ yolonot config       Settings screen: judges, models, policy (profiles, harness 
 yolonot install      Install hooks only (see --harness flags)
 yolonot models       Model catalog: list | add [typed] | remove <name> | test <name>
 yolonot judges       Judge chain: list | add <entry> | remove <n|entry> | move <n|entry> up|down
+                     (entry = fast_allow, exec:<path to hook>, or a model name)
 yolonot rules        Show active rules + sensitive patterns
 yolonot status       Show session state (approved/asked/denied)
-yolonot log          Show recent decisions with model timing
+yolonot log [n]      Show the last n decisions with model timing (default 20; `-n <n>` also works)
 yolonot suggest      Analyze history, suggest permanent rules
 yolonot stats        Show analytics from decision history
 yolonot check <cmd>  Dry-run: what would the pipeline decide?
@@ -62,14 +63,14 @@ Quiet mode only affects the user-facing `systemMessage`. The underlying `permiss
 Read-only inspectors for the chat model's prompt. Full reference: [prompt.md](prompt.md).
 
 ```bash
-yolonot prompt defaults    # Built-in base prompt + (empty) default hint lists, as JSON
+yolonot prompt defaults    # Built-in base prompt + the built-in hint lists behind `$defaults`, as JSON
 yolonot prompt config      # Effective prompt actually sent (config + walk-up, $defaults expanded)
 yolonot prompt review      # The chat model audits your custom hints for ambiguity/redundancy/over-reach
 yolonot prompt verify      # Prove a custom system_prompt still yields parseable verdicts
 yolonot prompt             # Shorthand for `config`
 ```
 
-Customize via `~/.yolonot/config.json` (`prompt.{context,allow_hints,ask_hints,system_prompt}`) or per-project `.yolonot` directives (`context`/`allow-hint`/`ask-hint`/`system-prompt`). `system_prompt` fully replaces the built-in base; hints still append. **Run `verify` after setting a `system_prompt`** — it static-checks the JSON verdict contract and round-trips real probes through your chat model, exiting non-zero if the override wouldn't function.
+Customize via `~/.yolonot/config.json` (`prompt.{context,allow_hints,ask_hints,system_prompt}`), the PROMPT section of `yolonot config` (each list opens in `$EDITOR`, one entry per line), or per-project `.yolonot` directives (`context`/`allow-hint`/`ask-hint`/`system-prompt`). `system_prompt` fully replaces the built-in base; hints still append. **Run `verify` after setting a `system_prompt`** — it static-checks the JSON verdict contract and round-trips real probes through your chat model, exiting non-zero if the override wouldn't function.
 
 ## Skill (`/yolonot`)
 
@@ -86,7 +87,15 @@ After install, `/yolonot` is available as a Claude Code skill:
 /yolonot suggest     Suggest permanent rules from history
 /yolonot check X     Dry-run: test pipeline for a command
 /yolonot stats       Show decision analytics
+/yolonot profile     Pick a named risk policy
 /yolonot risk        Show/set per-harness risk tier → action policy
+/yolonot judges      The judge chain
+/yolonot models      Model catalog
+/yolonot prompt      Prompt customization (defaults|config|review|verify)
+/yolonot escalation  Second-opinion model status
+/yolonot quiet       Silence allow banners
 /yolonot pause       Disable yolonot for current session
 /yolonot resume      Re-enable yolonot for current session
 ```
+
+`approve`, `deny` and `reset` are skill-only: there is no `yolonot approve` verb. The skill edits the session files under `~/.yolonot/sessions/` after you confirm. Mutating verbs are printed for you to run, not executed by the assistant.

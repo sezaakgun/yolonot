@@ -17,7 +17,7 @@
 
 ---
 
-yolonot sits between your AI coding assistant and your shell. It uses an LLM to classify every Bash command as **safe** (allow) or **needs-review** (ask), with session memory so approved commands don't ask twice and rejected commands stay blocked. Deny rules give you absolute blocks nothing can override. Optionally, an [escalation model](docs/providers.md#escalation-second-opinion-model) — a second, bigger LLM — gets one look at uncertain verdicts before you're interrupted: confident false alarms get rescued into allows, sneaky-dangerous ones get hardened, and everything else still asks.
+yolonot sits between your AI coding assistant and your shell. It uses an LLM to classify every Bash command as **safe** (allow) or **needs-review** (ask), with session memory so approved commands don't ask twice and rejected commands stay blocked. Deny rules give you absolute blocks nothing can override. Optionally, an [escalation model](docs/models.md#escalation-second-opinion-model) — a second, bigger LLM — gets one look at uncertain verdicts before you're interrupted: confident false alarms get rescued into allows, sneaky-dangerous ones get hardened, and everything else still asks.
 
 > **Claude Code first.** yolonot was designed for Claude Code and that's where it gets the richest UX (full allow/ask/deny). Cursor, Codex CLI, OpenCode, and Gemini CLI adapters ship in-tree but have upstream hook-API limitations — see [docs/harnesses.md](docs/harnesses.md) for each host's caveats.
 
@@ -31,10 +31,11 @@ yolonot sits between your AI coding assistant and your shell. It uses an LLM to 
 |-------|------|------|--------:|-----|
 | **TypeSafe Jev** `jev-latest` | typed | <1¢/day | ~300ms | `TYPESAFE_API_KEY` |
 | **OpenAI** `gpt-5.4-mini` | chat | ~10¢/day | ~500ms | `OPENAI_API_KEY` |
+| **Kev-4B** self-hosted ([Kev](https://github.com/jaredpalmer/kev)) | typed | free | ~40ms on a GPU box, seconds on a laptop | — (local) |
 | **Ollama** `gemma4:e4b` | chat | free | 2–10s | — (local) |
 | **Claude Code** (default) | chat | free | ~10s | — (subscription) |
 
-Full matrix in [docs/models.md](docs/models.md). Models live in a named catalog; the judge chain and the escalation step refer to them by name. A typed decision model answers in ~300ms and runs before the chat model, which then only sees what it could not decide. After setup, `yolonot config` opens a settings screen for judges, models, policy and prompt.
+Full matrix in [docs/models.md](docs/models.md). Models live in a named catalog; the judge chain and the escalation step refer to them by name. A typed decision model answers in ~300ms and runs before the chat model, which then only sees what it could not decide. The chain can also hold `fast_allow` (a built-in read-only parser) and `exec:<path>` hooks, any binary that reads the PreToolUse JSON; see [docs/judges.md](docs/judges.md). After setup, `yolonot config` opens a settings screen for judges, models, policy and prompt, keyboard or mouse.
 
 ### 2. Install and run setup
 
@@ -84,7 +85,7 @@ Data at `~/.yolonot/` is preserved. Delete manually if wanted.
 
 ## Acknowledgements
 
-The built-in `fast_allow` judge is heavily inspired by [**Dippy**](https://github.com/lilydayton/dippy) by Lily Dayton — specifically its `SIMPLE_SAFE` allowlist, subcommand-gating approach for multiplex tools (`git`, `docker`, `kubectl`, …), and its hostile-input test corpus. yolonot ports the allowlist tables into Go and re-walks the AST via [`mvdan.cc/sh`](https://github.com/mvdan/sh) instead of Dippy's hand-written Python bash parser (Parable). Where yolonot's parser reaches ambiguity it defers to the LLM — a fallback Dippy doesn't rely on — so the Go port can be stricter (reject-to-LLM) without hurting UX. The `dippy_parity_test.go` corpus and the rules system owe a direct debt to the Dippy project. MIT-licensed, credited in file headers.
+The built-in `fast_allow` judge is heavily inspired by [**Dippy**](https://github.com/ldayton/Dippy) by Lily Dayton — specifically its `SIMPLE_SAFE` allowlist, subcommand-gating approach for multiplex tools (`git`, `docker`, `kubectl`, …), and its hostile-input test corpus. yolonot ports the allowlist tables into Go and re-walks the AST via [`mvdan.cc/sh`](https://github.com/mvdan/sh) instead of Dippy's hand-written Python bash parser (Parable). Where yolonot's parser reaches ambiguity it defers to the LLM — a fallback Dippy doesn't rely on — so the Go port can be stricter (reject-to-LLM) without hurting UX. The `dippy_parity_test.go` corpus and the rules system owe a direct debt to the Dippy project. MIT-licensed, credited in file headers.
 
 ## License
 

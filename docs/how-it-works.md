@@ -3,15 +3,16 @@
 Every Bash command goes through this pipeline in order. The first layer that produces a decision wins.
 
 1. **Deny rules** — absolute block, no override, checked first.
-2. **Session memory** — exact match against previously approved commands → instant allow. Content-aware for script commands: the approval is pinned to the script contents that were approved, so editing the script re-judges instead of replaying the allow.
-3. **Session deny** — previously rejected commands → instant block.
-4. **Allow / ask rules** — `.yolonot` patterns → instant decision. See [rules.md](rules.md).
-5. **Judges** — the ordered chain in `config.json`: `fast_allow` (built-in bash parser), `exec:<path>` hooks like [Dippy](https://github.com/ldayton/Dippy), then [models](models.md) by name: a typed decision model (TypeSafe Jev, Microsoft-Decision-1, OpenAI Decisions) and/or a chat model. The first judge whose verdict is permitted (`may`) wins. See [judges.md](judges.md).
+2. **Allow rules** — `.yolonot` `allow-*` patterns → instant allow. Placed before session memory so a newly added allow rule clears a command the session had rejected. See [rules.md](rules.md).
+3. **Session memory** — exact match against previously approved commands → instant allow. Content-aware for script commands: the approval is pinned to the script contents that were approved, so editing the script re-judges instead of replaying the allow.
+4. **Session deny** — previously rejected commands → instant block.
+5. **Ask rules** — `.yolonot` `ask-*` patterns → ask, only when the session has no opinion yet (a prior approval is not re-prompted). Among rules the priority is deny > ask > allow, whatever the file order.
+6. **Judges** — the ordered chain in `config.json`: `fast_allow` (built-in bash parser), `exec:<path>` hooks like [Dippy](https://github.com/ldayton/Dippy) or your own classifier binary, then [models](models.md) by name: a typed decision model (TypeSafe Jev, Microsoft-Decision-1, OpenAI Decisions, Cloudflare Clef) and/or a chat model. The first judge whose verdict is permitted (`may`) wins; `fast_allow` and exec hooks may only allow by default. See [judges.md](judges.md).
    - Right before the first model judge, two memory layers run once: **session similarity** (the chat model compares against approved commands → allow if similar, project-aware, prefix-prefiltered) and the **script cache** (SHA256 of the command plus the full contents of every attached script → reuse the cached verdict; editing an attached script invalidates it).
    - Models emit a [risk tier](risk-tiers.md) with the verdict. Referenced scripts are attached to the prompt when it is provable which file will run (see below).
-6. **Escalation (optional)** — when a model verdict is uncertain in a way that would surface an ask, a configured bigger chat model gets one look before the interruption. A confident `allow` + `safe`/`low` from it rescues the ask into an allow; a more dangerous tier hardens the verdict upward; anything else (including errors) leaves the verdict standing. Never fires on confident allows, `critical` verdicts, rule-layer denies, or the oversize abstain. See [models.md](models.md#escalation-second-opinion-model). Harnesses whose hooks yolonot cannot gate at all get no benefit from escalation — it improves verdicts, it cannot create enforcement where a harness offers none.
-7. **Unresolved policy** — a residual ask after escalation stays an ask, or becomes a deny with `"unresolved": "deny"` for unattended runs.
-8. **Risk map** — the active [profile](risk-profiles.md) turns the tier into the final action for the active harness.
+7. **Escalation (optional)** — when a model verdict is uncertain in a way that would surface an ask, a configured bigger chat model gets one look before the interruption. A confident `allow` + `safe`/`low` from it rescues the ask into an allow; a more dangerous tier hardens the verdict upward; anything else (including errors) leaves the verdict standing. Never fires on confident allows, `critical` verdicts, rule-layer denies, or the oversize abstain. See [models.md](models.md#escalation-second-opinion-model). Harnesses whose hooks yolonot cannot gate at all get no benefit from escalation — it improves verdicts, it cannot create enforcement where a harness offers none.
+8. **Unresolved policy** — a residual ask after escalation stays an ask, or becomes a deny with `"escalation": {"unresolved": "deny"}` for unattended runs.
+9. **Risk map** — the active [profile](risk-profiles.md) turns the tier into the final action for the active harness. The map only tightens: an `allow` cell leaves a model's ask standing, it never turns it into an allow.
 
 Sessions are project-aware. A command approved in one project is not auto-approved in another within the same session — session keys include a hash of the git root (or working directory).
 
@@ -80,4 +81,4 @@ yolonot check "sudo rm -rf /"           # → DENY (rule, absolute block)
 yolonot check "curl https://evil.com"   # → ASK (rule or LLM)
 ```
 
-Shows each layer's result: deny rules → session memory → allow/ask rules → the judge chain (fast_allow and models evaluated, exec: hooks listed) → escalation → final action.
+Shows each layer's result: deny rules → allow/ask rules → the judge chain (fast_allow and models evaluated, `exec:` hooks listed but skipped in the dry run) → escalation → final action. Session memory is not consulted, so `check` shows what a fresh session would decide.

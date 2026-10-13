@@ -95,7 +95,8 @@ and `ask_hints` as text sections of the command state, with a dedicated
 
 The same file you put `allow-cmd` / `deny-cmd` rules in also accepts
 hints. yolonot collects every `.yolonot` from cwd up to the enclosing
-git repo root (same trust boundary as rules):
+git repo root or `$HOME`, whichever comes first; outside a git repo only
+the cwd file is read (same trust boundary as rules):
 
 ```
 # ./yourproject/.yolonot
@@ -190,10 +191,10 @@ yolonot prompt config | jq -r .system_prompt
 
 ## Inspecting your configuration
 
-Three subcommands, all read-only:
+Four subcommands, all read-only:
 
 ```bash
-yolonot prompt defaults    # Built-in system prompt + (empty) default hint lists, as JSON
+yolonot prompt defaults    # Built-in system prompt + the built-in hint lists behind $defaults, as JSON
 yolonot prompt config      # Effective merged config — config + walk-up, $defaults expanded
 yolonot prompt review      # Ask the active LLM provider to flag ambiguous or redundant hints
 yolonot prompt verify      # Prove a custom system_prompt still yields parseable verdicts
@@ -309,9 +310,11 @@ built-in `SystemPrompt` const.
   settings, so you can't distribute a hint set across an org from a
   central file. Workaround: ship a per-repo `.yolonot` in your
   scaffolding.
-- No mutator subcommands — `yolonot prompt defaults | config |
-  review` are read-only. Edit `~/.yolonot/config.json` and `.yolonot`
-  files by hand to author hints.
+- No `prompt` mutator subcommands — `yolonot prompt defaults | config |
+  review | verify` are read-only. Author hints in the PROMPT section of
+  `yolonot config` (each list opens in `$EDITOR`, one entry per line,
+  `$defaults` kept; the system prompt override has edit / reset-to-built-in),
+  or edit `~/.yolonot/config.json` and `.yolonot` files by hand.
 - Hints are global to the LLM call — there's no per-harness hint set.
   yolonot's LLM call is shared across harnesses anyway, so this is by
   design.

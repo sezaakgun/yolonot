@@ -1,6 +1,8 @@
 # Analytics and logging
 
-yolonot records every decision to `~/.yolonot/decisions.jsonl` with timestamp, decision, layer that produced it, and LLM timing where applicable. Three tools surface that data.
+yolonot records every decision to `~/.yolonot/decisions.jsonl` with timestamp, decision, layer that produced it, and model timing where applicable. One JSON record per line; multiline commands are stored escaped, so the file is always one record per line even when several hooks write at once. Three tools surface that data.
+
+The `layer` field names what decided: `rule`, `session`, `session_llm` (similarity to an approved command), `session_deny`, `cache`, `fast_allow`, `exec:<hook>`, the model name from your catalog (`jev-1.13`, `gemini-2.5-flash-lite`), the same with `+esc` when the escalation model changed the verdict, `human` for ask resolutions, `oversize` and `passthrough`. Logs written before 1.0 carry the old names (`llm`, `pre_check`); `stats` and `suggest` read both.
 
 When [escalation](models.md#escalation-second-opinion-model) is configured, each affected line also carries the full second-opinion record — built for post-mortems of unattended runs: `escalated`, `escalation_model`, `escalation_decision`, `escalation_risk`, `escalation_reasoning` (truncated), `escalation_ms`, `escalation_error` (`timeout`/`api`/`transport`/`parse`), `escalation_outcome` (`rescued`/`hardened`/`kept`/`error`/`skipped:<reason>`), and `primary_risk` (the pre-adoption tier when a verdict was adopted). Cache replays of an escalation-earned verdict keep `escalated: true` so provenance survives.
 
@@ -15,11 +17,11 @@ These entries are labels, not gate decisions — `yolonot stats` reports them on
 
 ## `yolonot log`
 
-Shows recent decisions with the reason string, layer (rule / session / cache / fast_allow / exec:<hook> / the model name), and LLM latency. Decisions where the [escalation model](models.md#escalation-second-opinion-model) fired carry a `⤴esc` marker with the escalation latency.
+Shows recent decisions with the reason string, layer (rule / session / cache / fast_allow / exec:<hook> / the model name), and model latency. Decisions where the [escalation model](models.md#escalation-second-opinion-model) fired carry a `⤴esc` marker with the escalation latency. Multiline commands are shown on one row with `⏎` between lines.
 
 ```bash
-yolonot log
-yolonot log --limit 50
+yolonot log          # last 20
+yolonot log 50       # last 50 (also: yolonot log -n 50)
 ```
 
 Useful when you want to understand why a specific command was allowed/asked/denied.
@@ -31,8 +33,8 @@ Aggregate view. Shows:
 - Total decisions.
 - Allow / ask / deny percentages.
 - Layer distribution (rule / session / cache / fast_allow / exec:<hook> / model names).
-- Average LLM latency.
-- Instant allows (no LLM needed).
+- Average model latency.
+- Instant allows (rule / session / cache / fast_allow / exec hooks, no model call).
 - Escalation counters when configured: fired / rescued (rescue-%) / hardened / errors / average latency — the numbers that say whether the second model is earning its keep.
 - Top asked commands (candidates for permanent rules).
 - Per-project breakdown.
@@ -51,12 +53,14 @@ yolonot suggest
 
 ## Quiet mode
 
-By default yolonot emits a short banner for every decision (`yolonot: 🧑‍🚀 <reason>`). If you only want to hear from yolonot when it blocks or asks, turn allow banners off:
+By default yolonot emits a short banner for every decision (`🧑‍🚀 <layer> -> <command>`, e.g. `🧑‍🚀 fast_allow -> ls -la`). If you only want to hear from yolonot when it blocks or asks, turn allow banners off:
 
 ```bash
 yolonot quiet          # show current state
 yolonot quiet on       # silence allow banners (ask/deny still show)
 yolonot quiet off      # restore default
 ```
+
+The same toggle is the "Quiet on allow" row of `yolonot config`.
 
 Quiet mode only affects the user-facing `systemMessage`. The underlying `permissionDecision` + `permissionDecisionReason` still flow to the host CLI, and the decision log is unchanged — so `yolonot log` / `yolonot stats` stay accurate.

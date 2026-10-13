@@ -7,7 +7,7 @@ A **profile** is a named bundle of tier→action decisions. Pick one with `yolon
 | Profile | safe | low | moderate | high | critical | Use when |
 |---------|------|-----|----------|------|----------|----------|
 | `fast` | allow | allow | allow | **deny** | **deny** | You want skip-permissions speed but still want yolonot to block prod-breaking / irreversible actions. **No ask prompts** anywhere — only allow or deny. See caveats below. |
-| `balanced` | allow | allow | ask | ask | deny | Default. Auto-allow safe/low, ask on anything riskier, hard-deny critical. |
+| `balanced` | allow | allow | ask | ask | ask | Default. Auto-allow safe/low, ask on anything riskier. Matches the shipped Claude / Gemini maps; rules (`deny-cmd`) are what hard-block `critical`. |
 | `strict` | allow | ask | ask | deny | deny | Cautious. Ask earlier; never auto-allow on `low`; hard-deny on high. |
 | `paranoid` | ask | ask | deny | deny | deny | Lockdown. Ask even on read-only commands; deny anything past local writes. |
 
@@ -37,6 +37,7 @@ This keeps each harness's safety floor identical to its shipped defaults while l
 
 ```bash
 yolonot profile                                    # show active profile + per-harness overrides
+yolonot profile use strict --session               # pin for the running session only
 yolonot profile list                               # list built-in + custom profiles
 yolonot profile show fast                          # show one profile's tier map
 yolonot profile use fast                           # set global profile
@@ -58,8 +59,13 @@ yolonot profile create lab \
   --safe=allow --low=allow --moderate=ask --high=deny --critical=deny
 
 yolonot profile use my-prof
-yolonot profile delete lab     # refuses while active; switch first
+yolonot profile delete lab     # refuses while active or pinned by a harness; switch first
 ```
+
+The same lives in `yolonot config` under POLICY: the active profile with
+its five tier rows (changing a tier of a built-in saves a custom copy and
+activates it), "Use another / Create new / Delete" on the Profile row, and
+a Harness overrides row for per-harness pins and cell overrides.
 
 Custom profiles use the same `{allow, ask, deny}` action set as built-ins; `passthrough` is a per-harness translation result, not something profile authors write.
 
@@ -90,9 +96,9 @@ Inside Claude, ask the assistant to run `/yolonot profile use fast --session`. T
 `ResolveActiveProfile` resolves the profile name, highest precedence last:
 
 1. `DefaultProfileName` (`balanced`)
-2. `Config.Profile` (global, persistent)
+2. `policy.profile` in `config.json` (global, persistent)
 3. `YOLONOT_PROFILE` env (global, per-session)
-4. `Config.ProfileOverride[<harness>]` (per-harness, persistent — beats global env because more-specific wins at same scope)
+4. `policy.harness.<harness>.profile` (per-harness, persistent — beats global env because more-specific wins at same scope)
 5. `YOLONOT_<HARNESS>_PROFILE` env (per-harness, per-session)
 6. Session pin file (mid-session, dies with session)
 
@@ -104,3 +110,21 @@ Inside Claude, ask the assistant to run `/yolonot profile use fast --session`. T
 4. `YOLONOT_<HARNESS>_RISK_<TIER>=<action>` env vars.
 
 This means profile changes are non-destructive: any per-cell tweak you've already made via `yolonot risk <harness> <tier> <action>` keeps winning.
+
+```bash
+yolonot risk                              # merged map for the active harness, with the source of each cell
+yolonot risk codex                        # for a named harness
+yolonot risk codex high deny              # override one cell (allow|ask|deny|passthrough)
+yolonot risk codex reset high             # drop one override
+yolonot risk codex reset                  # drop every override for that harness
+```
+
+In `config.json` all of this is the `policy` block:
+
+```json
+"policy": {
+  "profile": "balanced",
+  "profiles": {"lab": {"safe": "allow", "low": "allow", "moderate": "ask", "high": "deny", "critical": "deny"}},
+  "harness": {"codex": {"profile": "strict", "risk_map": {"high": "deny"}}}
+}
+```

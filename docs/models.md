@@ -16,10 +16,18 @@ in banners (`🧑‍🚀 gemini -> npm test`) and in `decisions.jsonl` (`layer`)
 ```
 
 A model is **chat** or **typed**, decided by its URL: a System One
-(`/systemone`) or OpenAI Decisions (`/decisions`) endpoint is typed, anything
-else is chat. Chat models judge with a prompt and also power session
-similarity, `yolonot suggest` and `yolonot prompt review`. Typed models answer
-fixed questions with probabilities and cannot generate text.
+(`/systemone`, or any `typesafe.ai` host), OpenAI Decisions (`/decisions`)
+or Cloudflare Workers AI Clef (`/ai/run/@cf/cloudflare/clef…`) endpoint is
+typed, anything else is chat. Chat models judge with a prompt and also power
+session similarity, `yolonot suggest` and `yolonot prompt review`. Typed
+models answer fixed questions with probabilities and cannot generate text.
+
+A third judge kind lives outside the catalog: an **exec hook**,
+`exec:<path>` in `judges`, any binary that reads the PreToolUse JSON on
+stdin (Dippy, an ML gate, your own script). It has no URL or key, so it is
+not a `models` entry, but `yolonot config` lists it under MODELS next to
+them (Test, Replace path, Remove) and "Add model" offers it as a third
+kind. See [judges.md](judges.md).
 
 ```bash
 yolonot models                 # list: name, kind, model id, key status, role
@@ -29,9 +37,14 @@ yolonot models test <name>     # connection test, exit 0/1
 yolonot models remove <name>   # refused while a judge or escalation uses it
 ```
 
-Names: lowercase letters, digits, `. _ : -`. Reserved: `fast_allow`, `exec`
-and the fixed layer names (`rule`, `session`, `cache`, `human`, …). API keys
-are never written to disk; `env_key` names the variable to read.
+`models add` picks the endpoint, asks for a name (default derived from the
+model id), runs a connection test and offers to append the model to the
+chain. `models test` exits 1 on a failed connection, 2 for an unknown name.
+
+Names: lowercase letters, digits, `. _ : -`, starting with a letter or
+digit. Reserved: `fast_allow`, `exec` and the fixed layer names (`rule`,
+`session`, `cache`, `human`, …). API keys are never written to disk;
+`env_key` names the variable to read.
 
 ## Chat providers
 
@@ -69,7 +82,8 @@ Timeouts are set per provider at add time and stored in the entry's `timeout`.
 | `YOLONOT_<HARNESS>_RISK_<TIER>` | One tier → action cell for this session |
 | `YOLONOT_ESCALATION=off` | Disable escalation for this environment |
 | `YOLONOT_ESCALATION_UNRESOLVED=deny` | Fail a post-escalation residual ask closed (headless runs) |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `XAI_API_KEY` / `OPENROUTER_API_KEY` / `TYPESAFE_API_KEY` | Provider auth, named per model by `env_key` |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `XAI_API_KEY` / `OPENROUTER_API_KEY` / `TYPESAFE_API_KEY` / `CLOUDFLARE_API_TOKEN` | Provider auth, named per model by `env_key` |
+| `CLOUDFLARE_ACCOUNT_ID` | Default for the account id prompt when adding a Workers AI model; the id is stored in the entry's URL |
 
 Model endpoints are config only; there is no env override for a model's URL
 or id. Edit the catalog with `yolonot models` or `yolonot config`.
@@ -97,16 +111,45 @@ question set):
 | [TypeSafe Jev](https://docs.typesafe.ai) | `jev-latest` | `TYPESAFE_API_KEY` | System One |
 | OpenRouter (`/api/v1/systemone`) | `typesafe/jev-1.13`, `microsoft/microsoft-decision-1` | `OPENROUTER_API_KEY` | System One |
 | OpenAI Decisions API (`/v1/decisions`) | `gpt-6-luna` | `OPENAI_API_KEY` | OpenAI (translated: predicate questions, choices array) |
-| Cloudflare Workers AI (`/ai/run/@cf/cloudflare/…`) | `clef-flash`, `clef` | `CLOUDFLARE_API_TOKEN` + account id | System One inside the Workers AI envelope |
-| Custom | any | any | System One |
+| Cloudflare Workers AI (`/accounts/<id>/ai/run/@cf/cloudflare/…`) | `clef-flash`, `clef` | `CLOUDFLARE_API_TOKEN` (needs Workers AI read on the account); account id asked at add time | System One inside the Workers AI envelope |
+| Custom System One endpoint | any | any | System One |
 
-Open-weight decision models that serve the System One API locally work
-through "Custom": [Kev](https://huggingface.co/jaredpalmer/kev-4b) (Qwen3.5
-LoRA, MLX on Apple Silicon, `python -m kev.serve`),
-[Clef](https://huggingface.co/Cloudflare/clef-flash) via SGLang. Point the URL at `http://127.0.0.1:<port>/v1/systemone`.
+Measured on the same suite, one run each: `clef-flash` 92.0% accuracy at
+~830ms per command, `clef` 90.3% at ~470ms (looser on staging mutations and
+bare `git push`); prefer `clef-flash`.
 
-`yolonot setup` step 3b offers TypeSafe Jev. A typed entry looks like any
-other catalog entry; the `/systemone` or `/decisions` URL makes it typed:
+### Local and self-hosted (System One)
+
+Open-weight decision models that speak the System One API need no code in
+yolonot: add them as a "Custom System One endpoint" (any URL containing
+`/systemone` is typed). Nothing leaves the machine the server runs on.
+
+[Kev](https://github.com/jaredpalmer/kev) (Apache 2.0, Qwen3.5 LoRA; 0.8B,
+4B, 9B, 27B) is installed from source, not PyPI, and serves on CUDA, ROCm
+or MLX on Apple Silicon:
+
+```bash
+git clone https://github.com/jaredpalmer/kev.git && cd kev
+uv sync --extra serve
+uv run --extra serve python -m kev.serve --run jaredpalmer/kev-4b --port 8009
+yolonot models add typed      # Custom System One endpoint
+#   URL   http://127.0.0.1:8009/v1/systemone
+#   model kev-4b, key env var empty (set KEV_API_KEY on the server to require one)
+```
+
+Measured on the greenfield suite: Kev-4B 93.2% accuracy, 100% dangerous
+catch, zero errors, which beats Jev; but about 3.9 s per command on an
+M4 Pro laptop, against the model card's ~41 ms on an L40S and ~18 ms on an
+H100. Run it on a shared GPU box and point every developer's entry at
+`http://<box>:8009/v1/systemone`; on a laptop use a hosted typed model.
+
+[Clef / Clef-flash](https://huggingface.co/Cloudflare/clef-flash) (Apache
+2.0) serve `/v1/systemone` through SGLang on a GPU; there is no Apple
+Silicon build, use the Workers AI preset instead.
+
+`yolonot setup` step 3b offers TypeSafe Jev and writes the chain
+`fast_allow → <typed> → <chat>`. A typed entry looks like any other catalog
+entry; the URL makes it typed:
 
 ```json
 "jev": {"url": "https://api.typesafe.ai/v1/systemone", "model": "jev-latest", "env_key": "TYPESAFE_API_KEY"}
@@ -120,19 +163,23 @@ What a decision model does not do:
 
 - `system_prompt` is not sent to it; the tier and condition criteria are
   fixed in code. `context`, `allow_hints` and `ask_hints` (config and
-  `.yolonot` walk-up) are appended to the command as "Project context",
-  "Allow when" and "Ask when" sections; the ninth condition fires when an
-  "Ask when" line matches, and "Allow when" lines tell the model what this
-  project treats as routine.
+  `.yolonot` walk-up, `$defaults` expanded) are appended to the command as
+  "Project context", "Allow when" and "Ask when" sections; the ninth
+  condition (`project_ask`) fires when an "Ask when" line matches, and
+  "Allow when" lines tell the model what this project treats as routine.
+  The request carries only the command, attached script contents and
+  these sections: no cwd, no session history. The question set alone is
+  about 6.5 KB per request.
+- It cannot be the escalation model, and it never says `deny`.
 - Session similarity compare (`session_llm`), `yolonot suggest` smart
   mode and `yolonot prompt review` use the first chat model in the chain;
   with no chat model they are skipped or refuse with a clear message.
-- It is never offered as the escalation model.
 
 For eval: `--model <catalog name>` runs a suite against any configured
 model; `--model jev-latest` (TypeSafe), `--model systemone/<id>`
 (OpenRouter, e.g. `systemone/microsoft/microsoft-decision-1`) and
-`--model decisions/gpt-6-luna` (OpenAI) need no catalog entry.
+`--model decisions/gpt-6-luna` (OpenAI) need no catalog entry. Hints reach
+the typed model only with `--with-hints`, as for chat models.
 
 ## Escalation (second-opinion model)
 
@@ -194,7 +241,8 @@ Config block (`~/.yolonot/config.json`):
 }
 ```
 
-`escalation.model` names a catalog entry; `disabled: true` keeps the
+`escalation.model` names a catalog entry; it must be a chat model, and
+`yolonot escalation setup` only offers those. `disabled: true` keeps the
 reference but turns the step off (`yolonot escalation off`). Credentials
 follow the entry's own `env_key`; nothing is shared between endpoints. Both
 models receive the same system prompt and [prompt hints](prompt.md).
@@ -203,15 +251,14 @@ models receive the same system prompt and [prompt hints](prompt.md).
 escalation errors) into a deny that carries both verdicts — for unattended
 runs where an ask would stall until timeout. Default keeps the ask.
 
-Env-only setups work without any config block: set `LLM_ESCALATION_URL` +
-`LLM_ESCALATION_MODEL` (or just the model, to inherit the primary endpoint).
-With env-only setup there is no config block for `escalation on|off` to
-toggle — use `YOLONOT_ESCALATION=off` instead.
+There is no env-only setup: the escalation model is a catalog entry like
+any other. `YOLONOT_ESCALATION=off` disables the step for one environment
+without touching the file.
 
-Escalation timeouts default to 10s for HTTP endpoints and 30s for
-`claude-cli` (CLI process startup is slow); the escalation call sits in
-front of a would-be interruption, never in the hot path. Override with
-`LLM_ESCALATION_TIMEOUT` or the provider `timeout` field.
+The escalation call uses the entry's `timeout` (what `yolonot models add`
+stored: 10s for most HTTP endpoints, 30s for OpenRouter, Ollama and
+`claude-cli`). It sits in front of a would-be interruption, never in the
+hot path.
 
 ## Response schema
 

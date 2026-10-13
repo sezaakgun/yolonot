@@ -25,7 +25,6 @@ type DecisionEntry struct {
 	Short          string  `json:"short,omitempty"` // compact banner label (from LLM)
 	Reasoning      string  `json:"reasoning,omitempty"`
 	Source         string  `json:"source,omitempty"`
-	ReturnedAs     string  `json:"returned_as,omitempty"`
 	DurationMs     int64   `json:"duration_ms,omitempty"` // primary LLM call only; escalation time is escalation_ms
 
 	// Escalation fields — set only when the escalation layer was configured

@@ -49,10 +49,14 @@ The three suites are split by **classifier path**, not just by data:
 | `--runs <n>` | Number of runs per case (useful for variance analysis). |
 | `--filter-expected <allow\|ask\|deny>` | Only run cases with this expected decision. |
 | `--filter-category <name>` | Only run cases with this category tag. |
+| `--filter-tag <tag>` | Only run cases carrying this tag. |
+| `--filter-id <id>` | Run one case by id. |
+| `--output <file>` | Write the report as JSON. |
+| `--timeout <s>` / `--max-tokens <n>` / `--no-think` | Per-call timeout, response budget, and a no-reasoning hint for chat models. |
 | `--verbose` | Per-case timing + reasoning output. |
-| `--with-hints` | Apply user classifier hints (`~/.yolonot/config.json` + `.yolonot` walk-up) when building the system prompt. Off by default. See "Reproducibility and hints" below. |
+| `--with-hints` | Apply user classifier hints (`~/.yolonot/config.json` + `.yolonot` walk-up): into the system prompt for chat models, as state text for typed decision models. Off by default. See "Reproducibility and hints" below. |
 | `--metric decision\|risk\|action` | What to grade. `decision` (default) grades the LLM's raw `allow`/`ask` field. `risk` grades the policy-neutral risk tier (`safe`/`low`/`moderate`/`high`/`critical`) against `expected_risk`. `action` grades the **actual gate action** — the classifier output run through the active harness/profile risk map, i.e. exactly what the hook emits — see "Which metric reflects the gate" below. |
-| `--escalation-model <name>` | Cascade mode: primary responses that would trigger the hook's [escalation](models.md#escalation-second-opinion-model) are re-judged by this model with the identical trigger + adoption rules, and a second `<model>+esc` entry appears in the report (and in `--output` JSON) along with the ask-reduction rate. Measures rescue-rate and whether the cascade raises the catastrophic-allow rate (it must not) before you trust the feature. Primary responses are reused — no duplicate primary calls. Greenfield suites only. The trigger runs through your ACTIVE harness/profile risk map — for reproducible published numbers, use the defaults (claude + balanced, no `risk_maps` overrides); the `+esc` entry's timing counts escalation calls only. |
+| `--escalation-model <name>` | Cascade mode: primary responses that would trigger the hook's [escalation](models.md#escalation-second-opinion-model) are re-judged by this model with the identical trigger + adoption rules, and a second `<model>+esc` entry appears in the report (and in `--output` JSON) along with the ask-reduction rate. Measures rescue-rate and whether the cascade raises the catastrophic-allow rate (it must not) before you trust the feature. Primary responses are reused — no duplicate primary calls. Greenfield suites only. The trigger runs through your ACTIVE harness/profile risk map — for reproducible published numbers, use the defaults (claude + balanced, no `policy.harness` overrides); the `+esc` entry's timing counts escalation calls only. |
 
 ## Reproducibility and hints
 
@@ -62,7 +66,11 @@ developer running the suite. Custom classifier hints from
 results don't drift based on per-machine configuration. This is what you
 want when comparing models or measuring base prompt quality.
 
-Pass `--with-hints` when you actually want to measure your hints:
+Pass `--with-hints` when you actually want to measure your hints. For a
+typed decision model the same hints are appended to the command as
+"Project context / Allow when / Ask when" sections and the `project_ask`
+condition fires when an ask hint matches, so the flag measures them there
+too:
 
 ```bash
 # Did adding "kubectl get on prod-* is read-only" lower the false-ask rate?

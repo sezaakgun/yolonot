@@ -21,7 +21,7 @@ yolonot install --harness cursor      # Cursor only
 yolonot install --all                 # every registered adapter
 ```
 
-When neither flag is passed, `yolonot install` targets every **detected** harness (i.e. whichever CLIs you have installed). `yolonot setup` runs install + rules + provider pick in one go and accepts the same flags.
+When neither flag is passed, `yolonot install` targets every **detected** harness (i.e. whichever CLIs you have installed). `yolonot setup` runs install + rules + model pick in one go and accepts the same flags.
 
 Uninstall mirrors this: `yolonot uninstall --harness <name>` or `--all`. Without a flag, `uninstall` defaults to every *currently installed* adapter.
 
@@ -100,7 +100,7 @@ Session id arrives on stdin as `conversation_id`. Cursor does not export a sessi
 
 ## Escalation per harness
 
-The [escalation model](models.md#escalation-second-opinion-model) triggers on the classifier's *raw* uncertainty (`decision: ask`, any non-critical tier) or on a resolved ask, so it fires consistently across harnesses — but what a rescue or harden buys you differs:
+The [escalation model](models.md#escalation-second-opinion-model) triggers on the chain's *raw* uncertainty (`decision: ask`, any non-critical tier) or on a resolved ask, and only when a rescue or harden could change the outcome (a resolved deny is policy, never uncertainty), so it fires consistently across harnesses — but what a rescue or harden buys you differs:
 
 | Harness | What escalation changes |
 |---------|------------------------|

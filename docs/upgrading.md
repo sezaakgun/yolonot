@@ -13,6 +13,7 @@ keeps deciding exactly as before. The rewrite is yours to trigger.
 | `classifier.{context,allow_hints,ask_hints,system_prompt}` | `prompt.*` (`impl` dropped) |
 | `profile`, `custom_profiles` | `policy.profile`, `policy.profiles` |
 | `profile_override`, `risk_maps` | `policy.harness.<name>.{profile,risk_map}` |
+| `judges` keywords `llm`, `decision` / `jev`, `escalation` | the chat model's name, the typed model's name; `escalation` entries are dropped (escalation runs once after the chain) |
 | `yolonot provider`, `yolonot decision` | `yolonot models add [typed]` |
 | `yolonot pre-check …` | `yolonot judges add|remove|move` |
 | `yolonot classifier …` | `yolonot prompt …` |
@@ -32,15 +33,21 @@ yolonot migrate             # write it; the 0.x file is kept at config.json.bak
 yolonot migrate --undo      # put the .bak back
 ```
 
-Model names are derived from the model id (`google/gemini-2.5-flash-lite`
-becomes `gemini-2.5-flash-lite`); rename them afterwards in `yolonot config`
-if you prefer shorter banners.
+Model names are derived from the model id: the last path segment,
+lowercased, with an OpenRouter `:variant` tag dropped (`google/gemini-2.5-flash-lite`
+becomes `gemini-2.5-flash-lite`, `foo/bar:free` becomes `bar`; Ollama tags
+like `gemma4:e4b` stay). Two entries that derive the same name get a `-2`
+suffix. A 0.x escalation that named only a model inherits the primary
+model's endpoint and key, as it did at runtime. Rename entries afterwards
+in `yolonot config` if you prefer shorter banners.
 
-Interactive commands (`yolonot`, `yolonot config`, `yolonot setup`) offer the
-migration once on a 0.x file and remember a decline. Commands that write the
-file (`models`, `judges`, `profile use|reset|create|delete`, `risk`,
-`escalation`, `quiet`, saving in `yolonot config`) ask first and do nothing
-if you say no; without a terminal they exit 2 instead of asking. The hook
-never asks and never writes.
+`yolonot` and `yolonot config` offer the migration once on a 0.x file and
+remember a decline (`~/.yolonot/migrate-declined`); `yolonot setup` asks
+and stops if you say no. Commands that write the file (`models`, `judges`,
+`profile use|reset|create|delete`, `risk`, `escalation`, `quiet`, saving in
+`yolonot config`) ask first and do nothing if you say no; without a
+terminal they print "Run `yolonot migrate` first" and exit 2. The hook
+never asks and never writes. Reading commands (`yolonot judges`,
+`yolonot models`, `yolonot check`) show the folded 1.x view of a 0.x file.
 
 The 0.x reader stays through every 1.x release and goes away in 2.0.

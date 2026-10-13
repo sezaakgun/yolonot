@@ -12,8 +12,11 @@ map run once after it. See [how-it-works.md](how-it-works.md).
 | Entry | What it is | May decide by default |
 |-------|------------|-----------------------|
 | `fast_allow` | Built-in bash parser (below). In-process, no network. | allow |
-| `exec:<path>` | Any binary fed the Claude PreToolUse JSON on stdin: [Dippy](https://github.com/ldayton/Dippy), an ML gate, your own script. 3s timeout. | allow |
-| a model name | A [catalog model](models.md): typed (TypeSafe Jev, Microsoft-Decision-1, OpenAI Decisions) or chat. | allow, ask |
+| `exec:<path>` | Any binary fed the Claude PreToolUse JSON on stdin: [Dippy](https://github.com/ldayton/Dippy), an ML gate, your own script. 3s timeout; counts only when it prints `permissionDecision: "allow"`. The path may carry arguments (`exec:/usr/local/bin/gate --strict`). | allow |
+| a model name | A [catalog model](models.md): typed (TypeSafe Jev, Microsoft-Decision-1, OpenAI Decisions, Cloudflare Clef) or chat. | allow, ask |
+
+A name that is neither of these (a model removed from the catalog, a typo)
+is listed as `unknown` and skipped; `yolonot judges add` refuses it.
 
 An entry can be an object to narrow what the judge may decide:
 
@@ -37,6 +40,16 @@ yolonot judges remove exec:/opt/homebrew/bin/dippy
 yolonot config                          # the same, interactively
 ```
 
+`judges add` appends and refuses duplicates; `remove` keeps at least one
+judge. In `yolonot config` the JUDGES section has one row per judge (move,
+remove, change what it may decide), "Add judge" and "Reset chain" presets
+built from the catalog (chat only, typed only, typed first, or edit the
+list as JSON in `$EDITOR`). Exec hooks also appear under MODELS, like the
+models they sit next to: Test runs the binary on a sample `ls -la` payload,
+Replace path edits it, Remove drops it from the chain; "Add model" offers
+"Exec hook" as a third kind. The chain is the only place an exec hook lives,
+so adding it there appends it to JUDGES.
+
 **Order matters.** Put cheap and narrow judges first: `fast_allow`, then an
 external hook, then the typed model, then the chat model. Obvious cases never
 reach a network call. With an empty chain every command passes through to the
@@ -47,8 +60,11 @@ host's own permission prompt; `yolonot` says so on its status line.
 - `yolonot check "<cmd>"` walks the chain. `fast_allow` and models are
   evaluated for real; `exec:` judges are listed but not invoked.
 - The deciding judge is the `layer` in `yolonot log`, `yolonot stats` and the
-  banner: `fast_allow`, `exec:dippy`, or the model name (`jev`, `gemini`,
-  `gemini+esc` when escalation refined it).
+  banner: `fast_allow`, `exec:dippy` (the binary's base name), or the model
+  name (`jev`, `gemini`, `gemini+esc` when escalation refined it).
+- Right before the first model judge the hook consults session similarity
+  and the script cache once (layers `session_llm`, `cache`); `fast_allow`
+  and exec hooks run before that and cost nothing.
 
 ## Caveats
 

@@ -87,7 +87,7 @@ reader stays through 1.x and goes away in 2.0. Full table in
 ### Removed
 - Verbs `provider`, `decision`, `pre-check`, `classifier`, `local-allow`,
   `threshold` (each prints its replacement and exits 2). Log field
-  `returned_as` (never written).
+  `returned_as` (declared, never written).
 
 ### Fixed
 - Concurrent hooks could glue two `decisions.jsonl` records onto one line
