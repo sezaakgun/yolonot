@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 )
 
@@ -18,26 +17,11 @@ var tuiInPage bool
 // runField runs one huh field as a form: Esc and Ctrl-C both cancel, and
 // inside the settings page the prompt takes the alternate screen so it
 // leaves nothing behind. Returns false on cancel.
-func runField(fields ...huh.Field) bool {
+func runField(f huh.Field) bool {
 	km := huh.NewDefaultKeyMap()
-	quit := []string{"ctrl+c", "esc"}
-	allSelect := true
-	for _, f := range fields {
-		if _, isSelect := f.(*huh.Select[int]); !isSelect {
-			allSelect = false
-		}
-	}
-	if allSelect {
-		// menus: ← back, → select; inputs keep both for the cursor
-		quit = append(quit, "left")
-		km.Select.Next = key.NewBinding(key.WithKeys("enter", "right", "tab"))
-		km.Select.Submit = key.NewBinding(key.WithKeys("enter", "right"))
-	}
-	km.Quit = key.NewBinding(key.WithKeys(quit...))
-	form := huh.NewForm(huh.NewGroup(fields...)).WithKeyMap(km).WithShowHelp(false)
-	if tuiInPage {
-		form = form.WithProgramOptions(tea.WithAltScreen())
-	}
+	km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"))
+	form := huh.NewForm(huh.NewGroup(f)).WithKeyMap(km).WithShowHelp(false)
+	tuiClear()
 	err := form.Run()
 	if err != nil && !errors.Is(err, huh.ErrUserAborted) {
 		tuiNote("prompt failed", err.Error())
@@ -51,18 +35,15 @@ func tuiSelect(title string, items []string, defaultIdx int) int {
 	if len(items) == 0 {
 		return -1
 	}
-	options := make([]huh.Option[int], len(items))
-	for i, item := range items {
-		options[i] = huh.NewOption(item, i)
-	}
 	selected := 0
 	if defaultIdx >= 0 && defaultIdx < len(items) {
 		selected = defaultIdx
 	}
-	if !runField(huh.NewSelect[int]().Title(title).Description("↑↓ move  → ⏎ select  ← esc back").Options(options...).Value(&selected)) {
+	fields, ok := runMenu(title, "", []menuField{{Items: items, Cur: selected}})
+	if !ok {
 		return -1
 	}
-	return selected
+	return fields[0].Cur
 }
 
 // tuiInput prompts for text with an optional default. Empty on cancel.
@@ -76,11 +57,8 @@ func tuiInput(title string, placeholder string, defaultVal string) string {
 
 // tuiConfirm shows a yes/no prompt. False on cancel.
 func tuiConfirm(prompt string) bool {
-	var confirmed bool
-	if !runField(huh.NewConfirm().Title(prompt).Value(&confirmed)) {
-		return false
-	}
-	return confirmed
+	fields, ok := runMenu(prompt, "y / n, or click", []menuField{{Items: []string{"Yes", "No"}, Cur: 1}})
+	return ok && fields[0].Cur == 0
 }
 
 // tuiPassword prompts for sensitive input (API keys). Hidden characters.
@@ -110,5 +88,13 @@ func tuiNote(title string, description string) {
 func noteCancelled() {
 	if !tuiInPage {
 		fmt.Println("Cancelled.")
+	}
+}
+
+// tuiClear wipes the shared alternate screen before a program draws; a
+// no-op outside the settings page, where programs run inline.
+func tuiClear() {
+	if tuiInPage {
+		fmt.Print("\x1b[2J\x1b[H")
 	}
 }

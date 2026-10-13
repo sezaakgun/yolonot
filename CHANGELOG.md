@@ -53,8 +53,10 @@ reader stays through 1.x and goes away in 2.0. Full table in
   script attachment outside the root, quiet, global and project rules.
   PROMPT: context, allow and ask hints (one line each in `$EDITOR`,
   `$defaults` kept), system prompt override. Every row shows its value and
-  a status hint; arrow keys and Esc navigate; save writes once with a
-  `.bak`. Bare `yolonot` in a terminal on an installed setup opens it;
+  a status hint; arrow keys and Esc navigate, and the mouse works
+  everywhere except text fields: hover highlights, click opens or picks,
+  wheel moves, every menu has a clickable "← back" (option groups a
+  "✓ done"). Save writes once with a `.bak`. Bare `yolonot` in a terminal on an installed setup opens it;
   piped stdin prints the text status.
 - **`yolonot migrate [--dry-run|--undo]`** and `yolonot prompt` (was
   `classifier`).

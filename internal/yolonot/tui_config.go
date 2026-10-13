@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/x/term"
 )
 
@@ -684,44 +683,29 @@ func indexOf(list []string, v string) int {
 	return 0
 }
 
-func tierSelect(tier string, value *string) *huh.Select[string] {
-	opts := make([]huh.Option[string], len(profileActions))
-	for i, a := range profileActions {
-		opts[i] = huh.NewOption(a, a)
-	}
-	return huh.NewSelect[string]().Title(tier).Options(opts...).Value(value)
-}
-
-// editProfileCreate: one screen for name + base, one for the five tiers.
+// editProfileCreate: name, base profile, then the five tiers on one screen.
 // The new profile becomes the active one.
 func editProfileCreate(cfg *Config) {
-	profiles, items, cur := profileItems(*cfg)
-	baseOpts := make([]huh.Option[int], len(profiles))
-	for i, it := range items {
-		baseOpts[i] = huh.NewOption(it, i)
-	}
-	name, base := "", cur
-	if !runField(
-		huh.NewInput().Title("New profile").Description("name: a-z, digits, - or _").Placeholder("my-team").Value(&name),
-		huh.NewSelect[int]().Title("Start from").Options(baseOpts...).Value(&base),
-	) || strings.TrimSpace(name) == "" {
+	name := strings.TrimSpace(tuiInput("New profile name", "a-z, digits, - or _", ""))
+	if name == "" {
 		return
 	}
-	name = strings.TrimSpace(name)
-	vals := map[string]*string{}
-	fields := make([]huh.Field, 0, len(allRiskTiers))
-	for _, tier := range allRiskTiers {
-		v := profiles[base].Map[tier]
-		vals[tier] = &v
-		fields = append(fields, tierSelect(tier, vals[tier]))
+	profiles, items, cur := profileItems(*cfg)
+	base := tuiSelect("Start from", items, cur)
+	if base < 0 {
+		return
 	}
-	fields[0].(*huh.Select[string]).Description("tier → action for " + name + "; ↑↓ move, ⏎ next, esc back")
-	if !runField(fields...) {
+	fields := make([]menuField, 0, len(allRiskTiers))
+	for _, tier := range allRiskTiers {
+		fields = append(fields, menuField{Title: tier, Items: profileActions, Cur: indexOf(profileActions, profiles[base].Map[tier])})
+	}
+	fields, ok := runMenu("Profile "+name, "", fields)
+	if !ok {
 		return
 	}
 	m := map[string]string{}
-	for tier, v := range vals {
-		m[tier] = *v
+	for i, tier := range allRiskTiers {
+		m[tier] = profileActions[fields[i].Cur]
 	}
 	if err := ValidateCustomProfile(name, m); err != nil {
 		tuiNote("Not created", err.Error())
@@ -794,37 +778,33 @@ func editHarnessOverrides(cfg *Config) {
 	hp := cfg.harnessPolicy(name)
 
 	profiles, pitems, _ := profileItems(*cfg)
-	pinOpts := []huh.Option[string]{huh.NewOption("inherit global ("+activeProfileName(*cfg)+")", "")}
+	pins := []string{"inherit global (" + activeProfileName(*cfg) + ")"}
+	pinNames := []string{""}
 	for j, p := range profiles {
-		pinOpts = append(pinOpts, huh.NewOption(pitems[j], p.Name))
+		pins = append(pins, pitems[j])
+		pinNames = append(pinNames, p.Name)
 	}
-	pin := hp.Profile
 	cells := []string{"inherit", ActionAllow, ActionAsk, ActionDeny, ActionPassthrough}
-	vals := map[string]*string{}
-	fields := []huh.Field{huh.NewSelect[string]().Title("Profile for " + name).Description("↑↓ move, ⏎ next, esc back").Options(pinOpts...).Value(&pin)}
+	fields := []menuField{{Title: "Profile", Items: pins, Cur: indexOf(pinNames, hp.Profile)}}
 	for _, tier := range allRiskTiers {
 		v := "inherit"
 		if a, ok := hp.RiskMap[tier]; ok {
 			v = a
 		}
-		vals[tier] = &v
-		opts := make([]huh.Option[string], len(cells))
-		for k, c := range cells {
-			opts[k] = huh.NewOption(c, c)
-		}
-		fields = append(fields, huh.NewSelect[string]().Title(tier+" override").Options(opts...).Value(vals[tier]))
+		fields = append(fields, menuField{Title: tier + " override", Items: cells, Cur: indexOf(cells, v)})
 	}
-	if !runField(fields...) {
+	fields, ok := runMenu("Harness "+name, "", fields)
+	if !ok {
 		return
 	}
-	hp.Profile = pin
+	hp.Profile = pinNames[fields[0].Cur]
 	hp.RiskMap = nil
-	for _, tier := range allRiskTiers {
-		if *vals[tier] != "inherit" {
+	for i, tier := range allRiskTiers {
+		if v := cells[fields[i+1].Cur]; v != "inherit" {
 			if hp.RiskMap == nil {
 				hp.RiskMap = map[string]string{}
 			}
-			hp.RiskMap[tier] = *vals[tier]
+			hp.RiskMap[tier] = v
 		}
 	}
 	cfg.setHarnessPolicy(name, hp)
@@ -941,8 +921,19 @@ func cmdConfigTUI() {
 		return
 	}
 	offerMigration(LoadConfig())
+	// One alternate screen for the whole session: the page, menus and
+	// prompts are separate programs, and entering/leaving the alt screen
+	// per program flashes the shell between them. They clear and redraw
+	// inside this one instead.
 	tuiInPage = true
-	defer func() { tuiInPage = false }()
+	fmt.Print("\x1b[?1049h")
+	defer func() {
+		tuiInPage = false
+		fmt.Print("\x1b[?1049l")
+		if tuiExitMsg != "" {
+			fmt.Println(tuiExitMsg)
+		}
+	}()
 	cfg := LoadConfig()
 	orig, _ := json.Marshal(cfg)
 	cur := 0
@@ -960,7 +951,7 @@ func cmdConfigTUI() {
 			}
 		case pageSave:
 			if !dirty {
-				fmt.Println("No changes.")
+				tuiExitMsg = "No changes."
 				return
 			}
 			saveConfigWithBackup(cfg)
@@ -974,21 +965,25 @@ func cmdConfigTUI() {
 				saveConfigWithBackup(cfg)
 				return
 			case 1:
-				fmt.Println("Discarded.")
+				tuiExitMsg = "Discarded."
 				return
 			}
 		}
 	}
 }
 
+// tuiExitMsg is printed once the settings screen has left the alternate
+// screen, where a plain Println would vanish.
+var tuiExitMsg string
+
 func saveConfigWithBackup(cfg Config) {
 	if cfg.Legacy && !tuiConfirm("config.json is in the v0 format; saving writes v1. Continue? (backup kept at .bak)") {
-		fmt.Println("Not saved.")
+		tuiExitMsg = "Not saved."
 		return
 	}
 	if data, err := os.ReadFile(configPath()); err == nil {
 		os.WriteFile(configPath()+".bak", data, 0600)
 	}
 	SaveConfig(cfg)
-	fmt.Println("Saved. Previous config kept at " + tildePath(configPath()) + ".bak")
+	tuiExitMsg = "Saved. Previous config kept at " + tildePath(configPath()) + ".bak"
 }

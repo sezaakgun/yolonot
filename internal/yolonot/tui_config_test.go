@@ -1,6 +1,9 @@
 package yolonot
 
 import (
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"strings"
 	"testing"
 )
@@ -149,7 +152,7 @@ func TestConfigRowsPolicyAndPromptSections(t *testing.T) {
 	for label, want := range map[string]string{
 		"POLICY/Profile": "strict", "POLICY/  low": "ask", "POLICY/  critical": "deny",
 		"POLICY/Harness overrides": "codex: paranoid, high→deny",
-		"PROMPT/Ask hints": "defaults + 1", "PROMPT/Context": "none", "PROMPT/System prompt": "custom (3 chars)",
+		"PROMPT/Ask hints":         "defaults + 1", "PROMPT/Context": "none", "PROMPT/System prompt": "custom (3 chars)",
 	} {
 		if got[label].Value != want {
 			t.Errorf("%s = %q, want %q", label, got[label].Value, want)
@@ -160,5 +163,102 @@ func TestConfigRowsPolicyAndPromptSections(t *testing.T) {
 	}
 	if harnessOverridesSummary(Config{}) != "none" || hintListSummary(nil) != "none" || hintListSummary([]string{"a", "b"}) != "2 lines" {
 		t.Error("summary helpers")
+	}
+}
+
+func TestPageClickMapsLinesToRows(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	rows := []configRow{
+		{"A", "a1", "", "", func(*Config) {}},
+		{"A", "a2", "", "", nil},
+		{"B", "b1", "", "", func(*Config) {}},
+	}
+	m := newPageModel(rows, false, "", 0)
+	// title, blank, A, a1, a2, blank, B, b1, blank, keys
+	want := []int{-1, -1, -1, 0, 1, -1, -1, 2, -1, lineKeys}
+	got := m.lineRows()
+	if len(got) != len(want) {
+		t.Fatalf("lines %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("lines %v, want %v", got, want)
+		}
+	}
+	out, _ := m.click(5, 7) // b1
+	if pm := out.(pageModel); pm.action != pageEdit || pm.chosen != 2 || pm.cur != 1 {
+		t.Fatalf("click on b1: action=%v chosen=%d cur=%d", pm.action, pm.chosen, pm.cur)
+	}
+	out, _ = m.click(5, 4) // a2 is display-only
+	if pm := out.(pageModel); pm.chosen != 0 || pm.cur != 0 {
+		t.Fatalf("click on display-only row changed state: %+v", pm)
+	}
+	col := 1 + ansi.StringWidth(keysMove+"  "+keysEdit+"  ")
+	out, _ = m.click(col+1, 9)
+	if pm := out.(pageModel); pm.action != pageSave {
+		t.Fatalf("click on save word: action=%v", pm.action)
+	}
+	out, _ = m.click(col+ansi.StringWidth(keysSave+"  ")+1, 9)
+	if pm := out.(pageModel); pm.action != pageQuit {
+		t.Fatalf("click on quit word: action=%v", pm.action)
+	}
+}
+
+func TestMenuMouseAndKeys(t *testing.T) {
+	m := newMenu("Pick", "", []menuField{{Items: []string{"a", "b", "c"}, Cur: 0}})
+	// layout: title, hint, a, b, c, blank, back
+	out, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionMotion, X: 4, Y: 3})
+	if mm := out.(menuModel); mm.hoverLine != 3 {
+		t.Fatalf("hover line = %d", mm.hoverLine)
+	}
+	out, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 4, Y: 4})
+	if mm := out.(menuModel); !mm.done || mm.fields[0].Cur != 2 {
+		t.Fatalf("click on c: done=%v cur=%d", mm.done, mm.fields[0].Cur)
+	}
+	out, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 3, Y: 6})
+	if mm := out.(menuModel); !mm.cancelled {
+		t.Fatal("click on back should cancel")
+	}
+	out, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if mm := out.(menuModel); !mm.cancelled {
+		t.Fatal("left should cancel")
+	}
+	// group: enter advances fields, last enter submits; click sets a field without submitting
+	g := newMenu("G", "", []menuField{{Title: "x", Items: []string{"1", "2"}}, {Title: "y", Items: []string{"1", "2"}}})
+	out, _ = g.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	g = out.(menuModel)
+	if g.active != 1 || g.done {
+		t.Fatalf("enter should move to field 2: active=%d done=%v", g.active, g.done)
+	}
+	// layout: title, hint, "x", 1, 2, "y", 1, 2, blank, back/done
+	out, _ = g.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 5, Y: 4})
+	g = out.(menuModel)
+	if g.done || g.fields[0].Cur != 1 || g.active != 0 {
+		t.Fatalf("click on x/2: done=%v cur=%d active=%d", g.done, g.fields[0].Cur, g.active)
+	}
+	out, _ = g.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 2 + lipgloss.Width(menuBack) + 4, Y: 9})
+	if gg := out.(menuModel); !gg.done {
+		t.Fatal("click on done should submit")
+	}
+	yn := newMenu("Sure?", "", []menuField{{Items: []string{"Yes", "No"}, Cur: 1}})
+	out, _ = yn.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if mm := out.(menuModel); !mm.done || mm.fields[0].Cur != 0 {
+		t.Fatal("y should pick Yes")
+	}
+}
+
+func TestPageHoverFollowsMouse(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	rows := []configRow{{"A", "a1", "", "", func(*Config) {}}, {"A", "a2", "", "", nil}}
+	m := newPageModel(rows, false, "", 0)
+	out, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionMotion, X: 3, Y: 3})
+	if pm := out.(pageModel); pm.hover != 0 {
+		t.Fatalf("hover = %d, want row 0", pm.hover)
+	}
+	out, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionMotion, X: 3, Y: 4})
+	if pm := out.(pageModel); pm.hover != -1 {
+		t.Fatalf("display-only row should not hover, got %d", pm.hover)
 	}
 }
