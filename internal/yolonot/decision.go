@@ -3,8 +3,10 @@ package yolonot
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -24,6 +26,8 @@ import (
 // sections (DecisionHints); the project_ask question reads them.
 
 const decisionDefaultURL = "https://api.typesafe.ai/v1/systemone"
+
+var errDecisionResponse = errors.New("invalid typed response")
 
 func isDecisionURL(u string) bool {
 	return strings.Contains(u, "typesafe.ai") || strings.Contains(u, "/systemone") || isOpenAIDecisionsURL(u) || isWorkersAIClefURL(u)
@@ -50,7 +54,7 @@ const openRouterSystemOneURL = "https://openrouter.ai/api/v1/systemone"
 var errDecisionNoGeneration = fmt.Errorf("decision models return typed judgments and cannot generate text; configure a chat model for this feature")
 
 func requireChatModel(cfg LLMConfig) error {
-	if isDecisionURL(cfg.URL) {
+	if isDecisionConfig(cfg) {
 		return errDecisionNoGeneration
 	}
 	return nil
@@ -77,6 +81,109 @@ type decisionAnswer struct {
 	Probabilities map[string]float64 `json:"probabilities,omitempty"`
 	Confidence    float64            `json:"confidence,omitempty"`
 	Noul          float64            `json:"noul,omitempty"`
+	hasNoul       bool
+}
+
+func decisionProbability(raw json.RawMessage, name string, required bool) (*float64, error) {
+	if len(raw) == 0 {
+		if required {
+			return nil, fmt.Errorf("decision: missing %s", name)
+		}
+		return nil, nil
+	}
+	var value *float64
+	if err := json.Unmarshal(raw, &value); err != nil || value == nil || math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0 || *value > 1 {
+		return nil, fmt.Errorf("decision: %s must be a number in [0,1]", name)
+	}
+	return value, nil
+}
+
+// Numeric zero is a valid probability, while a missing/null probability is
+// not. Preserve that distinction instead of accepting Go's zero value.
+func (a *decisionAnswer) UnmarshalJSON(data []byte) error {
+	fields, err := decisionAnswerFields(data)
+	if err != nil {
+		return err
+	}
+	var decoded decisionAnswer
+	if err := json.Unmarshal(fields["type"], &decoded.Type); err != nil {
+		return fmt.Errorf("decision: missing or invalid answer type")
+	}
+	if raw, present := fields["choice"]; present {
+		if err := json.Unmarshal(raw, &decoded.Choice); err != nil {
+			return fmt.Errorf("decision: invalid choice")
+		}
+	}
+	noul, err := decisionProbability(fields["noul"], "noul", false)
+	if err != nil {
+		return err
+	}
+	if noul != nil {
+		decoded.Noul, decoded.hasNoul = *noul, true
+	}
+	confidence, err := decisionProbability(fields["confidence"], "confidence", false)
+	if err != nil {
+		return err
+	}
+	if confidence != nil {
+		decoded.Confidence = *confidence
+	}
+	if probabilities, ok := fields["probabilities"]; ok {
+		var values map[string]json.RawMessage
+		if err := json.Unmarshal(probabilities, &values); err != nil || values == nil {
+			return fmt.Errorf("decision: probabilities must be an object")
+		}
+		decoded.Probabilities = make(map[string]float64, len(values))
+		for name, raw := range values {
+			value, err := decisionProbability(raw, "probabilities."+name, true)
+			if err != nil {
+				return err
+			}
+			decoded.Probabilities[name] = *value
+		}
+	}
+	*a = decoded
+	return nil
+}
+
+// Decode answer fields once, rejecting ambiguous duplicates/case aliases.
+// encoding/json's case-insensitive struct matching must not give a value
+// different from the exact field whose presence and range we validated.
+func decisionAnswerFields(data []byte) (map[string]json.RawMessage, error) {
+	d := json.NewDecoder(bytes.NewReader(data))
+	opening, err := d.Token()
+	if err != nil || opening != json.Delim('{') {
+		return nil, fmt.Errorf("decision: answer must be an object")
+	}
+	fields := make(map[string]json.RawMessage)
+	for d.More() {
+		token, err := d.Token()
+		if err != nil {
+			return nil, err
+		}
+		name, ok := token.(string)
+		if !ok {
+			return nil, fmt.Errorf("decision: invalid answer field")
+		}
+		if _, duplicate := fields[name]; duplicate {
+			return nil, fmt.Errorf("decision: duplicate answer field %q", name)
+		}
+		switch canonical := strings.ToLower(name); canonical {
+		case "type", "name", "choice", "noul", "probability", "confidence", "probabilities":
+			if name != canonical {
+				return nil, fmt.Errorf("decision: answer field %q must be lowercase", name)
+			}
+		}
+		var raw json.RawMessage
+		if err := d.Decode(&raw); err != nil {
+			return nil, err
+		}
+		fields[name] = raw
+	}
+	if _, err := d.Token(); err != nil {
+		return nil, err
+	}
+	return fields, nil
 }
 
 const decisionPreamble = "The state is a shell command an AI coding agent wants to run, possibly with the contents of scripts it references. " +
@@ -191,7 +298,10 @@ func openAIDecisionsBody(model, userPrompt string) map[string]interface{} {
 // decisionPost sends the request and returns the answers keyed by question
 // name, normalised to the System One answer shape.
 func decisionPost(cfg LLMConfig, userPrompt string) (map[string]decisionAnswer, error) {
-	openai := isOpenAIDecisionsURL(cfg.URL)
+	if err := cfg.credentialError(); err != nil {
+		return nil, err
+	}
+	openai := isOpenAIDecisionsConfig(cfg)
 	var payload interface{} = map[string]interface{}{"model": cfg.Model, "state": userPrompt, "questions": decisionQuestions()}
 	if openai {
 		payload = openAIDecisionsBody(cfg.Model, userPrompt)
@@ -200,7 +310,7 @@ func decisionPost(cfg LLMConfig, userPrompt string) (map[string]decisionAnswer, 
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", cfg.URL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(cfg.requestContext(), "POST", cfg.URL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -217,6 +327,12 @@ func decisionPost(cfg LLMConfig, userPrompt string) (map[string]decisionAnswer, 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, cfg.authenticationError(resp.StatusCode)
+		}
+		return nil, fmt.Errorf("decision error (HTTP %d)", resp.StatusCode)
 	}
 	var out struct {
 		Answers json.RawMessage `json:"answers"`
@@ -243,34 +359,82 @@ func decisionPost(cfg LLMConfig, userPrompt string) (map[string]decisionAnswer, 
 	}
 	answers := map[string]decisionAnswer{}
 	if !openai {
-		err = json.Unmarshal(out.Answers, &answers)
-		return answers, err
+		fields, err := decisionAnswerFields(out.Answers)
+		if err != nil {
+			return nil, err
+		}
+		for name, raw := range fields {
+			var answer decisionAnswer
+			if err := json.Unmarshal(raw, &answer); err != nil {
+				return nil, fmt.Errorf("invalid %s answer: %w", name, err)
+			}
+			answers[name] = answer
+		}
+		return answers, nil
 	}
-	var list []struct {
-		Name          string  `json:"name"`
-		Type          string  `json:"type"`
-		Probability   float64 `json:"probability"`
-		Choice        string  `json:"choice"`
-		Confidence    float64 `json:"confidence"`
-		Probabilities []struct {
-			Value       string  `json:"value"`
-			Probability float64 `json:"probability"`
-		} `json:"probabilities"`
-	}
+	var list []json.RawMessage
 	if err := json.Unmarshal(out.Answers, &list); err != nil {
 		return nil, fmt.Errorf("invalid answers: %w", err)
 	}
-	for _, a := range list {
+	for _, raw := range list {
+		fields, err := decisionAnswerFields(raw)
+		if err != nil {
+			return nil, err
+		}
+		var a struct {
+			Name          string          `json:"name"`
+			Type          string          `json:"type"`
+			Probability   json.RawMessage `json:"probability"`
+			Choice        string          `json:"choice"`
+			Confidence    json.RawMessage `json:"confidence"`
+			Probabilities []struct {
+				Value       string          `json:"value"`
+				Probability json.RawMessage `json:"probability"`
+			} `json:"probabilities"`
+		}
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, fmt.Errorf("invalid answer: %w", err)
+		}
+		if probabilities, present := fields["probabilities"]; present && string(bytes.TrimSpace(probabilities)) == "null" {
+			return nil, fmt.Errorf("decision: probabilities must be an array")
+		}
+		if a.Name == "" {
+			return nil, fmt.Errorf("decision: missing answer name")
+		}
+		if _, duplicate := answers[a.Name]; duplicate {
+			return nil, fmt.Errorf("decision: duplicate %s answer", a.Name)
+		}
 		if a.Type == "refusal" {
 			// A refusal to judge is itself a signal (seen on obfuscated
 			// payloads): surface it as an ask rather than an outage.
 			return map[string]decisionAnswer{"refusal": {Type: "refusal", Choice: a.Name}}, nil
 		}
-		da := decisionAnswer{Type: a.Type, Choice: a.Choice, Confidence: a.Confidence, Noul: a.Probability}
+		probability, err := decisionProbability(a.Probability, a.Name+".probability", a.Type == "predicate")
+		if err != nil {
+			return nil, err
+		}
+		confidence, err := decisionProbability(a.Confidence, a.Name+".confidence", false)
+		if err != nil {
+			return nil, err
+		}
+		da := decisionAnswer{Type: a.Type, Choice: a.Choice}
+		if probability != nil {
+			da.Noul, da.hasNoul = *probability, true
+		}
+		if confidence != nil {
+			da.Confidence = *confidence
+		}
 		if len(a.Probabilities) > 0 {
 			da.Probabilities = map[string]float64{}
 			for _, p := range a.Probabilities {
-				da.Probabilities[p.Value] = p.Probability
+				if _, duplicate := da.Probabilities[p.Value]; duplicate {
+					return nil, fmt.Errorf("decision: duplicate %s probability", p.Value)
+				}
+				value, err := decisionProbability(p.Probability, a.Name+".probabilities."+p.Value, true)
+				if err != nil {
+					return nil, err
+				}
+				da.Probabilities[p.Value] = *value
 			}
 		}
 		answers[a.Name] = da
@@ -287,6 +451,10 @@ func callDecision(cfg LLMConfig, userPrompt string) (string, error) {
 	}
 	answers, err := decisionPost(cfg, userPrompt)
 	if err != nil {
+		var transport interface{ Timeout() bool }
+		if !errors.As(err, &transport) && !strings.HasPrefix(err.Error(), "decision error (HTTP") {
+			return "", fmt.Errorf("%w: %v", errDecisionResponse, err)
+		}
 		return "", err
 	}
 	if r, refused := answers["refusal"]; refused {
@@ -295,14 +463,18 @@ func callDecision(cfg LLMConfig, userPrompt string) (string, error) {
 		return string(b), nil
 	}
 	risk, ok := answers["risk"]
-	if !ok || !isValidRisk(risk.Choice) {
-		return "", fmt.Errorf("decision: missing or invalid risk answer %+v", risk)
+	if !ok || risk.Type != "choice" || !isValidRisk(risk.Choice) {
+		return "", fmt.Errorf("%w: missing or invalid risk answer", errDecisionResponse)
 	}
 	var fired []string
 	for _, c := range decisionAskConditions {
 		a, ok := answers[c.id]
-		if !ok {
-			return "", fmt.Errorf("decision: missing %s answer", c.id)
+		wantType := "noul"
+		if isOpenAIDecisionsConfig(cfg) {
+			wantType = "predicate"
+		}
+		if !ok || a.Type != wantType || !a.hasNoul {
+			return "", fmt.Errorf("%w: missing or invalid %s answer", errDecisionResponse, c.id)
 		}
 		if a.Noul >= 0.5 {
 			fired = append(fired, fmt.Sprintf("%s=%.2f", c.id, a.Noul))

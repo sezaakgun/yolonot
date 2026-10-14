@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // cmdCheck dry-run: when the assembled classifier prompt exceeds the budget,
@@ -107,5 +108,52 @@ func TestCheckHonorsAttachOutsideRoot(t *testing.T) {
 	}
 	if strings.Contains(bodies[1], "OUTSIDE-CHECK-MARKER") {
 		t.Error("check without the flag must withhold the outside script (and reset the open state from the prior run)")
+	}
+}
+
+func TestCheckAndHookReceiveSameProjectPrecedents(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Setenv("YOLONOT_HARNESS", "claude")
+	projectDir := t.TempDir()
+	t.Chdir(projectDir)
+	const command = "unfamiliar-tool --probe"
+	recordPrecedent(DecisionEntry{
+		Cwd: projectDir, Command: command, Layer: "human", Source: "ask_approved", Decision: "allow",
+	})
+	bodies := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodies <- string(body)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"decision":"allow","confidence":0.9,"short":"probe","reasoning":"probe"}`}},
+			},
+		})
+	}))
+	defer server.Close()
+	SaveConfig(Config{Provider: ProviderConfig{URL: server.URL, Model: "test"}})
+	awaitBody := func() string {
+		t.Helper()
+		select {
+		case body := <-bodies:
+			return body
+		case <-time.After(5 * time.Second):
+			t.Fatal("expected a model request")
+			return ""
+		}
+	}
+	captureStdout(func() { cmdCheck(command) })
+	checkBody := awaitBody()
+	runHookWithStruct(t, makePrePayload("precedent-parity", command, projectDir))
+	hookBody := awaitBody()
+	for label, body := range map[string]string{"check": checkBody, "hook": hookBody} {
+		if !strings.Contains(body, "the user allowed") || !strings.Contains(body, command) {
+			t.Errorf("%s did not receive the current project's precedent: %s", label, body)
+		}
+	}
+	if checkBody != hookBody {
+		t.Errorf("check and hook sent different model requests:\ncheck: %s\nhook:  %s", checkBody, hookBody)
 	}
 }

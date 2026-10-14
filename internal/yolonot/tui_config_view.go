@@ -34,6 +34,8 @@ type pageModel struct {
 	sel    []int // indices of editable rows
 	cur    int   // position in sel
 	width  int
+	height int
+	offset int
 	dirty  bool
 	notice string
 	action pageAction
@@ -60,6 +62,8 @@ func (m pageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
+		m.hover = -1
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
@@ -92,12 +96,42 @@ func (m pageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.click(msg.X, msg.Y)
 		case msg.Action == tea.MouseActionMotion:
 			m.hover = -1
-			if lines := m.lineRows(); msg.Y >= 0 && msg.Y < len(lines) && lines[msg.Y] >= 0 && m.rows[lines[msg.Y]].Edit != nil {
+			if lines := m.visibleLineRows(); msg.Y >= 0 && msg.Y < len(lines) && lines[msg.Y] >= 0 && m.rows[lines[msg.Y]].Edit != nil {
 				m.hover = lines[msg.Y]
 			}
 		}
 	}
+	m.ensureVisible()
 	return m, nil
+}
+
+func (m pageModel) footerLines() int {
+	if m.notice != "" {
+		return 3
+	}
+	return 2
+}
+
+func (m *pageModel) ensureVisible() {
+	if len(m.sel) == 0 {
+		return
+	}
+	lines := m.lineRows()
+	for i, row := range lines {
+		if row == m.sel[m.cur] {
+			m.offset = viewportOffset(len(lines), 1, m.footerLines(), m.height, m.offset, i)
+			return
+		}
+	}
+}
+
+func (m pageModel) visibleLineRows() []int {
+	lines := m.lineRows()
+	var visible []int
+	for _, i := range viewportLines(len(lines), 1, m.footerLines(), m.height, m.offset) {
+		visible = append(visible, lines[i])
+	}
+	return visible
 }
 
 // Line layout: the title, then per row a blank + section line when the
@@ -129,7 +163,7 @@ const keysMove, keysEdit, keysSave, keysQuit = "↑↓ move", "→ ⏎ edit", "s
 // click: a row opens it (first click selects and opens), the key bar's
 // "save" / "quit" words act like the keys.
 func (m pageModel) click(x, y int) (tea.Model, tea.Cmd) {
-	lines := m.lineRows()
+	lines := m.visibleLineRows()
 	if y < 0 || y >= len(lines) {
 		return m, nil
 	}
@@ -178,9 +212,9 @@ func (m pageModel) View() string {
 
 	labelW, valueW, hintW := 0, 0, 0
 	for _, r := range m.rows {
-		labelW = max(labelW, lipgloss.Width(r.Label))
-		valueW = max(valueW, lipgloss.Width(r.Value))
-		hintW = max(hintW, lipgloss.Width(r.Hint))
+		labelW = max(labelW, lipgloss.Width(oneLine(r.Label)))
+		valueW = max(valueW, lipgloss.Width(oneLine(r.Value)))
+		hintW = max(hintW, lipgloss.Width(oneLine(r.Hint)))
 	}
 	avail := max(m.width-3-labelW-4, 12)
 	hintW = min(hintW, avail/2)
@@ -188,9 +222,10 @@ func (m pageModel) View() string {
 
 	section := ""
 	for i, r := range m.rows {
+		r.Label, r.Value, r.Hint = oneLine(r.Label), oneLine(r.Value), oneLine(r.Hint)
 		if r.Section != section {
 			section = r.Section
-			b.WriteString("\n " + stBold.Render(section) + "\n")
+			b.WriteString("\n " + stBold.Render(oneLine(section)) + "\n")
 		}
 		selected := r.Edit != nil && len(m.sel) > 0 && m.sel[m.cur] == i
 		cursor := "  "
@@ -213,7 +248,7 @@ func (m pageModel) View() string {
 
 	b.WriteString("\n")
 	if m.notice != "" {
-		b.WriteString(" " + stAccent.Render(m.notice) + "\n")
+		b.WriteString(" " + stAccent.Render(oneLine(m.notice)) + "\n")
 	}
 	keys := stBold.Render("↑↓") + stDim.Render(" move  ") +
 		stBold.Render("→ ⏎") + stDim.Render(" edit  ") +
@@ -226,7 +261,7 @@ func (m pageModel) View() string {
 		keys += "   " + stGood.Render("unsaved changes")
 	}
 	b.WriteString(" " + keys + "\n")
-	return b.String()
+	return viewportView(b.String(), viewportLines(len(m.lineRows()), 1, m.footerLines(), m.height, m.offset), m.width)
 }
 
 // runPage shows the page and returns the action, the chosen row index and

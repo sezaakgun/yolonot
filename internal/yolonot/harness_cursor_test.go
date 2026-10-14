@@ -118,7 +118,7 @@ func TestCursorHarnessFormatHookResponseDenyFlat(t *testing.T) {
 
 func TestCursorHarnessFormatHookResponseAskIsEmpty(t *testing.T) {
 	// Cursor's schema accepts "ask" but does not enforce it — no TUI prompt
-	// fires, and asked-not-approved pins the next invocation as session_deny.
+	// fires, so callers cannot depend on an interactive answer.
 	// We collapse ask to empty stdout (passthrough) so Cursor's own
 	// permission UI handles moderate-risk commands. Parallels Codex/OpenCode.
 	r := HookResponse{}
@@ -348,14 +348,22 @@ func TestCursorHarnessIsDetected(t *testing.T) {
 	}
 }
 
-func TestCursorHarnessSkillNoOp(t *testing.T) {
+func TestCursorHarnessSkillInstallUninstall(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	h := &CursorHarness{}
 	path, err := h.InstallSkill()
-	if err != nil || path != "" {
-		t.Errorf("InstallSkill() = (%q, %v), want (\"\", nil)", path, err)
+	if err != nil || path == "" {
+		t.Fatalf("InstallSkill() = (%q, %v)", path, err)
+	}
+	data, err := os.ReadFile(filepath.Join(cursorSkillDir(), "SKILL.md"))
+	if err != nil || !strings.Contains(string(data), "name: yolonot") {
+		t.Fatalf("Cursor skill not written with valid metadata: %v", err)
 	}
 	if err := h.UninstallSkill(); err != nil {
 		t.Errorf("UninstallSkill() = %v, want nil", err)
+	}
+	if _, err := os.Stat(filepath.Join(cursorSkillDir(), "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatal("Cursor skill remains after uninstall")
 	}
 }
 
@@ -392,8 +400,8 @@ func TestCursorHarnessPostInstallNotes(t *testing.T) {
 func TestCursorHarnessRiskMapDenyOnly(t *testing.T) {
 	// Cursor matches the Codex pattern because ask isn't enforced upstream.
 	// safe/low → allow; moderate → passthrough (Cursor's UI decides);
-	// high/critical → deny. Regressing moderate to ActionAsk would pin every
-	// moderate command as session_deny via asked-not-approved.
+	// high/critical → deny. Moderate commands must remain passthrough while
+	// native interactive ask support is disabled.
 	rm := (&CursorHarness{}).RiskMap()
 	if rm[RiskSafe] != ActionAllow || rm[RiskLow] != ActionAllow {
 		t.Errorf("safe/low should allow: %v", rm)

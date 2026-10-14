@@ -181,7 +181,7 @@ func TestClaudeHarnessInstallUninstall(t *testing.T) {
 	if !strings.Contains(s, "PreToolUse") || !strings.Contains(s, "PostToolUse") {
 		t.Errorf("settings missing hook events: %s", s)
 	}
-	if !strings.Contains(s, `"matcher": "Bash"`) {
+	if !strings.Contains(s, `"matcher": "Bash|PowerShell"`) {
 		t.Errorf("settings missing Bash matcher: %s", s)
 	}
 

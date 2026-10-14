@@ -1,0 +1,31 @@
+{
+  "config_version": 1,
+  "models": {
+    "chat": {
+      "url": "claude-cli",
+      "model": "claude-sonnet-5-5",
+      "protocol": "claude-cli",
+      "timeout": 30
+    }
+  },
+  "judges": [
+    "fast_allow",
+    "chat"
+  ],
+  "policy": {
+    "profile": "strict"
+  },
+  "hook_timeout": 45,
+  "failure": {
+    "unavailable": "deny",
+    "parse": "deny",
+    "invalid_config": "deny",
+    "oversize": "deny",
+    "timeout": "deny"
+  },
+  "learning": {
+    "enabled": false,
+    "retention_days": 30,
+    "max_entries": 1000
+  }
+}

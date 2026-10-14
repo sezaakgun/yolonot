@@ -19,11 +19,15 @@ jobs:
         with:
           go-version: '1.25'
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.6'
+
       - name: Build
         run: go build -o yolonot .
 
       - name: Test
-        run: go test ./... -count=1 -race
+        run: go test ./... -count=1 -race -timeout=120s
 
       - name: Vet
         run: go vet ./...

@@ -54,6 +54,26 @@ func Run() {
 	// after the subcommand: `yolonot -v install` and `yolonot install -v`
 	// both work.
 	os.Args = append([]string{os.Args[0]}, stripGlobalFlags(os.Args[1:])...)
+	if name, _ := parseHarnessFlag(); name != "" {
+		if GetHarness(name) == nil {
+			fmt.Fprintf(os.Stderr, "Unknown harness %q\n", name)
+			os.Exit(2)
+		}
+		if os.Getenv("YOLONOT_HARNESS") == "" {
+			os.Setenv("YOLONOT_HARNESS", GetHarness(name).Name())
+		}
+	}
+	verb := ""
+	if len(os.Args) > 1 {
+		verb = os.Args[1]
+	}
+	inspectInvalid := verb == "doctor" || verb == "validate" || (verb == "config" && len(os.Args) > 2 && os.Args[2] == "validate") || verb == "hook" || verb == "version" || verb == "uninstall" || verb == "install" || verb == "migrate"
+	if !inspectInvalid {
+		if cfg := LoadConfig(); cfg.LoadError != nil {
+			fmt.Fprintln(os.Stderr, "yolonot:", cfg.LoadError)
+			os.Exit(2)
+		}
+	}
 
 	if len(os.Args) < 2 {
 		// Bare `yolonot` in a terminal on an installed setup opens the
@@ -116,7 +136,21 @@ func Run() {
 	case "profile":
 		cmdProfile(os.Args[2:])
 	case "config", "settings":
-		cmdConfigTUI()
+		if len(os.Args) > 2 && os.Args[2] == "validate" {
+			cmdConfigValidate(os.Args[3:])
+		} else {
+			cmdConfigTUI()
+		}
+	case "validate":
+		cmdConfigValidate(os.Args[2:])
+	case "doctor":
+		cmdDoctor(os.Args[2:])
+	case "effective":
+		cmdEffective(os.Args[2:])
+	case "approve", "deny", "reset":
+		cmdSessionDecision(os.Args[1], os.Args[2:])
+	case "learning":
+		cmdLearning(os.Args[2:])
 	case "judges", "judge":
 		cmdJudges(os.Args[2:])
 	case "pre-check", "precheck":
@@ -178,7 +212,7 @@ func cmdDefault() {
 	config := LoadConfig()
 
 	// Status overview
-	fmt.Println("yolonot — smart auto-mode for Claude Code")
+	fmt.Println("yolonot — configurable command guardrails for AI coding agents")
 	fmt.Println()
 
 	offerMigration(config)
@@ -278,7 +312,11 @@ func cmdDefault() {
 	fmt.Println("  pause       Disable yolonot for current session (total bypass)")
 	fmt.Println("  resume      Re-enable yolonot for current session")
 	fmt.Println("  migrate     Rewrite a v0 config.json in the v1 format (--dry-run, --undo)")
-	fmt.Println("  uninstall   Remove hooks from Claude Code")
+	fmt.Println("  doctor      Check configuration and harness installation")
+	fmt.Println("  effective   Show resolved policy, judges, learning and failure controls")
+	fmt.Println("  approve/deny/reset  Manage this project's session decisions")
+	fmt.Println("  learning    Inspect, disable, forget or prune learned answers")
+	fmt.Println("  uninstall   Remove hooks from targeted harnesses")
 	fmt.Println("  upgrade     Update to latest version")
 	fmt.Println("  version     Show version")
 }
@@ -288,7 +326,8 @@ func cmdSetup() {
 	fmt.Println()
 
 	// Step 1: Install hooks
-	if IsInstalled() {
+	targets := resolveInstallTargets("install")
+	if setupTargetsInstalled(targets) {
 		fmt.Println("  [1/4] Hooks: already installed")
 	} else {
 		fmt.Println("  [1/4] Installing hooks...")
@@ -325,7 +364,7 @@ func cmdSetup() {
 		}
 		cfg.putModel(name, m)
 		chat = name
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		fmt.Printf("\nModel %s set: %s via %s\n", name, m.Model, m.URL)
 		testProviderConnection(m)
 	}
@@ -338,25 +377,62 @@ func cmdSetup() {
 	// read-only commands), then the typed model, then the chat model.
 	fmt.Println()
 	fmt.Println("  [4/4] Judge chain")
-	var judges JudgeList
-	for _, name := range []string{judgeFastAllow, typed, chat} {
-		if name == "" {
-			continue
-		}
-		if sp := (JudgeSpec{Use: name}); !hasJudgeUse(cfg.Judges, name) {
-			judges = append(judges, sp)
-		}
-	}
-	if len(cfg.Judges) == 0 {
-		cfg.Judges = judges
-	} else {
-		cfg.Judges = append(cfg.Judges, judges...)
-	}
-	SaveConfig(cfg)
+	cfg.Judges = setupJudgeChain(cfg, typed, chat)
+	mustSaveConfig(cfg)
 	fmt.Println("      judges: " + judgeNames(cfg.Judges))
 
 	fmt.Println()
-	fmt.Println("Setup complete. Restart Claude Code to activate.")
+	var names []string
+	for _, h := range targets {
+		names = append(names, h.Name())
+	}
+	fmt.Printf("Setup complete. Restart %s to activate.\n", strings.Join(names, ", "))
+}
+
+func setupTargetsInstalled(targets []Harness) bool {
+	if len(targets) == 0 {
+		return false
+	}
+	for _, h := range targets {
+		if !h.IsInstalled() {
+			return false
+		}
+	}
+	return true
+}
+
+// Setup may be rerun after adding a typed model. Fill the model slots in
+// typed-first order without losing existing may restrictions or local
+// judges. Local exec judges retain their relative order.
+func setupJudgeChain(cfg Config, typed, chat string) JudgeList {
+	var models []JudgeSpec
+	if typed != "" {
+		sp := JudgeSpec{Use: typed}
+		for _, existing := range cfg.Judges {
+			if existing.Use == typed {
+				sp = existing
+				break
+			}
+		}
+		models = append(models, sp)
+	}
+	for _, sp := range cfg.Judges {
+		if sp.Use == typed {
+			continue
+		}
+		switch cfg.kindOf(sp) {
+		case judgeTyped, judgeChat, judgeUnknown:
+			models = append(models, sp)
+		}
+	}
+	if chat != "" && !hasJudgeUse(models, chat) {
+		models = append(models, JudgeSpec{Use: chat})
+	}
+	judges := withModelSlots(cfg, cfg.Judges, models)
+	if !hasJudgeUse(judges, judgeFastAllow) {
+		judges = append(JudgeList{{Use: judgeFastAllow}}, judges...)
+	}
+	return judges
 }
 
 func envOr(key, fallback string) string {
@@ -370,7 +446,7 @@ func envOr(key, fallback string) string {
 // the catalog name to put in the chain ("" when declined or unavailable).
 func offerDecisionModel(cfg *Config) string {
 	for _, n := range cfg.ModelNames() {
-		if isDecisionURL(cfg.Models[n].URL) {
+		if isTypedModel(cfg.Models[n]) {
 			fmt.Println("  [3b] Typed model: " + n + " (" + cfg.Models[n].Model + ")")
 			return n
 		}
@@ -386,7 +462,7 @@ func offerDecisionModel(cfg *Config) string {
 		return ""
 	}
 	name := cfg.addModel(typesafeDecision)
-	SaveConfig(*cfg)
+	mustSaveConfig(*cfg)
 	fmt.Println("       added model: " + name)
 	return name
 }

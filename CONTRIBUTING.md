@@ -25,38 +25,29 @@ Requires Go 1.25+.
 ## Project Structure
 
 ```
-main.go                       CLI entry point
-hook.go                       Hook handler pipeline
-llm.go                        LLM client + prompts + response parsing
-classifier.go                 Risk classifier → action mapping
-rules.go                      Rule loading + glob matching + chain detection
-session.go                    Session files (approved/asked/denied, project-scoped)
-config.go                     Config + settings.json + install/uninstall + suggest
-check.go                      Dry-run command pipeline checker
-stats.go                      Decision analytics
-similarity.go                 Session similarity pre-filtering
-tui.go                        Interactive TUI (charmbracelet/huh)
-log.go                        Decision logging (JSONL)
-eval.go                       LLM evaluation runner
-embed.go                      Embedded SKILL.md
-update.go                     GitHub release update checker
-
-harness.go                    Harness interface + registry (sync.RWMutex)
-harness_claude.go             Claude Code adapter (canonical hook protocol)
-harness_codex.go              Codex CLI adapter (~/.codex/hooks.json)
-harness_opencode.go           OpenCode adapter (writes TS plugin)
-harness_opencode_plugin.ts    Embedded OpenCode plugin (//go:embed)
-harness_gemini.go             Gemini CLI adapter (~/.gemini/settings.json)
-
-main_test.go                  Unit tests
-hook_integration_test.go      End-to-end hook pipeline tests
-harness_*_test.go             Per-adapter tests (install/parse/format/risk-map)
-evals/suites/                 LLM eval test cases (JSONL)
+main.go                       Thin CLI entry point
+internal/yolonot/             CLI, hooks, config, judges, models, TUI and adapters
+internal/yolonot/*_test.go    Unit, integration and security regression tests
+internal/yolonot/mod/         Claude function-hook module and Bun tests
+internal/yolonot/skills/      Shared native management skill template
+internal/fastallow/           Conservative shell AST parser and allowlist
+internal/glob/                Shared glob matcher
+evals/suites/                 Model evaluation cases (JSONL)
 ```
+
+See [docs/architecture.md](docs/architecture.md) for the full file map.
+The shared hook deadline is in `internal/yolonot/budget.go`; new network or
+subprocess stages must honor its context. Tests that change cwd should use
+`t.Chdir` so they restore it before temporary directories are removed.
+
+Install Bun to run the embedded OpenCode shim and Claude mod tests. Install
+Codex CLI to verify generated TOML with the host's own parser. These tests
+explicitly skip if their runtime is absent; the core Go tests still run.
+CI installs Bun so the TypeScript middleware tests run on every PR.
 
 ## Adding a Harness
 
-yolonot supports multiple AI coding assistants through the `Harness` interface in `harness.go`. To add a new host:
+yolonot supports multiple AI coding assistants through the `Harness` interface in `internal/yolonot/harness.go`. Add a new host under that package:
 
 1. **Implement the interface.** Create `harness_<name>.go` with a type that satisfies every method on `Harness`:
    - `Name()`, `IsDetected()`, `IsInstalled()`
@@ -65,12 +56,12 @@ yolonot supports multiple AI coding assistants through the `Harness` interface i
    - `ParseHookInput([]byte) (HookPayload, error)` — canonicalize stdin to our `HookPayload` shape
    - `FormatHookResponse(HookResponse) string` — serialize to the host's wire format (return `""` for passthrough)
    - `RiskMap() map[string]string` — tier (`safe`/`low`/`moderate`/`high`/`critical`) → action (`allow`/`ask`/`deny`/`passthrough`)
-   - `InstallSkill() (string, error)`, `UninstallSkill() error` — return `("", nil)` if the host has no skill surface
+   - `InstallSkill() (string, error)`, `UninstallSkill() error` — return `("", nil)` if skill installation is not implemented, and document that limitation
    - `PostInstallNotes() []string` — caveats printed after `yolonot install` (e.g. required flags, restart reminders)
 
-2. **Register it** via a `func init() { registerHarness(&YourHarness{}) }` block.
+2. **Register it** via a `func init() { RegisterHarness(&YourHarness{}) }` block.
 
-3. **Document caveats.** If the host's hook API lacks a primitive (e.g. no `ask`), add a short `<harness>_limitation.md` style note in the README's "Other AI harnesses" table and surface it via `PostInstallNotes`.
+3. **Document caveats.** Describe the adapter's exact hooks, allow/ask/deny behavior and skill support in [docs/harnesses.md](docs/harnesses.md). Surface setup caveats via `PostInstallNotes`. Distinguish limitations of our adapter from capabilities available elsewhere in the host.
 
 4. **Add tests.** At minimum: `Registered`, `SettingsPath`, `ParseHookInput` (canonical + malformed JSON), `FormatHookResponse` (deny + matches-Claude byte-for-byte where applicable), `Install`/`Uninstall` round-trip, `IsDetected`, `RiskMap` defaults, `PostInstallNotes`, and `ActiveHarnessPicks…BySessionEnv`. See `harness_codex_test.go` or `harness_opencode_test.go` for reference.
 
@@ -93,8 +84,8 @@ Add JSONL lines to `evals/suites/greenfield.jsonl` (command classification) or `
 Open an issue with:
 - What you expected vs what happened
 - The command that triggered the issue
-- The harness you're running (Claude Code / Codex / OpenCode / Gemini) and its version
-- Output from `yolonot log` if relevant
+- The harness (Claude Code / Codex / OpenCode / Antigravity / Cursor), CLI or desktop surface, version and permission mode
+- Relevant `yolonot log` entries and `doctor` output, with sensitive command arguments redacted; never include key values
 
 ## Code Style
 
@@ -106,3 +97,23 @@ Open an issue with:
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
+
+## Native harness verification
+
+`go test ./... -count=1 -race -timeout=120s` runs adapter, subprocess,
+configuration, lifecycle and security regression coverage. Bun is needed for
+the OpenCode plugin and Claude mod middleware tests. Model-provider live
+probes are separate and opt-in.
+
+A passing adapter fixture is not proof of a host approval dialog. For native
+checks, prefer isolated HOME/XDG directories, install the candidate there, use a
+scripted local model or native tool API, and assert harmless marker execution
+for allow/deny/ask/reject. Codex also needs trusted hook hashes and a
+PermissionRequest client; verify untrusted hooks are skipped. Never change
+a developer's live settings without explicit authorization. Local scripted
+providers use dummy credentials; real account tests require separate opt-in.
+If a test requires the user's authenticated native app, preserve existing
+settings, record that scope and never copy credentials into fixtures or logs.
+Record exact versions, expected host deferrals and untested UI surfaces in
+[the compatibility guide](docs/harnesses.md#verification-scope). Keep raw account
+metadata and machine-specific test captures out of version control.

@@ -2,6 +2,7 @@ package yolonot
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -76,7 +77,7 @@ func configRows(cfg Config) []configRow {
 		case judgeExec:
 			path := strings.TrimPrefix(sp.Use, "exec:")
 			val = "exec:" + preCheckShortName(path)
-			if _, err := exec.LookPath(strings.Fields(path)[0]); err != nil {
+			if !execPathFound(path) {
 				hint = hintNotFound
 			}
 		case judgeUnknown:
@@ -99,7 +100,7 @@ func configRows(cfg Config) []configRow {
 		}
 		path := strings.TrimPrefix(sp.Use, "exec:")
 		hint := "ready"
-		if _, err := exec.LookPath(strings.Fields(path)[0]); err != nil {
+		if !execPathFound(path) {
 			hint = hintNotFound
 		}
 		add(configRow{"MODELS", "exec:" + preCheckShortName(path), tildePath(path), hint, editExec(i)})
@@ -137,6 +138,21 @@ func configRows(cfg Config) []configRow {
 	add(configRow{"POLICY", "Rules", tildePath(filepath.Join(YolonotDir(), "rules")), "", editRules})
 	proj, projHint := projectRulesPath()
 	add(configRow{"POLICY", "Project rules", tildePath(proj), projHint, editProjectRules})
+	add(configRow{"POLICY", "Failure behavior", "provider / parse / config / size / timeout", "", editFailures})
+	budget := cfg.HookTimeout
+	if budget == 0 {
+		budget = 55
+	}
+	add(configRow{"POLICY", "Decision budget", fmt.Sprintf("%ds", budget), "max 55s", func(c *Config) {
+		editPositiveSetting("Hook budget, seconds (0 = 55)", c.HookTimeout, 55, func(n int) { c.HookTimeout = n })
+	}})
+	add(configRow{"POLICY", "Learning", onOff(learningEnabled(cfg)), "cross-session hints", func(c *Config) { enabled := !learningEnabled(*c); c.Learning.Enabled = &enabled }})
+	add(configRow{"POLICY", "Learning retention", fmt.Sprintf("%d days", cfg.Learning.RetentionDays), "0 = unlimited", func(c *Config) {
+		editPositiveSetting("Retention days", c.Learning.RetentionDays, 0, func(n int) { c.Learning.RetentionDays = n })
+	}})
+	add(configRow{"POLICY", "Learning limit", fmt.Sprint(cfg.Learning.MaxEntries), "0 = unlimited", func(c *Config) {
+		editPositiveSetting("Maximum stored answers", c.Learning.MaxEntries, 0, func(n int) { c.Learning.MaxEntries = n })
+	}})
 
 	// PROMPT — what the chat model (and, as state text, the typed model) sees.
 	add(configRow{"PROMPT", "Context", hintListSummary(cfg.Prompt.Context), "", editPromptList("Context", "trusted background facts", func(c *Config) *[]string { return &c.Prompt.Context })})
@@ -290,7 +306,7 @@ func editAddJudge(cfg *Config) {
 	names := cfg.ModelNames()
 	for _, n := range names {
 		kind := "chat"
-		if isDecisionURL(cfg.Models[n].URL) {
+		if isTypedModel(cfg.Models[n]) {
 			kind = "typed"
 		}
 		items = append(items, fmt.Sprintf("%-13s %s model: %s", n, kind, cfg.Models[n].Model))
@@ -311,6 +327,10 @@ func editAddJudge(cfg *Config) {
 		sp = JudgeSpec{Use: "exec:" + path}
 	default:
 		sp = JudgeSpec{Use: names[idx-2]}
+	}
+	if err := validateJudgeSpec(*cfg, sp); err != nil {
+		tuiNote("Judge not added", err.Error())
+		return
 	}
 	for _, e := range cfg.Judges {
 		if e.Use == sp.Use {
@@ -341,7 +361,7 @@ func editResetChain(cfg *Config) {
 		if n == esc {
 			continue
 		}
-		if isDecisionURL(cfg.Models[n].URL) {
+		if isTypedModel(cfg.Models[n]) {
 			if typed == "" {
 				typed = n
 			}
@@ -424,6 +444,12 @@ func editJudgesInEditor(cfg *Config) {
 		tuiNote("Chain not changed", err.Error())
 		return
 	}
+	for _, spec := range out {
+		if err := validateJudgeSpec(*cfg, spec); err != nil {
+			tuiNote("Chain not changed", err.Error())
+			return
+		}
+	}
 	cfg.Judges = out
 }
 
@@ -460,7 +486,7 @@ func editJSONInEditor(specs JudgeList) (JudgeList, error) {
 func editModel(name string) func(*Config) {
 	return func(cfg *Config) {
 		m := cfg.Models[name]
-		switch tuiSelect(name+"  "+m.Model, []string{"Test connection", "Replace", "Remove"}, 0) {
+		switch tuiSelect(name+"  "+m.Model, []string{"Test connection", "Replace", "Remove", "Protocol"}, 0) {
 		case 0:
 			if testProviderConnection(m) {
 				tuiNote("Connection ok", m.Model)
@@ -470,7 +496,7 @@ func editModel(name string) func(*Config) {
 		case 1:
 			var sel ProviderConfig
 			var ok bool
-			if isDecisionURL(m.URL) {
+			if isTypedModel(m) {
 				sel, ok = pickDecisionProvider()
 			} else {
 				sel, ok = pickProvider(*cfg, false)
@@ -490,6 +516,8 @@ func editModel(name string) func(*Config) {
 				return
 			}
 			delete(cfg.Models, name)
+		case 3:
+			editModelProtocol(cfg, name)
 		}
 	}
 }
@@ -504,7 +532,7 @@ func editExec(i int) func(*Config) {
 		path := strings.TrimPrefix(cfg.Judges[i].Use, "exec:")
 		switch tuiSelect("exec:"+preCheckShortName(path)+"  "+tildePath(path), []string{"Test", "Replace path", "Remove"}, 0) {
 		case 0:
-			if _, err := exec.LookPath(strings.Fields(path)[0]); err != nil {
+			if !execPathFound(path) {
 				tuiNote("Not found", path)
 				return
 			}
@@ -518,7 +546,13 @@ func editExec(i int) func(*Config) {
 			}
 		case 1:
 			if p := tuiInput("Path to hook", path, path); p != "" {
-				cfg.Judges[i].Use = "exec:" + p
+				sp := cfg.Judges[i]
+				sp.Use = "exec:" + p
+				if err := validateJudgeSpec(*cfg, sp); err != nil {
+					tuiNote("Path not changed", err.Error())
+					return
+				}
+				cfg.Judges[i] = sp
 			}
 		case 2:
 			cfg.Judges = applyJudgeMove(cfg.Judges, i, 2)
@@ -534,6 +568,10 @@ func editAddModel(cfg *Config) {
 	if kind == 2 {
 		path := tuiInput("Path to hook", "/path/to/hook", "")
 		if path == "" {
+			return
+		}
+		if err := validateJudgeSpec(*cfg, JudgeSpec{Use: "exec:" + path}); err != nil {
+			tuiNote("Judge not added", err.Error())
 			return
 		}
 		for _, e := range cfg.Judges {
@@ -560,10 +598,7 @@ func editAddModel(cfg *Config) {
 
 func editEscalation(cfg *Config) {
 	// One editor for model and switch: Off, or pick a model (which turns it on).
-	cur := 0
-	if cfg.Escalation != nil && cfg.Escalation.Provider.Model != "" && !cfg.Escalation.Disabled {
-		cur = 1
-	}
+	cur := escalationSelection(*cfg)
 	switch tuiSelect("Escalation", []string{"Off", "Pick escalation model"}, cur) {
 	case 0:
 		if cfg.Escalation != nil {
@@ -576,13 +611,29 @@ func editEscalation(cfg *Config) {
 	}
 }
 
+func escalationSelection(cfg Config) int {
+	if cfg.Escalation != nil && cfg.Escalation.Model != "" && !cfg.Escalation.Disabled {
+		return 1
+	}
+	return 0
+}
+
+func execPathFound(path string) bool {
+	parts := strings.Fields(path)
+	if len(parts) == 0 {
+		return false
+	}
+	_, err := exec.LookPath(parts[0])
+	return err == nil
+}
+
 // pickEscalationModel offers the catalog's chat models plus "Add a new
 // model", which runs the picker with escalation-sized suggestions.
 func pickEscalationModel(cfg *Config) (string, bool) {
 	var names []string
 	var items []string
 	for _, n := range cfg.ModelNames() {
-		if m := cfg.Models[n]; !isDecisionURL(m.URL) {
+		if m := cfg.Models[n]; !isTypedModel(m) {
 			names = append(names, n)
 			items = append(items, fmt.Sprintf("%-13s %s", n, m.Model))
 		}
@@ -828,9 +879,7 @@ func editProjectRules(cfg *Config) {
 	if p == "" {
 		return
 	}
-	if err := runEditor(p); err != nil {
-		tuiNote("Editor failed", err.Error())
-	}
+	editRuleDraft(p)
 }
 
 // editPromptList opens the list in $EDITOR, one entry per line; `#` lines
@@ -882,14 +931,22 @@ func editText(pattern, initial string) (string, bool) {
 		return "", false
 	}
 	defer os.Remove(f.Name())
-	f.WriteString(initial)
-	f.Close()
+	if _, err := f.WriteString(initial); err != nil {
+		f.Close()
+		tuiNote("Editor failed", err.Error())
+		return "", false
+	}
+	if err := f.Close(); err != nil {
+		tuiNote("Editor failed", err.Error())
+		return "", false
+	}
 	if err := runEditor(f.Name()); err != nil {
 		tuiNote("Editor failed", err.Error())
 		return "", false
 	}
 	data, err := os.ReadFile(f.Name())
 	if err != nil {
+		tuiNote("Editor failed", err.Error())
 		return "", false
 	}
 	return string(data), true
@@ -898,9 +955,7 @@ func editText(pattern, initial string) (string, bool) {
 func editQuiet(cfg *Config) { cfg.QuietOnAllow = !cfg.QuietOnAllow }
 
 func editRules(cfg *Config) {
-	if err := runEditor(filepath.Join(YolonotDir(), "rules")); err != nil {
-		tuiNote("Editor failed", err.Error())
-	}
+	editRuleDraft(filepath.Join(YolonotDir(), "rules"))
 }
 
 // runEditor opens path in $VISUAL / $EDITOR (default vi) and waits.
@@ -913,6 +968,9 @@ func runEditor(path string) error {
 		ed = "vi"
 	}
 	parts := strings.Fields(ed)
+	if len(parts) == 0 {
+		return fmt.Errorf("EDITOR must name an executable")
+	}
 	cmd := exec.Command(parts[0], append(parts[1:], path)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
@@ -937,9 +995,12 @@ func cmdConfigTUI() {
 	// per program flashes the shell between them. They clear and redraw
 	// inside this one instead.
 	tuiInPage = true
+	tuiExitMsg = ""
+	tuiRuleDrafts = &ruleDrafts{}
 	fmt.Print("\x1b[?1049h")
 	defer func() {
 		tuiInPage = false
+		tuiRuleDrafts = nil
 		fmt.Print("\x1b[?1049l")
 		if tuiExitMsg != "" {
 			fmt.Println(tuiExitMsg)
@@ -950,7 +1011,7 @@ func cmdConfigTUI() {
 	cur := 0
 	for {
 		now, _ := json.Marshal(cfg)
-		dirty := string(now) != string(orig)
+		dirty := string(now) != string(orig) || tuiRuleDrafts.dirty()
 		rows := configRows(cfg)
 		action, chosen, pos := runPage(rows, dirty, tuiNotice, cur)
 		cur = pos
@@ -965,16 +1026,18 @@ func cmdConfigTUI() {
 				tuiExitMsg = "No changes."
 				return
 			}
-			saveConfigWithBackup(cfg)
-			return
+			if saveConfigWithBackup(cfg) {
+				return
+			}
 		case pageQuit:
 			if !dirty {
 				return
 			}
 			switch tuiSelect("Unsaved changes", []string{"Save and quit", "Discard and quit", "Keep editing"}, 0) {
 			case 0:
-				saveConfigWithBackup(cfg)
-				return
+				if saveConfigWithBackup(cfg) {
+					return
+				}
 			case 1:
 				tuiExitMsg = "Discarded."
 				return
@@ -987,14 +1050,45 @@ func cmdConfigTUI() {
 // screen, where a plain Println would vanish.
 var tuiExitMsg string
 
-func saveConfigWithBackup(cfg Config) {
+func saveConfigWithBackup(cfg Config) bool {
+	if err := ValidateConfig(cfg); err != nil {
+		tuiNote("Not saved", err.Error())
+		return false
+	}
 	if cfg.Legacy && !tuiConfirm("config.json is in the v0 format; saving writes v1. Continue? (backup kept at .bak)") {
-		tuiExitMsg = "Not saved."
-		return
+		tuiNote("Not saved", "keep editing or discard the changes")
+		return false
 	}
+	for _, spec := range cfg.Judges {
+		if err := validateJudgeSpec(cfg, spec); err != nil {
+			tuiNote("Not saved", err.Error())
+			return false
+		}
+	}
+	backedUp := false
 	if data, err := os.ReadFile(configPath()); err == nil {
-		os.WriteFile(configPath()+".bak", data, 0600)
+		if err := atomicWriteFile(configPath()+".bak", data, 0600); err != nil {
+			tuiNote("Not saved", "config backup: "+err.Error())
+			return false
+		}
+		backedUp = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		tuiNote("Not saved", err.Error())
+		return false
 	}
-	SaveConfig(cfg)
-	tuiExitMsg = "Saved. Previous config kept at " + tildePath(configPath()) + ".bak"
+	rollback, err := tuiRuleDrafts.commit()
+	if err != nil {
+		tuiNote("Not saved", err.Error())
+		return false
+	}
+	if err := saveConfig(cfg); err != nil {
+		err = errors.Join(err, rollback())
+		tuiNote("Not saved", err.Error())
+		return false
+	}
+	tuiExitMsg = "Saved."
+	if backedUp {
+		tuiExitMsg += " Previous config kept at " + tildePath(configPath()) + ".bak"
+	}
+	return true
 }

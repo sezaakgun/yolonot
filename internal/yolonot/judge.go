@@ -1,6 +1,8 @@
 package yolonot
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -88,7 +90,8 @@ type JudgeInput struct {
 	Config    Config
 	Harness   Harness
 	HookStart time.Time
-	DryRun    bool // `yolonot check`: never run exec judges
+	Context   context.Context // shared hook deadline, including session similarity
+	DryRun    bool            // `yolonot check`: never run exec judges
 }
 
 // Verdict is a judge's answer. Dec is set by classifier judges and carries
@@ -102,13 +105,16 @@ type Verdict struct {
 	Layer    string
 	Ms       int64
 
-	Dec      *Decision // classifier verdict (llm/decision), mutated by escalation
-	CacheKey string
-	Prompt   string // user prompt the classifier saw; escalation reuses it
-	Sys      string
-	Esc      escalationOutcome
-	CacheOK  bool
-	Override bool // custom system_prompt override active (parse-error banner)
+	Dec            *Decision // classifier verdict (llm/decision), mutated by escalation
+	CacheKey       string
+	CacheContext   string
+	ReplayBinding  string   // exact script snapshot the classifier and escalation saw
+	ApprovalHashes []string // session approvals use that same snapshot
+	Prompt         string   // user prompt the classifier saw; escalation reuses it
+	Sys            string
+	Esc            escalationOutcome
+	CacheOK        bool
+	Override       bool // custom system_prompt override active (parse-error banner)
 }
 
 // judgeError kinds. The hook maps them to its existing pass-through
@@ -117,6 +123,7 @@ const (
 	judgeErrUnavailable = "unavailable"
 	judgeErrParse       = "parse"
 	judgeErrOversize    = "oversize"
+	judgeErrBudget      = "budget"
 )
 
 type judgeError struct {
@@ -131,6 +138,14 @@ func (e *judgeError) Error() string { return e.Kind + ": " + e.Msg }
 // runJudge executes one spec. ok=false with err=nil means the judge
 // abstained (no verdict, nothing to log).
 func runJudge(spec JudgeSpec, in *JudgeInput) (v Verdict, ok bool, err error) {
+	ctx, cancel := hookBudgetContext(in.Context, in.HookStart)
+	defer cancel()
+	bounded := *in
+	bounded.Context = ctx
+	in = &bounded
+	if ctx.Err() != nil {
+		return Verdict{}, false, budgetJudgeError()
+	}
 	switch spec.Kind() {
 	case judgeFastAllow:
 		if pass, reason := fastallow.IsLocallySafeWith(in.Command, AllowRedirectPatterns(in.Rules)); pass {
@@ -142,8 +157,11 @@ func runJudge(spec JudgeSpec, in *JudgeInput) (v Verdict, ok bool, err error) {
 		if in.DryRun {
 			return Verdict{}, false, nil
 		}
-		if _, reason, pass := runPreCheck(path, in.Canonical); pass {
+		if _, reason, pass := runPreCheckContext(ctx, path, in.Canonical); pass {
 			return Verdict{Decision: "allow", Reason: reason, Layer: "exec:" + preCheckShortName(path)}, true, nil
+		}
+		if ctx.Err() != nil {
+			return Verdict{}, false, budgetJudgeError()
 		}
 		return Verdict{}, false, nil
 	case judgeTyped, judgeChat:
@@ -166,14 +184,16 @@ func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 			Msg: fmt.Sprintf("classifier prompt %d KB exceeds %d KB budget", len(userPrompt)/1024, maxClassifierPromptBytes/1024)}
 	}
 	cfg := in.Config.ModelLLM(spec.Use)
+	cfg.Context = in.Context
 	if cfg.URL == "" || cfg.Model == "" {
 		return Verdict{}, false, &judgeError{Kind: judgeErrUnavailable, Msg: "skipped — no provider configured for " + spec.Use}
 	}
-	hints := LoadHints()
+	hints := LoadHints(in.Cwd)
 	addPrecedentHints(&hints, in.Command, in.Cwd)
 	sysPrompt := BuildSystemPrompt(in.Config.Prompt, hints)
 	override := HasSystemPromptOverride(in.Config.Prompt, hints)
 
+	replayBinding, approvalHashes := replaySnapshotFromCollected(in.Command, in.Cwd, attached, withheld)
 	start := time.Now()
 	var text string
 	var err error
@@ -184,6 +204,12 @@ func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 	}
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
+		if in.Context != nil && in.Context.Err() != nil {
+			return Verdict{}, false, budgetJudgeError()
+		}
+		if errors.Is(err, errDecisionResponse) {
+			return Verdict{}, false, &judgeError{Kind: judgeErrParse, Msg: err.Error(), Verdict: Verdict{Ms: ms}}
+		}
 		return Verdict{}, false, &judgeError{Kind: judgeErrUnavailable, Msg: err.Error(), Verdict: Verdict{Ms: ms}}
 	}
 	d := ParseDecision(text)
@@ -193,8 +219,11 @@ func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 	return Verdict{
 		Decision: d.Decision, Risk: d.Risk, Short: d.Short, Reason: d.Reasoning,
 		Layer: spec.Use, Ms: ms, Dec: d,
-		CacheKey: hashCollected(in.Command, attached, withheld),
-		Prompt:   userPrompt, Sys: sysPrompt, CacheOK: true, Override: override,
+		CacheKey:       hashCollected(in.Command, attached, withheld),
+		CacheContext:   classifierContextFingerprint(in.Config, hints, in.Cwd),
+		ReplayBinding:  replayBinding,
+		ApprovalHashes: approvalHashes,
+		Prompt:         userPrompt, Sys: sysPrompt, CacheOK: true, Override: override,
 	}, true, nil
 }
 
@@ -205,7 +234,7 @@ func escalateUncertain(in *JudgeInput, v *Verdict) {
 	if v.Dec == nil {
 		return
 	}
-	v.Esc, v.CacheOK = maybeEscalate(in.Harness, in.Config, v.Dec, v.Sys, v.Prompt, in.HookStart)
+	v.Esc, v.CacheOK = maybeEscalateContext(in.Context, in.Harness, in.Config, v.Dec, v.Sys, v.Prompt, in.HookStart)
 	v.Decision, v.Risk, v.Short, v.Reason = v.Dec.Decision, v.Dec.Risk, v.Dec.Short, v.Dec.Reasoning
 	if v.Dec.Escalated && !strings.HasSuffix(v.Layer, "+esc") {
 		v.Layer += "+esc"
@@ -218,19 +247,33 @@ func escalateUncertain(in *JudgeInput, v *Verdict) {
 // Returns the adopted verdict, or nil plus the last error when no judge
 // decided.
 func RunJudges(specs []JudgeSpec, in *JudgeInput, beforeRemote func() bool) (*Verdict, *judgeError, bool) {
+	ctx, cancel := hookBudgetContext(in.Context, in.HookStart)
+	defer cancel()
+	bounded := *in
+	bounded.Context = ctx
+	in = &bounded
 	var lastErr *judgeError
 	memoryDone := false
 	for _, spec := range specs {
+		if ctx.Err() != nil {
+			return nil, budgetJudgeError(), false
+		}
 		if spec.remote() && !memoryDone {
 			memoryDone = true
 			if beforeRemote != nil && beforeRemote() {
 				return nil, nil, true
+			}
+			if ctx.Err() != nil {
+				return nil, budgetJudgeError(), false
 			}
 		}
 		v, ok, err := runJudge(spec, in)
 		if err != nil {
 			if je, isJE := err.(*judgeError); isJE {
 				lastErr = je
+			}
+			if ctx.Err() != nil {
+				return nil, budgetJudgeError(), false
 			}
 			continue
 		}
@@ -239,13 +282,16 @@ func RunJudges(specs []JudgeSpec, in *JudgeInput, beforeRemote func() bool) (*Ve
 		}
 		return &v, lastErr, false
 	}
+	if ctx.Err() != nil {
+		return nil, budgetJudgeError(), false
+	}
 	return nil, lastErr, false
 }
 
 // cmdJudges lists and edits the chain: `yolonot judges [add <entry>|remove <n|entry>|move <n> up|down]`.
 func cmdJudges(args []string) {
 	cfg := LoadConfig()
-	if len(args) == 0 {
+	if len(args) == 0 || args[0] == "list" {
 		printJudges(cfg)
 		return
 	}
@@ -260,8 +306,8 @@ func cmdJudges(args []string) {
 		}
 		entry := strings.Join(args[1:], " ")
 		sp := JudgeSpec{Use: entry}
-		if cfg.kindOf(sp) == judgeUnknown {
-			fmt.Fprintf(os.Stderr, "%q is not fast_allow, exec:<path> or a model in `yolonot models`\n", entry)
+		if err := validateJudgeSpec(cfg, sp); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
 		for _, e := range cfg.Judges {
@@ -271,7 +317,7 @@ func cmdJudges(args []string) {
 			}
 		}
 		cfg.Judges = append(cfg.Judges, sp)
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		printJudges(cfg)
 	case "remove", "rm":
 		if len(args) < 2 {
@@ -284,7 +330,7 @@ func cmdJudges(args []string) {
 			os.Exit(2)
 		}
 		cfg.Judges = applyJudgeMove(cfg.Judges, i, 2)
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		printJudges(cfg)
 	case "move":
 		if len(args) < 3 || (args[2] != "up" && args[2] != "down") {
@@ -301,12 +347,29 @@ func cmdJudges(args []string) {
 			op = 1
 		}
 		cfg.Judges = applyJudgeMove(cfg.Judges, i, op)
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		printJudges(cfg)
 	default:
 		fmt.Fprintln(os.Stderr, "Usage: yolonot judges [add <entry>|remove <n|entry>|move <n|entry> up|down]")
 		os.Exit(2)
 	}
+}
+
+// validateJudgeSpec prevents a saved chain entry from selecting an empty
+// executable or an unknown model. The TUI also uses this for JSON edits.
+func validateJudgeSpec(cfg Config, spec JudgeSpec) error {
+	if cfg.kindOf(spec) == judgeUnknown {
+		return fmt.Errorf("%q is not fast_allow, exec:<path> or a model in `yolonot models`", spec.Use)
+	}
+	if cfg.kindOf(spec) == judgeExec && len(strings.Fields(strings.TrimPrefix(spec.Use, "exec:"))) == 0 {
+		return fmt.Errorf("exec judge requires a non-empty executable path")
+	}
+	for _, decision := range spec.May {
+		if decision != ActionAllow && decision != ActionAsk && decision != ActionDeny {
+			return fmt.Errorf("judge %q: invalid may decision %q", spec.Use, decision)
+		}
+	}
+	return nil
 }
 
 // judgeIndex resolves a 1-based index or an exact entry to a position.

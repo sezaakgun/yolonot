@@ -8,10 +8,10 @@
 // convention that OpenCode uses for blocking.
 //
 // This file is embedded into the Go binary via //go:embed and written to
-// ~/.config/opencode/plugin/yolonot.ts by `yolonot install --harness opencode`.
-// Do not import from @opencode-ai/plugin here — keeping it import-free means
-// Bun can run it without the plugin type package being present in the user's
-// .opencode/node_modules.
+// ~/.config/opencode/plugins/yolonot.ts by `yolonot install --harness opencode`.
+// Only use runtime builtins: neither SDK version is required on disk.
+
+import { resolve } from "node:path"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any
@@ -24,6 +24,7 @@ async function askYolonot(
   command: string,
   cwd: string,
   toolResponse: Any,
+  nativeAsk = false,
 ): Promise<{ decision: string; reason: string }> {
   const payload = {
     hook_event_name: event,
@@ -38,7 +39,11 @@ async function askYolonot(
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, YOLONOT_HARNESS: "opencode" },
+    env: {
+      ...process.env,
+      YOLONOT_HARNESS: "opencode",
+      YOLONOT_OPENCODE_API: nativeAsk ? "2" : "1",
+    },
   })
   proc.stdin.write(JSON.stringify(payload))
   await proc.stdin.end()
@@ -46,21 +51,33 @@ async function askYolonot(
   const [out, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     proc.exited,
+    // Drain diagnostics concurrently so a full stderr pipe cannot stall
+    // a hook that is trying to return its verdict.
+    new Response(proc.stderr).text(),
   ])
-  // Fail CLOSED on any hook error. A crash, OOM, or parse failure must not
-  // result in silent blanket-allow — that turns one transient failure into a
-  // full bypass for the rest of the session. OpenCode has no `ask` primitive,
-  // so we deny and include the raw exit code so the user can see what
-  // happened. The user can always re-run with yolonot disabled if intentional.
-  if (exitCode !== 0 || !out.trim()) {
-    return { decision: "deny", reason: `yolonot hook exited ${exitCode} with empty output — failing closed` }
+  // A failed process or malformed response blocks. Successful empty output
+  // is the hook's intentional passthrough contract (pause, disabled, an
+  // empty chain, or a configured passthrough action), not a process failure.
+  if (exitCode !== 0) {
+    return { decision: "deny", reason: `yolonot hook exited ${exitCode} — failing closed` }
+  }
+  if (!out.trim()) {
+    return { decision: "", reason: "" }
   }
   try {
     const parsed = JSON.parse(out)
-    const h = parsed.hookSpecificOutput ?? {}
+    const h = parsed?.hookSpecificOutput
+    if (!h || typeof h !== "object" || Array.isArray(h)) {
+      throw new Error("missing hookSpecificOutput")
+    }
+    const decision = h.permissionDecision
+    const reason = h.permissionDecisionReason ?? ""
+    if (!["allow", "ask", "deny"].includes(decision) || typeof reason !== "string") {
+      throw new Error("invalid hook decision")
+    }
     return {
-      decision: h.permissionDecision ?? "allow",
-      reason: h.permissionDecisionReason ?? "",
+      decision,
+      reason,
     }
   } catch (e) {
     return { decision: "deny", reason: `yolonot hook returned unparseable output — failing closed` }
@@ -75,7 +92,8 @@ export const YolonotPlugin = async (_ctx: Any) => ({
     if (input.tool !== "bash") return
     const command = output?.args?.command ?? ""
     if (!command) return
-    const cwd = output?.args?.cwd ?? process.cwd()
+    const directory = _ctx.directory ?? process.cwd()
+    const cwd = resolve(directory, output?.args?.workdir ?? output?.args?.cwd ?? directory)
     const { decision, reason } = await askYolonot(
       "PreToolUse",
       input.sessionID ?? "",
@@ -88,7 +106,7 @@ export const YolonotPlugin = async (_ctx: Any) => ({
     // passthrough; "ask" should not appear unless user-forced. Treat:
     //   - deny → throw (hard block)
     //   - ask  → return (defer to host's own prompt engine)
-    //   - allow / "" / missing → return
+    //   - allow → return (includes successful empty hook output)
     if (decision === "deny") {
       throw new Error(`yolonot: ${reason || decision}`)
     }
@@ -102,7 +120,8 @@ export const YolonotPlugin = async (_ctx: Any) => ({
     if (input.tool !== "bash") return
     const command = input?.args?.command ?? ""
     if (!command) return
-    const cwd = input?.args?.cwd ?? process.cwd()
+    const directory = _ctx.directory ?? process.cwd()
+    const cwd = resolve(directory, input?.args?.workdir ?? input?.args?.cwd ?? directory)
     await askYolonot(
       "PostToolUse",
       input.sessionID ?? "",
@@ -112,3 +131,54 @@ export const YolonotPlugin = async (_ctx: Any) => ({
     )
   },
 })
+
+// OpenCode V2 uses a default {id, setup} definition and domain APIs rather
+// than V1's named factory. No SDK dependency is needed for this definition.
+export default {
+  id: "yolonot",
+  // Current V1 loaders recognize {id, server}; V2 recognizes {id, setup}.
+  server: YolonotPlugin,
+  async setup(ctx: Any) {
+    const pending = new Map<string, { decision: string; reason: string }>()
+    const key = (sessionID: string, id: string) => JSON.stringify([sessionID, id])
+    const directory = ctx.location.directory
+
+    await ctx.permission.hook("evaluate", async (event: Any) => {
+      if (event.action !== "shell" || event.source?.type !== "tool") return
+      const verdict = pending.get(key(event.sessionID, event.source.id))
+      if (!verdict || event.effect === "deny") return
+      event.effect = verdict.decision
+      if (verdict.reason) event.message = `yolonot: ${verdict.reason}`
+    })
+
+    // Wrapping execute inspects the final input after all execute.before
+    // middleware has run. A later argument rewrite cannot reuse a verdict
+    // from an earlier before-hook for the same call ID.
+    await ctx.tool.transform((editor: Any) => {
+      for (const tool of editor.list()) {
+        if (tool.name !== "shell") continue
+        editor.update(tool.id, (current: Any) => {
+          const execute = current.execute
+          current.execute = async (input: Any, context: Any) => {
+            const command = input.command
+            const cwd = resolve(directory, input.workdir ?? directory)
+            const callKey = key(context.sessionID, context.id)
+            const verdict = await askYolonot("PreToolUse", context.sessionID, command, cwd, undefined, true)
+            if (verdict.decision === "deny") throw new Error(`yolonot: ${verdict.reason || "deny"}`)
+            // Empty output is passthrough, not an instruction to override
+            // OpenCode's own permission policy.
+            if (verdict.decision !== "") pending.set(callKey, verdict)
+            try {
+              const result = await execute(input, context)
+              await askYolonot("PostToolUse", context.sessionID, command, cwd, result, true)
+              return result
+            } finally {
+              pending.delete(callKey)
+            }
+          }
+        })
+      }
+    })
+    return () => pending.clear()
+  },
+}

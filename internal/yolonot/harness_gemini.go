@@ -2,6 +2,7 @@ package yolonot
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +12,8 @@ func init() { RegisterHarness(&GeminiHarness{}) }
 
 // GeminiHarness is the Google Gemini CLI adapter.
 //
-// Gemini's hook protocol (verified against google-gemini/gemini-cli@v0.38.2):
+// Gemini's hook protocol (checked against google-gemini/gemini-cli@v0.63.0;
+// local CLI version 0.46.0):
 //   - Settings live in ~/.gemini/settings.json (shared file, like Claude's —
 //     merge-preserve other top-level keys).
 //   - Events: "BeforeTool" / "AfterTool" (no "Use" suffix).
@@ -26,12 +28,15 @@ func init() { RegisterHarness(&GeminiHarness{}) }
 //     — not nested under hookSpecificOutput like Claude's.
 //   - Crucially, Gemini supports "ask" end-to-end (hooks/types.ts:130-136 +
 //     scheduler.ts:624-660) → it fires the native TUI confirmation prompt.
-//     No ask→deny translation needed, unlike Codex / OpenCode.
+//     This adapter emits ask directly; Codex and OpenCode integrations
+//     instead defer ask to their host.
 //   - Stdout hygiene: the final JSON must be the ONLY thing on stdout;
 //     anything else fails OPEN. Log to stderr via Verbosef only.
 type GeminiHarness struct{}
 
 func (g *GeminiHarness) Name() string { return "gemini" }
+
+func (g *GeminiHarness) SupportsAsk() bool { return true }
 
 // RiskMap is Gemini's default tier→action policy. Gemini supports "ask"
 // end-to-end (native TUI confirmation prompt), so every non-allow tier
@@ -142,12 +147,11 @@ func (g *GeminiHarness) IsInstalled() bool {
 const geminiMatcher = "^run_shell_command$"
 
 func (g *GeminiHarness) Install(binaryPath string) error {
-	if g.IsInstalled() {
-		Verbosef("existing install detected — removing old hooks from %s", g.SettingsPath())
-		g.removeHooks()
+	s, err := g.readSettings()
+	if err != nil {
+		return err
 	}
-
-	s := g.loadSettings()
+	stripGeminiHooks(s)
 	hooks, _ := s["hooks"].(map[string]interface{})
 	if hooks == nil {
 		hooks = map[string]interface{}{}
@@ -174,13 +178,21 @@ func (g *GeminiHarness) Install(binaryPath string) error {
 
 func (g *GeminiHarness) Uninstall() error {
 	Verbosef("stripping yolonot hooks from %s", g.SettingsPath())
-	g.removeHooks()
-	return nil
+	return g.removeHooks()
 }
 
-// InstallSkill / UninstallSkill are no-ops — Gemini has no skill concept.
-func (g *GeminiHarness) InstallSkill() (string, error) { return "", nil }
-func (g *GeminiHarness) UninstallSkill() error         { return nil }
+func geminiSkillDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".gemini", "skills", "yolonot")
+}
+
+func (g *GeminiHarness) InstallSkill() (string, error) {
+	return installHarnessSkill(g.Name(), geminiSkillDir())
+}
+
+func (g *GeminiHarness) UninstallSkill() error {
+	return uninstallHarnessSkill(geminiSkillDir())
+}
 
 // PostInstallNotes warns about Gemini's --yolo requirement. Without YOLO
 // mode, Gemini always prompts the user before running a shell tool, and
@@ -220,25 +232,63 @@ func (g *GeminiHarness) IsDetected() bool {
 }
 
 func (g *GeminiHarness) loadSettings() map[string]interface{} {
-	data, err := os.ReadFile(g.SettingsPath())
-	if err != nil {
-		return map[string]interface{}{}
-	}
-	var s map[string]interface{}
-	json.Unmarshal(data, &s)
+	s, _ := g.readSettings()
 	if s == nil {
-		s = map[string]interface{}{}
+		return map[string]interface{}{}
 	}
 	return s
 }
 
-func (g *GeminiHarness) saveSettings(s map[string]interface{}) error {
-	data, _ := json.MarshalIndent(s, "", "  ")
-	return atomicWriteFile(g.SettingsPath(), append(data, '\n'), 0644)
+func (g *GeminiHarness) readSettings() (map[string]interface{}, error) {
+	data, err := os.ReadFile(g.SettingsPath())
+	if os.IsNotExist(err) {
+		return map[string]interface{}{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var s map[string]interface{}
+	if err := json.Unmarshal(data, &s); err != nil || s == nil {
+		return nil, fmt.Errorf("%s: expected a valid JSON object", g.SettingsPath())
+	}
+	if err := uniqueJSONFields(data); err != nil {
+		return nil, err
+	}
+	if value, exists := s["hooks"]; exists {
+		hooks, ok := value.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("%s: hooks must be an object", g.SettingsPath())
+		}
+		for _, event := range []string{"BeforeTool", "AfterTool"} {
+			if value, exists := hooks[event]; exists && value != nil {
+				if _, ok := value.([]interface{}); !ok {
+					return nil, fmt.Errorf("%s: hooks.%s must be an array", g.SettingsPath(), event)
+				}
+			}
+		}
+	}
+	return s, nil
 }
 
-func (g *GeminiHarness) removeHooks() {
-	s := g.loadSettings()
+func (g *GeminiHarness) saveSettings(s map[string]interface{}) error {
+	data, _ := json.MarshalIndent(s, "", "  ")
+	perm := os.FileMode(0600)
+	if info, err := os.Stat(g.SettingsPath()); err == nil {
+		perm = info.Mode().Perm()
+	}
+	return atomicWriteFile(g.SettingsPath(), append(data, '\n'), perm)
+}
+
+func (g *GeminiHarness) removeHooks() error {
+	s, err := g.readSettings()
+	if err != nil {
+		return err
+	}
+	stripGeminiHooks(s)
+	return g.saveSettings(s)
+}
+
+func stripGeminiHooks(s map[string]interface{}) {
 	hooks, _ := s["hooks"].(map[string]interface{})
 
 	for _, event := range []string{"BeforeTool", "AfterTool"} {
@@ -247,9 +297,14 @@ func (g *GeminiHarness) removeHooks() {
 		for _, entry := range entries {
 			e, ok := entry.(map[string]interface{})
 			if !ok {
+				newEntries = append(newEntries, entry)
 				continue
 			}
-			hs, _ := e["hooks"].([]interface{})
+			hs, ok := e["hooks"].([]interface{})
+			if !ok {
+				newEntries = append(newEntries, entry)
+				continue
+			}
 			var remaining []interface{}
 			for _, h := range hs {
 				if hm, ok := h.(map[string]interface{}); ok {
@@ -264,8 +319,10 @@ func (g *GeminiHarness) removeHooks() {
 				newEntries = append(newEntries, e)
 			}
 		}
-		hooks[event] = newEntries
+		if len(newEntries) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = newEntries
+		}
 	}
-
-	g.saveSettings(s)
 }

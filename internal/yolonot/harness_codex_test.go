@@ -1,11 +1,15 @@
 package yolonot
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 func TestCodexHarnessRegistered(t *testing.T) {
@@ -70,8 +74,8 @@ func TestCodexHarnessFormatHookResponseAskIsPassthrough(t *testing.T) {
 }
 
 func TestCodexHarnessFormatHookResponseAllowIsSilent(t *testing.T) {
-	// Codex rejects permissionDecision:"allow" as unsupported. The adapter
-	// must emit an empty string so emitHook() skips stdout entirely.
+	// This adapter defers allows to the host's permission engine, emitting
+	// an empty string so emitHook() skips stdout entirely.
 	r := HookResponse{}
 	r.HookSpecificOutput.HookEventName = "PreToolUse"
 	r.HookSpecificOutput.PermissionDecision = "allow"
@@ -175,7 +179,7 @@ func TestCodexHarnessInstallEnablesFeatureFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(cfg)
-	if !strings.Contains(s, "codex_hooks = true") {
+	if !strings.Contains(s, "hooks = true") {
 		t.Errorf("config.toml missing feature flag: %s", s)
 	}
 	if !strings.Contains(s, `model = "gpt-5.4"`) {
@@ -187,16 +191,20 @@ func TestCodexHarnessInstallEnablesFeatureFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg2, _ := os.ReadFile(cfgPath)
-	if strings.Count(string(cfg2), "codex_hooks = true") != 1 {
+	if strings.Count(string(cfg2), "hooks = true") != 1 {
 		t.Errorf("duplicate feature flag after reinstall: %s", string(cfg2))
 	}
 }
 
-func TestCodexHarnessInstallSkillNoOp(t *testing.T) {
+func TestCodexHarnessInstallSkill(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	h := &CodexHarness{}
 	path, err := h.InstallSkill()
-	if err != nil || path != "" {
-		t.Errorf("InstallSkill() = (%q, %v), want (\"\", nil)", path, err)
+	if err != nil || !strings.HasSuffix(path, filepath.Join(".agents", "skills", "yolonot")) {
+		t.Fatalf("InstallSkill() = (%q, %v)", path, err)
+	}
+	if _, err := os.Stat(filepath.Join(path, "SKILL.md")); err != nil {
+		t.Fatal(err)
 	}
 	if err := h.UninstallSkill(); err != nil {
 		t.Errorf("UninstallSkill() = %v, want nil", err)
@@ -243,5 +251,139 @@ func TestActiveHarnessPicksCodexBySessionEnv(t *testing.T) {
 	h := ActiveHarness()
 	if h == nil || h.Name() != "codex" {
 		t.Errorf("ActiveHarness() = %v, want codex", h)
+	}
+}
+
+func TestCodexHookFlagsPreserveTOML(t *testing.T) {
+	cases := []struct {
+		name, before, after string
+	}{
+		{"empty", "", "[features]\nhooks = true\n"},
+		{"existing table", "[features]\nshell_snapshot = true\n[other]\nx = 1\n", "[features]\nhooks = true\nshell_snapshot = true\n[other]\nx = 1\n"},
+		{"legacy false", "[features]\ncodex_hooks = false # intentional comment\n", "[features]\nhooks = true # intentional comment\n"},
+		{"modern false", "[features]\nhooks = false # modern name\n", "[features]\nhooks = true # modern name\n"},
+		{"both false", "[features]\nhooks = false\ncodex_hooks = false\n", "[features]\nhooks = true\n# deprecated alias: codex_hooks = false\n"},
+		{"already enabled", "[features]\nhooks = true # retained\n", "[features]\nhooks = true # retained\n"},
+		{"comment is not a flag", "# codex_hooks = true\nmodel = 'm'\n", "# codex_hooks = true\nmodel = 'm'\n[features]\nhooks = true\n"},
+		{"multiline string is not config", "note = '''\n[features]\ncodex_hooks = true\n'''\n", "note = '''\n[features]\ncodex_hooks = true\n'''\n[features]\nhooks = true\n"},
+		{"quoted keys", "['features'] # keep header\n\"codex_hooks\" = false # keep key\n", "['features'] # keep header\n\"hooks\" = true # keep key\n"},
+		{"escaped legacy key", "[features]\n\"codex\\u005fhooks\" = true\n", "[features]\n\"hooks\" = true\n"},
+		{"legacy true", "[features]\ncodex_hooks = true # retain\n", "[features]\nhooks = true # retain\n"},
+		{"legacy dotted", "features.'codex_hooks' = false\n", "features.'hooks' = true\n"},
+		{"legacy inline", "features = { codex_hooks = false, other = true }\n", "features = { hooks = true, other = true }\n"},
+		{"both inline first", "features = {codex_hooks = false, hooks = false, other = true}\n", "features = { hooks = true, other = true}\n"},
+		{"both inline last", "features = {hooks = false, other = true, codex_hooks = true}\n", "features = {hooks = true, other = true}\n"},
+		{"both dotted", "features.codex_hooks = true # old\nfeatures.hooks = false\n", "# deprecated alias: features.codex_hooks = true # old\nfeatures.hooks = true\n"},
+		{"dotted flag", "features.'hooks' = false\n", "features.'hooks' = true\n"},
+		{"dotted features", "features.shell_snapshot = true\n", "features.hooks = true\nfeatures.shell_snapshot = true\n"},
+		{"implicit parent", "[features.custom]\nenabled = true\n", "features.hooks = true\n[features.custom]\nenabled = true\n"},
+		{"inline empty", "features = {} # keep\n", "features = {hooks = true} # keep\n"},
+		{"inline missing", "features = { other = true } # keep\n", "features = {hooks = true,  other = true } # keep\n"},
+		{"inline false", "features = { 'hooks' = false, nested = { hooks = false } }\n", "features = { 'hooks' = true, nested = { hooks = false } }\n"},
+		{"nested unrelated features", "[profiles.dev.features]\nhooks = false\n", "[profiles.dev.features]\nhooks = false\n[features]\nhooks = true\n"},
+		{"header without newline", "[features] # keep", "[features] # keep\nhooks = true\n"},
+		{"CRLF", "[features]\r\nother = true\r\n", "[features]\r\nhooks = true\r\nother = true\r\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			updated, err := enableCodexHookFlags([]byte(tc.before))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(updated) != tc.after {
+				t.Fatalf("unrelated formatting changed:\n got: %q\nwant: %q", updated, tc.after)
+			}
+			var parsed map[string]interface{}
+			if err := toml.Unmarshal(updated, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			features := parsed["features"].(map[string]interface{})
+			if features["hooks"] != true || features["codex_hooks"] != nil {
+				t.Fatalf("no enabled hook flag: %#v", features)
+			}
+			again, err := enableCodexHookFlags(updated)
+			if err != nil || !bytes.Equal(again, updated) {
+				t.Fatalf("not idempotent: %q, %v", again, err)
+			}
+		})
+	}
+}
+
+func TestCodexHarnessInstallRejectsInvalidConfigWithoutChangingIt(t *testing.T) {
+	for _, content := range []string{
+		"[features]\n[features]\n",
+		"features = false\n",
+		"[features]\nhooks = 'false'\n",
+	} {
+		t.Run(content, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			path := filepath.Join(home, ".codex", "config.toml")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			h := &CodexHarness{}
+			if err := h.Install("/test/yolonot"); err == nil {
+				t.Fatal("install must report invalid config")
+			}
+			got, _ := os.ReadFile(path)
+			if string(got) != content || h.IsInstalled() {
+				t.Fatal("invalid config or hook registration changed on failed install")
+			}
+		})
+	}
+}
+
+func TestCodexHarnessFeatureWriteRefusesSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	outside := filepath.Join(t.TempDir(), "config.toml")
+	const content = "[features]\nhooks = false\n"
+	if err := os.WriteFile(outside, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&CodexHarness{}).Install("/test/yolonot"); err == nil {
+		t.Fatal("install must surface config write failure")
+	}
+	got, _ := os.ReadFile(outside)
+	if string(got) != content {
+		t.Fatal("symlink target changed")
+	}
+}
+
+func TestCodexHarnessGeneratedConfigLoadsInInstalledCodex(t *testing.T) {
+	bin, err := exec.LookPath("codex")
+	if err != nil {
+		t.Skip("Codex CLI not installed")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	path := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("[features]\nshell_snapshot = true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&CodexHarness{}).Install("/test/yolonot"); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("config permissions widened: %o", info.Mode().Perm())
+	}
+	if output, err := exec.Command(bin, "features", "list").CombinedOutput(); err != nil {
+		t.Fatalf("installed Codex rejects generated config: %v\n%s", err, output)
 	}
 }

@@ -8,11 +8,10 @@ to ask on routine internal commands ("is `kubectl get pods -n prod-eu-1`
 really safe?") and to miss environment-specific risks the defaults can't
 predict.
 
-The `prompt` config block lets you inject prose hints into the chat
-model's system prompt so it sees the world the way your team does. It
-mirrors Claude Code's [auto mode](https://code.claude.com/docs/en/auto-mode-config)
-config shape so the mental model is portable; differences from Claude are
-called out below.
+The `prompt` config block supplies shared project context and hints to model
+judges across harnesses. Chat models receive them in the system prompt; typed
+models receive them as labeled state sections. A full `system_prompt` override
+applies only to chat models. See [typed model behavior](models.md#typed-decision-models).
 
 ## When to use it
 
@@ -26,8 +25,8 @@ Reach for a hint when:
 Don't use hints for:
 
 - **Hard blocks.** Use a `.yolonot` `deny-cmd` rule instead. Hints are
-  read by an LLM and can be overridden by user intent in the conversation;
-  rules can't.
+  read by a model and can be ignored or misinterpreted. Explicit deny rules
+  take priority over model judgments.
 - **Static command lists.** Use `.yolonot` `allow-cmd` / `ask-cmd` —
   pattern matching is faster, free, and deterministic.
 - **Per-harness behavior.** Use [risk profiles](risk-profiles.md) and
@@ -43,7 +42,7 @@ Don't use hints for:
 | `ask_hints` | Environment-specific risks the defaults miss. Lean toward `ask` regardless of how routine the command looks. |
 
 There is no `deny_hints` field by design. yolonot's LLM never emits
-`deny` directly (deny is rule-origin only), so a `deny_hints` field would
+`deny` directly (hard denials come from rules, session decisions and policy), so a `deny_hints` field would
 be misleading. For hard blocks, write a `deny-cmd` rule.
 
 ## Where to put it
@@ -171,17 +170,13 @@ system-prompt "Sandbox classifier. Output ONLY JSON: {\"decision\":\"allow|ask\"
 
 > **You own the contract.** The model's verdict is parsed as
 > `{"decision","risk","short","reasoning"}`. If your override drops that
-> instruction, the classifier can't parse the reply, so yolonot emits a
-> **decisionless passthrough** and defers to the host's native permission
-> layer (on Claude Code, its own approval prompt) — it does not silently
-> allow, but it also stops making its own decision. Keep the JSON-output
-> line in any rewrite, and **run `yolonot prompt verify` after editing**
-> — it proves the prompt still produces parseable verdicts before you rely
-> on it (see [Inspecting your configuration](#inspecting-your-configuration)).
-> Two backstops if a broken override slips through: a base-prompt override
-> is loaded anyway (the override is used, `verify` is how you catch a bad
-> one), and at runtime the parse-error passthrough banner names a malformed
-> `system_prompt` as the likely cause and points you at `verify`.
+> instruction, replies may become unparseable. The next judge can run; if no
+> judge decides, the configured `failure.parse` action applies. Its default
+> defers to the host, which may prompt or auto-allow according to its mode.
+> Keep the JSON-output line and **run `yolonot prompt verify` after editing**.
+> It checks the contract and a small set of live parse probes, not general
+> classification safety. A failed probe does not automatically roll back an
+> installed override. See [failure policy](configuration.md#failure-policy).
 
 Verify what will actually be sent:
 
@@ -274,9 +269,8 @@ built-in `SystemPrompt` const.
   repository can ship `allow-hint` text that nudges the classifier in a
   bad direction. yolonot's walk-up trust boundary is the enclosing git
   repo root (same as for rules), so the exposure is no worse than it
-  already was for `allow-cmd` rules — but unlike Claude Code (which
-  ignores shared `.claude/settings.json` precisely for this reason),
-  yolonot does load `.yolonot` from the repo. Review `.yolonot` files in
+  already was for `allow-cmd` rules. yolonot loads `.yolonot` from the repo
+  as trusted policy. Review `.yolonot` files in
   unfamiliar clones before you run anything in them.
 - **Hard blocks beat hints.** A `deny-cmd` rule fires before the LLM is
   consulted at all, so it cannot be talked out of by a hint or by the
@@ -293,8 +287,9 @@ built-in `SystemPrompt` const.
   Note the backstop that still holds even under a hostile override:
   `deny-cmd` rules fire *before* the LLM is consulted, so a base-prompt
   override cannot unblock anything a `deny-cmd` rule denies. (A reply that
-  doesn't match the JSON verdict contract only passes through to the host's
-  native layer — it is not a yolonot-enforced block, so don't rely on it.)
+  doesn't match the JSON verdict contract is a judge failure; the next judge
+  and configured failure policy decide what follows. Default passthrough is
+  not an enforced block, so don't rely on malformed output for protection.)
 - **The script-attach boundary cannot be widened from a repo.** The
   `attach_outside_root` option (see docs/how-it-works.md) that lets script
   attachment cross the project root lives *only* in

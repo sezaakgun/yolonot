@@ -10,9 +10,12 @@ import (
 
 func init() { RegisterHarness(&ClaudeHarness{}) }
 
-// PostInstallNotes has nothing to surface for Claude — the canonical
-// hook shape maps 1:1, so there are no caveats.
-func (c *ClaudeHarness) PostInstallNotes() []string { return nil }
+func (c *ClaudeHarness) PostInstallNotes() []string {
+	return []string{
+		"Claude Desktop: add model API-key variables in Local > gear, then start a new session; shell-profile exports may not reach hooks or mods.",
+		"Rule/exec success does not prove model access. Check model failures in yolonot log and your failure policy; see docs/harnesses.md#claude-desktop-model-credentials.",
+	}
+}
 
 // ClaudeHarness is the Claude Code adapter. It is the historical default
 // and the canonical hook protocol — HookPayload / HookResponse are shaped
@@ -37,8 +40,15 @@ func (c *ClaudeHarness) RiskMap() map[string]string {
 }
 
 func (c *ClaudeHarness) SettingsPath() string {
+	return filepath.Join(claudeConfigDir(), "settings.json")
+}
+
+func claudeConfigDir() string {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return dir
+	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "settings.json")
+	return filepath.Join(home, ".claude")
 }
 
 func (c *ClaudeHarness) SessionIDFromEnv() string {
@@ -99,55 +109,56 @@ func (c *ClaudeHarness) IsInstalled() bool {
 }
 
 func (c *ClaudeHarness) Install(binaryPath string) error {
+	if _, err := c.readSettings(); err != nil {
+		return err
+	}
 	if c.IsInstalled() {
 		Verbosef("existing install detected — removing old hooks from %s", c.SettingsPath())
-		c.removeHooks()
+		if err := c.removeHooks(); err != nil {
+			return err
+		}
 	}
 
-	s := c.loadSettings()
+	s, err := c.readSettings()
+	if err != nil {
+		return err
+	}
 	hooks, _ := s["hooks"].(map[string]interface{})
 	if hooks == nil {
 		hooks = map[string]interface{}{}
 		s["hooks"] = hooks
 	}
 
-	bp := binaryPath + " hook"
-	preHook := map[string]interface{}{"type": "command", "command": bp, "timeout": 60.0}
-	postHook := map[string]interface{}{"type": "command", "command": bp, "timeout": 60.0}
+	// Current Claude supports direct exec-form handlers. This keeps paths
+	// literal on Bash and PowerShell hosts and blocks if the safety gate
+	// cannot start, crashes, times out, or emits malformed output.
+	args := []string{"hook", "--harness", "claude"}
+	preHook := map[string]interface{}{"type": "command", "command": binaryPath, "args": args, "timeout": 60.0, "onFailure": "block"}
+	postHook := map[string]interface{}{"type": "command", "command": binaryPath, "args": args, "timeout": 60.0}
 
-	addHookToEvent(hooks, "PreToolUse", "Bash", preHook)
-	addHookToEvent(hooks, "PostToolUse", "Bash", postHook)
+	addHookToEvent(hooks, "PreToolUse", "Bash|PowerShell", preHook)
+	addHookToEvent(hooks, "PostToolUse", "Bash|PowerShell", postHook)
 
-	c.saveSettings(s)
-	Verbosef("wrote %s (Bash matcher for PreToolUse + PostToolUse, timeout 60s)", c.SettingsPath())
+	if err := c.saveSettings(s); err != nil {
+		return err
+	}
+	Verbosef("wrote %s (Bash|PowerShell matcher for PreToolUse + PostToolUse, timeout 60s)", c.SettingsPath())
 	return nil
 }
 
 func (c *ClaudeHarness) Uninstall() error {
 	Verbosef("stripping yolonot hooks from %s", c.SettingsPath())
-	c.removeHooks()
-	return nil
+	return c.removeHooks()
 }
 
 func (c *ClaudeHarness) InstallSkill() (string, error) {
-	home, _ := os.UserHomeDir()
-	skillDir := filepath.Join(home, ".claude", "skills", "yolonot")
-	skillDst := filepath.Join(skillDir, "SKILL.md")
-	if err := os.MkdirAll(skillDir, 0755); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(skillDst, embeddedSkillMD, 0644); err != nil {
-		return "", err
-	}
-	Verbosef("wrote SKILL.md to %s (%d bytes)", skillDst, len(embeddedSkillMD))
-	return skillDir, nil
+	skillDir := filepath.Join(claudeConfigDir(), "skills", "yolonot")
+	return installHarnessSkill(c.Name(), skillDir)
 }
 
 func (c *ClaudeHarness) UninstallSkill() error {
-	home, _ := os.UserHomeDir()
-	skillDir := filepath.Join(home, ".claude", "skills", "yolonot")
-	Verbosef("removing skill dir %s", skillDir)
-	return os.RemoveAll(skillDir)
+	skillDir := filepath.Join(claudeConfigDir(), "skills", "yolonot")
+	return uninstallHarnessSkill(skillDir)
 }
 
 // IsDetected returns true unless $HOME can't be resolved. Claude is the
@@ -159,28 +170,46 @@ func (c *ClaudeHarness) IsDetected() bool {
 }
 
 func (c *ClaudeHarness) loadSettings() map[string]interface{} {
-	data, err := os.ReadFile(c.SettingsPath())
-	if err != nil {
-		return map[string]interface{}{}
-	}
-	var s map[string]interface{}
-	json.Unmarshal(data, &s)
+	s, _ := c.readSettings()
 	if s == nil {
-		s = map[string]interface{}{}
+		return map[string]interface{}{}
 	}
 	return s
 }
 
-func (c *ClaudeHarness) saveSettings(s map[string]interface{}) {
+func (c *ClaudeHarness) readSettings() (map[string]interface{}, error) {
+	data, err := os.ReadFile(c.SettingsPath())
+	if os.IsNotExist(err) {
+		return map[string]interface{}{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var s map[string]interface{}
+	if err := json.Unmarshal(data, &s); err != nil || s == nil {
+		return nil, fmt.Errorf("%s: expected a valid JSON object", c.SettingsPath())
+	}
+	if hooks, present := s["hooks"]; present {
+		if _, ok := hooks.(map[string]interface{}); !ok {
+			return nil, fmt.Errorf("%s: hooks must be an object", c.SettingsPath())
+		}
+	}
+	return s, nil
+}
+
+func (c *ClaudeHarness) saveSettings(s map[string]interface{}) error {
 	data, _ := json.MarshalIndent(s, "", "  ")
 	// atomicWriteFile rejects symlinks at the target and renames over a
 	// same-dir temp, preventing a TOCTOU symlink in ~/.claude/ from
 	// redirecting our write elsewhere. See atomicwrite.go.
-	atomicWriteFile(c.SettingsPath(), append(data, '\n'), 0644)
+	return atomicWriteFile(c.SettingsPath(), append(data, '\n'), 0644)
 }
 
-func (c *ClaudeHarness) removeHooks() {
-	s := c.loadSettings()
+func (c *ClaudeHarness) removeHooks() error {
+	s, err := c.readSettings()
+	if err != nil {
+		return err
+	}
 	hooks, _ := s["hooks"].(map[string]interface{})
 
 	for _, event := range []string{"PreToolUse", "PostToolUse"} {
@@ -209,7 +238,13 @@ func (c *ClaudeHarness) removeHooks() {
 		hooks[event] = newEntries
 	}
 
-	c.saveSettings(s)
+	return c.saveSettings(s)
+}
+
+// Command hooks are shell strings. Quote paths so spaces, quotes and shell
+// metacharacters in an installation directory stay literal.
+func shellHookCommand(binary, harness string) string {
+	return "'" + strings.ReplaceAll(binary, "'", "'\\''") + "' hook --harness " + harness
 }
 
 // --- Package-level helpers kept for back-compat with existing tests ---
@@ -225,10 +260,10 @@ func claudeAdapter() *ClaudeHarness {
 	return &ClaudeHarness{}
 }
 
-func settingsPath() string              { return claudeAdapter().SettingsPath() }
-func loadSettings() map[string]interface{} { return claudeAdapter().loadSettings() }
+func settingsPath() string                  { return claudeAdapter().SettingsPath() }
+func loadSettings() map[string]interface{}  { return claudeAdapter().loadSettings() }
 func saveSettings(s map[string]interface{}) { claudeAdapter().saveSettings(s) }
-func removeHooks()                       { claudeAdapter().removeHooks() }
+func removeHooks()                          { claudeAdapter().removeHooks() }
 
 // binaryPath returns the path to the running yolonot executable. Used by
 // Install() to register the hook command.

@@ -1,6 +1,7 @@
 package yolonot
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,18 +17,28 @@ import (
 // `.mod` file instead of judging again.
 
 type modEntry struct {
-	ID       string `json:"id"`
-	Decision string `json:"decision"`
-	Layer    string `json:"layer"`
-	Reason   string `json:"reason,omitempty"`
-	Ms       int64  `json:"ms,omitempty"`
+	ID             string   `json:"id"`
+	Command        string   `json:"command,omitempty"`
+	Cwd            string   `json:"cwd,omitempty"`
+	Binding        string   `json:"binding,omitempty"`
+	ApprovalHashes []string `json:"approval_hashes,omitempty"`
+	Grant          string   `json:"grant,omitempty"`
+	Completed      bool     `json:"completed,omitempty"`
+	Decision       string   `json:"decision"`
+	Layer          string   `json:"layer"`
+	Reason         string   `json:"reason,omitempty"`
+	Ms             int64    `json:"ms,omitempty"`
 }
 
 var (
-	modRun       bool
-	modSessionID string
-	modToolUseID string
-	modStart     time.Time
+	modRun            bool
+	modSessionID      string
+	modToolUseID      string
+	modStart          time.Time
+	modCommand        string
+	modCwd            string
+	modBinding        string
+	modApprovalHashes []string
 )
 
 func modAppend(sessionID string, e modEntry) {
@@ -42,7 +53,65 @@ func modRecord(decision, layer, reason string) {
 	if !modRun || modToolUseID == "" {
 		return
 	}
-	modAppend(modSessionID, modEntry{ID: modToolUseID, Decision: decision, Layer: layer, Reason: reason, Ms: time.Since(modStart).Milliseconds()})
+	modAppend(modSessionID, modEntry{ID: modToolUseID, Command: modCommand, Cwd: modCwd, Binding: modBinding, ApprovalHashes: modApprovalHashes,
+		Decision: decision, Layer: layer, Reason: reason, Ms: time.Since(modStart).Milliseconds()})
+}
+
+// modCommandBinding pins a replay to the exact command, working directory,
+// attached script contents and directly executed native binary identity.
+// Withheld scripts cannot be
+// checked for changes, so they deliberately disable replay.
+func modCommandBinding(command, cwd string) string {
+	attached, withheld := collectScripts(command, cwd)
+	return modBindingFromCollected(command, cwd, attached, withheld)
+}
+
+func modCommandSnapshot(command, cwd string) (string, []string) {
+	attached, withheld := collectScripts(command, cwd)
+	return replaySnapshotFromCollected(command, cwd, attached, withheld)
+}
+
+// Classifier verdicts use their already-collected snapshot here, rather
+// than recollecting files before or after a model request.
+func modBindingFromCollected(command, cwd string, attached []attachedScript, withheld []withheldScript) string {
+	binding, _ := replaySnapshotFromCollected(command, cwd, attached, withheld)
+	return binding
+}
+
+func replaySnapshotFromCollected(command, cwd string, attached []attachedScript, withheld []withheldScript) (string, []string) {
+	hashes := approvalHashesFromCollected(command, attached, withheld)
+	identity, token := nativeExecutableIdentity(command, cwd)
+	if identity != "" {
+		hashes = append(hashes, executableApprovalPrefix(command)+identity)
+	}
+	for _, w := range withheld {
+		// A native executable's identity is pinned independently from prompt
+		// attachment. Other withheld scripts still forbid replay.
+		if identity != "" && w.ref.executed && w.ref.raw == token &&
+			(w.reason == whReasonOutside || w.reason == whReasonNotText || w.reason == whReasonTooLarge) {
+			continue
+		}
+		return "", hashes
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x00%s\x00", command, cwd)
+	for _, a := range attached {
+		fmt.Fprintf(h, "%s\x00", a.ref.abs)
+		h.Write(a.digest[:])
+	}
+	if identity != "" {
+		fmt.Fprintf(h, "native-executable\x00%s\x00", identity)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), hashes
+}
+
+func modLookupBound(sessionID, toolUseID, command, cwd string) *modEntry {
+	e := modLookup(sessionID, toolUseID)
+	if e == nil || e.Completed || e.Binding == "" || e.Command != command || e.Cwd != cwd ||
+		e.Binding != modCommandBinding(command, cwd) {
+		return nil
+	}
+	return e
 }
 
 func modLookup(sessionID, toolUseID string) *modEntry {
@@ -77,7 +146,10 @@ func dropLine(sessionID, suffix, line string) bool {
 	if len(kept) == len(lines) {
 		return false
 	}
-	os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0600)
+	for i := range kept {
+		kept[i] = encodeSessionLine(suffix, kept[i])
+	}
+	atomicWriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0600)
 	return true
 }
 
@@ -116,7 +188,10 @@ func dropLineOrVariant(sessionID, suffix, command string) bool {
 	if len(kept) == len(lines) {
 		return false
 	}
-	os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0600)
+	for i := range kept {
+		kept[i] = encodeSessionLine(suffix, kept[i])
+	}
+	atomicWriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0600)
 	return true
 }
 
@@ -142,22 +217,34 @@ func cmdMod(args []string) {
 			os.Exit(2)
 		}
 		proj := ProjectSessionID(r.SessionID, r.Cwd)
+		attachOutsideRoot = LoadConfig().AttachOutsideRoot
+		binding, hashes := modCommandSnapshot(r.Command, r.Cwd)
+		entry := modEntry{ID: r.ToolUseID, Command: r.Command, Cwd: r.Cwd,
+			Binding: binding, ApprovalHashes: hashes, Layer: "human", Grant: r.Verdict}
+		// A human answer is about the snapshot originally judged. Do not
+		// silently bind it to script edits made while the dialog was open.
+		if previous := modLookup(r.SessionID, r.ToolUseID); previous != nil &&
+			previous.Command == r.Command && previous.Cwd == r.Cwd {
+			entry.Binding = previous.Binding
+			entry.ApprovalHashes = previous.ApprovalHashes
+		}
 		switch r.Verdict {
 		case "allow-once":
 			dropLine(proj, "asked", r.Command)
 			AppendLine(proj, "once", r.Command)
 			LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "allow", Source: "allow_once"})
-			modAppend(r.SessionID, modEntry{ID: r.ToolUseID, Decision: "allow", Layer: "human", Reason: "allowed once"})
+			entry.Decision, entry.Reason = "allow", "allowed once"
 		case "allow-session":
-			modAppend(r.SessionID, modEntry{ID: r.ToolUseID, Decision: "allow", Layer: "human", Reason: "allowed for this session"})
+			entry.Decision, entry.Reason = "allow", "allowed for this session"
 		case "deny":
 			AppendLine(proj, "denied", r.Command)
 			LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "deny", Source: "ask_rejected"})
-			modAppend(r.SessionID, modEntry{ID: r.ToolUseID, Decision: "deny", Layer: "human", Reason: "rejected by the user"})
+			entry.Decision, entry.Reason = "deny", "rejected by the user"
 		default:
 			fmt.Fprintln(os.Stderr, "yolonot mod resolve: verdict must be allow-once, allow-session or deny")
 			os.Exit(2)
 		}
+		modAppend(r.SessionID, entry)
 	case "install":
 		dir, err := modInstall(binaryPath())
 		if err != nil {

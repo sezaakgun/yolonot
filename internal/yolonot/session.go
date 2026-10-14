@@ -22,12 +22,26 @@ func ProjectSessionID(sessionID, cwd string) string {
 	if sessionID == "" || cwd == "" {
 		return sessionID
 	}
+	cwd = canonicalDirectory(cwd)
 	root := gitRoot(cwd)
 	if root == "" {
 		root = cwd
 	}
 	h := sha256.Sum256([]byte(root))
 	return fmt.Sprintf("%s_%x", sessionID, h[:4])
+}
+
+func canonicalDirectory(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	if absolute, err := filepath.Abs(dir); err == nil {
+		dir = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	return filepath.Clean(dir)
 }
 
 // gitRoot returns the git repository root for the given directory, or empty string.
@@ -83,7 +97,7 @@ func ReadLines(sessionID, suffix string) []string {
 	var lines []string
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := decodeSessionLine(suffix, strings.TrimSpace(scanner.Text()))
 		if line == "" {
 			continue
 		}
@@ -108,7 +122,7 @@ func ContainsLine(sessionID, suffix, line string) bool {
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024) // handle long lines
 	for scanner.Scan() {
-		if strings.TrimSpace(scanner.Text()) == line {
+		if decodeSessionLine(suffix, strings.TrimSpace(scanner.Text())) == line {
 			return true
 		}
 	}
@@ -234,7 +248,7 @@ func AppendLine(sessionID, suffix, line string) error {
 		return err
 	}
 	defer f.Close()
-	_, err = f.WriteString(line + "\n")
+	_, err = f.WriteString(encodeSessionLine(suffix, line) + "\n")
 	return err
 }
 

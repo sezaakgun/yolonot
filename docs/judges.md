@@ -15,8 +15,10 @@ map run once after it. See [how-it-works.md](how-it-works.md).
 | `exec:<path>` | Any binary fed the Claude PreToolUse JSON on stdin: [Dippy](https://github.com/ldayton/Dippy), an ML gate, your own script. 3s timeout; counts only when it prints `permissionDecision: "allow"`. The path may carry arguments (`exec:/usr/local/bin/gate --strict`). | allow |
 | a model name | A [catalog model](models.md): typed (TypeSafe Jev, Microsoft-Decision-1, OpenAI Decisions, Cloudflare Clef) or chat. | allow, ask |
 
-A name that is neither of these (a model removed from the catalog, a typo)
-is listed as `unknown` and skipped; `yolonot judges add` refuses it.
+Unknown catalog references and malformed judge entries are configuration
+errors; `config validate` and CLI writers reject them. Malformed global
+configuration follows the invalid-config failure policy rather than silently
+skipping a misspelled safety stage.
 
 An entry can be an object to narrow what the judge may decide:
 
@@ -32,6 +34,7 @@ the chat model.
 
 ```bash
 yolonot judges                          # list in order, with kind and may
+yolonot judges list                     # explicit list alias
 yolonot judges add fast_allow           # append
 yolonot judges add exec:/opt/homebrew/bin/dippy
 yolonot judges add gemini               # a model from `yolonot models`
@@ -50,10 +53,20 @@ Replace path edits it, Remove drops it from the chain; "Add model" offers
 "Exec hook" as a third kind. The chain is the only place an exec hook lives,
 so adding it there appends it to JUDGES.
 
+Settings changes, including rule-file edits, remain drafts until Save.
+Discard leaves the active configuration and rules unchanged. On small
+terminals the list scrolls while the header and save controls stay visible.
+
 **Order matters.** Put cheap and narrow judges first: `fast_allow`, then an
 external hook, then the typed model, then the chat model. Obvious cases never
 reach a network call. With an empty chain every command passes through to the
 host's own permission prompt; `yolonot` says so on its status line.
+
+Similarity, the whole chain and escalation share one hook deadline (55 seconds by default; configurable with `hook_timeout`).
+Provider timeouts and the 3-second exec limit can shorten individual stages;
+falling through to another judge does not restart the deadline. Exhaustion
+before an adopted verdict asks on adapters with native ask or denies otherwise, without caching an approval. An escalation timeout keeps the
+primary verdict. See [configurable failure behavior](configuration.md).
 
 ## Observability
 

@@ -33,6 +33,8 @@ type menuModel struct {
 	active      int // field index
 	hoverLine   int // -1 none
 	width       int
+	height      int
+	offset      int
 	cancelled   bool
 	done        bool
 }
@@ -74,7 +76,13 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
+		m.hoverLine = -1
 	case tea.KeyMsg:
+		if len(m.fields) == 0 {
+			m.cancelled = true
+			return m, tea.Quit
+		}
 		f := &m.fields[m.active]
 		switch msg.String() {
 		case "up", "k":
@@ -92,6 +100,7 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter", "right", "l", " ":
 			if m.active < len(m.fields)-1 {
 				m.active++
+				m.ensureVisible()
 				return m, nil
 			}
 			m.done = true
@@ -109,8 +118,16 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.MouseMsg:
 		lines := m.layout()
+		indices := m.visibleLines()
+		y := -1
+		if msg.Y >= 0 && msg.Y < len(indices) {
+			y = indices[msg.Y]
+		}
 		switch {
 		case msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown:
+			if len(m.fields) == 0 {
+				return m, nil
+			}
 			f := &m.fields[m.active]
 			if msg.Button == tea.MouseButtonWheelUp && f.Cur > 0 {
 				f.Cur--
@@ -119,14 +136,14 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case msg.Action == tea.MouseActionMotion:
 			m.hoverLine = -1
-			if msg.Y >= 0 && msg.Y < len(lines) && (lines[msg.Y].item >= 0 || lines[msg.Y].back) {
-				m.hoverLine = msg.Y
+			if y >= 0 && (lines[y].item >= 0 || lines[y].back) {
+				m.hoverLine = y
 			}
 		case msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft:
-			if msg.Y < 0 || msg.Y >= len(lines) {
+			if y < 0 {
 				return m, nil
 			}
-			l := lines[msg.Y]
+			l := lines[y]
 			switch {
 			case l.back && msg.X < 2+lipgloss.Width(menuBack):
 				m.cancelled = true
@@ -144,12 +161,26 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	m.ensureVisible()
 	return m, nil
+}
+
+func (m menuModel) visibleLines() []int {
+	return viewportLines(len(m.layout()), 2, 2, m.height, m.offset)
+}
+
+func (m *menuModel) ensureVisible() {
+	for i, line := range m.layout() {
+		if line.field == m.active && line.item >= 0 && line.item == m.fields[m.active].Cur {
+			m.offset = viewportOffset(len(m.layout()), 2, 2, m.height, m.offset, i)
+			return
+		}
+	}
 }
 
 func (m menuModel) View() string {
 	var b strings.Builder
-	b.WriteString(" " + stBold.Render(m.title) + "\n")
+	b.WriteString(" " + stBold.Render(oneLine(m.title)) + "\n")
 	hint := m.hint
 	if hint == "" {
 		hint = "↑↓ move  → ⏎ select  ← esc back"
@@ -157,7 +188,7 @@ func (m menuModel) View() string {
 			hint = "↑↓ move  ⏎ next  esc back  (or click)"
 		}
 	}
-	b.WriteString(" " + stDim.Render(hint) + "\n")
+	b.WriteString(" " + stDim.Render(oneLine(hint)) + "\n")
 	lines := m.layout()
 	for y, l := range lines[2:] {
 		y += 2
@@ -173,7 +204,7 @@ func (m menuModel) View() string {
 			}
 			b.WriteString("\n")
 		case l.title:
-			t := m.fields[l.field].Title
+			t := oneLine(m.fields[l.field].Title)
 			if l.field == m.active {
 				b.WriteString(" " + stAccent.Bold(true).Render(t) + "\n")
 			} else {
@@ -183,7 +214,7 @@ func (m menuModel) View() string {
 			b.WriteString("\n")
 		default:
 			f := m.fields[l.field]
-			text := f.Items[l.item]
+			text := oneLine(f.Items[l.item])
 			row := "    " + text
 			switch {
 			case l.item == f.Cur && l.field == m.active:
@@ -197,7 +228,7 @@ func (m menuModel) View() string {
 			b.WriteString(row + "\n")
 		}
 	}
-	return b.String()
+	return viewportView(b.String(), m.visibleLines(), m.width)
 }
 
 // runMenu shows a menu (or option group) and reports whether it was

@@ -1,0 +1,12 @@
+{
+  "config_version": 1,
+  "judges": [
+    "fast_allow"
+  ],
+  "failure": {
+    "invalid_config": "deny"
+  },
+  "learning": {
+    "enabled": false
+  }
+}

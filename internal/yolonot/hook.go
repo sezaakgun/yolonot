@@ -1,14 +1,12 @@
 package yolonot
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -51,6 +49,10 @@ var quietOnAllow bool
 // currentPermissionMode mirrors HookPayload.PermissionMode for the active
 // hook invocation. Claude Code only — empty on other harnesses.
 var currentPermissionMode string
+
+// PermissionRequest is a second policy phase in Codex: it can approve a
+// host permission request, unlike PreToolUse's deny-only enforcement.
+var currentHookEventName string
 
 // maxBannerRunes caps systemMessage / permissionDecisionReason length to bound
 // terminal-spoof damage from an untrusted pre-check hook. Measured in runes so
@@ -214,6 +216,9 @@ func buildHookResponse(decision, layer, reason, command string) HookResponse {
 // no stray newline reaches stdout.
 func hookResponse(decision, layer, reason, command string) string {
 	r := buildHookResponse(decision, layer, reason, command)
+	if currentHookEventName == "PermissionRequest" {
+		r.HookSpecificOutput.HookEventName = "PermissionRequest"
+	}
 	modRecord(decision, layer, reason)
 	return activeHarnessFormat(r)
 }
@@ -242,9 +247,11 @@ func activeHarnessFormat(r HookResponse) string {
 }
 
 func cmdHook() {
-	// Wall-clock anchor for the escalation budget guard — harnesses kill
-	// hooks around 60s, so late escalation calls are skipped, not risked.
+	// Similarity, judges and escalation share one budget, leaving room to
+	// emit a decision before the host's 60-second hook timeout.
 	hookStart := time.Now()
+	hookContext, cancel := hookBudgetContext(context.Background(), hookStart)
+	defer cancel()
 
 	// Read payload from stdin; adapter handles env var fallback and
 	// harness-specific JSON decoding. Cap the read: the command string is
@@ -281,6 +288,7 @@ func cmdHook() {
 		return
 	}
 	currentPermissionMode = payload.PermissionMode
+	currentHookEventName = payload.HookEventName
 	modRun = os.Getenv("YOLONOT_MOD") == "1"
 	modSessionID, modToolUseID, modStart = payload.SessionID, payload.ToolUseID, hookStart
 
@@ -288,7 +296,11 @@ func cmdHook() {
 	// so always feed them the canonical Claude JSON — never the raw stdin
 	// bytes (which could be Codex/OpenCode shape when those harnesses are
 	// active). Canonical ↔ Claude shape, so json.Marshal(payload) suffices.
-	canonicalInput, _ := json.Marshal(payload)
+	canonicalPayload := payload
+	if canonicalPayload.HookEventName == "PermissionRequest" {
+		canonicalPayload.HookEventName = "PreToolUse"
+	}
+	canonicalInput, _ := json.Marshal(canonicalPayload)
 
 	command, _ := payload.ToolInput["command"].(string)
 	sessionID := payload.SessionID
@@ -311,7 +323,7 @@ func cmdHook() {
 	// engine; yolonot honors that and stays out of the way. Post writes are
 	// gated too so resuming a normal session doesn't reveal a pile of
 	// "pre-approved" commands yolonot never vetted.
-	if payload.PermissionMode == "bypassPermissions" {
+	if harness.Name() == "claude" && payload.PermissionMode == "bypassPermissions" {
 		return
 	}
 
@@ -324,16 +336,6 @@ func cmdHook() {
 		}
 	}
 
-	// The Claude mod already judged this call (see mod.go): replay its
-	// verdict, banner-free, instead of judging twice.
-	if !modRun && payload.HookEventName == "PreToolUse" {
-		if e := modLookup(sessionID, payload.ToolUseID); e != nil {
-			quietOnAllow = true
-			emitHook(hookResponse(e.Decision, e.Layer, e.Reason, command))
-			return
-		}
-	}
-
 	// Load config once — used by pre-check, risk-map resolution, quiet-on-
 	// allow banner suppression, and the script-attach boundary. Keeps disk
 	// reads down to one per hook invocation. Loaded BEFORE the PostToolUse
@@ -341,32 +343,74 @@ func cmdHook() {
 	// boundary (attachOutsideRoot) must match what PreToolUse used —
 	// otherwise open-mode approvals for outside-root scripts never stick.
 	config := LoadConfig()
+	if config.LoadError != nil {
+		if payload.HookEventName == "PostToolUse" {
+			return
+		}
+		emitFailure(config, payload, command, cwd, sessionID, projSessionID, "invalid_config", config.LoadError.Error())
+		return
+	}
 	quietOnAllow = config.QuietOnAllow && !modRun
 	attachOutsideRoot = config.AttachOutsideRoot
 	// Register user-defined wrappers (Config.Wrappers) with fast_allow so
 	// `mycli ls` unwraps to `ls`. Idempotent — safe to call every hook.
 	fastallow.AddWrappers(config.Wrappers...)
 
-	// PostToolUse: command ran → user approved → save to .approved (plus
-	// the content hash of any attached scripts, so the approval stays
-	// pinned to the contents the user actually saw run).
+	// PostToolUse preserves already-bound yolonot grants and explicit mod
+	// session answers. Native completion alone cannot establish a persistent
+	// human grant or a new inspected script snapshot.
 	if payload.HookEventName == "PostToolUse" {
 		if sessionID != "" && command != "" {
+			if answer := modLookupBound(sessionID, payload.ToolUseID, command, cwd); answer != nil && answer.Decision == "allow" {
+				// A completed tool ID cannot replay a one-call grant again.
+				// Duplicate completion callbacks remain harmless.
+				answer.Completed = true
+				defer modAppend(sessionID, *answer)
+			}
 			if dropLineOrVariant(projSessionID, "once", command) {
 				return
 			}
-			// Human verdict: this run resolves a pending ask. The command
-			// sits on the asked list with no approval recorded yet, and
-			// PostToolUse means the user answered yes — log that as a
-			// layer:"human" entry so decision history carries real user
-			// answers, not just yolonot's own verdicts. Commands that were
-			// auto-allowed (never asked) or already approved this session
-			// don't produce one.
-			if MatchesLineOrWrappedVariant(projSessionID, "asked", command) &&
-				!MatchesLineOrWrappedVariant(projSessionID, "approved", command) {
+			pendingAsk := MatchesLineOrWrappedVariant(projSessionID, "asked", command)
+			if MatchesLineOrWrappedVariant(projSessionID, "approved", command) && !pendingAsk {
+				// PreToolUse already saved the judged snapshot. Running a
+				// script must not grant approval to edits made while it ran.
+				return
+			}
+			modAnswer := modLookup(sessionID, payload.ToolUseID)
+			if modAnswer != nil && (modAnswer.Decision != "allow" || modAnswer.Layer != "human" ||
+				modLookupBound(sessionID, payload.ToolUseID, command, cwd) == nil) {
+				// The answer must match its original dialog snapshot.
+				return
+			}
+			if modAnswer != nil && modAnswer.Grant != "allow-session" {
+				// Duplicate callbacks must not widen a consumed one-time
+				// grant. Legacy records with unknown scope are one-time too.
+				dropLineOrVariant(projSessionID, "asked", command)
+				return
+			}
+			// Native PostToolUse does not say whether the user chose a
+			// one-time or session grant. Never widen an ambiguous approval.
+			// Explicit session grants use the CLI or the mod's human answer.
+			if modAnswer == nil {
+				if pendingAsk {
+					dropLineOrVariant(projSessionID, "asked", command)
+					dropLineOrVariant(projSessionID, "approved", command)
+					// Cursor CLI also emits afterShellExecution after Skip,
+					// indistinguishable from an empty-output successful call.
+					// Clear the pending ask so a later call can ask again,
+					// but never fabricate a human approval from this event.
+					if harness.Name() != "cursor" {
+						LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "human", Decision: "allow", Source: "allow_once"})
+					}
+				}
+				// Passthrough and host-only approvals are equally ambiguous.
+				// PreToolUse already records yolonot's own allow verdicts.
+				return
+			}
+			if pendingAsk {
 				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "human", Decision: "allow", Source: "ask_approved"})
 			}
-			saveApproved(projSessionID, command, cwd)
+			saveApprovedSnapshot(projSessionID, command, modAnswer.ApprovalHashes)
 		}
 		return
 	}
@@ -375,6 +419,12 @@ func cmdHook() {
 
 	if command == "" {
 		return
+	}
+	modCommand, modCwd = command, cwd
+	modBinding = ""
+	modApprovalHashes = nil
+	if modRun && payload.ToolUseID != "" {
+		modBinding, modApprovalHashes = modCommandSnapshot(command, cwd)
 	}
 
 	// User rules reflect the user's *current* intent, so they take priority
@@ -391,8 +441,8 @@ func cmdHook() {
 	//
 	// Rule priority is deny > ask > allow (file order irrelevant), handled by
 	// MatchRuleByPriority.
-	rules := LoadRules()
-	sensitive := LoadSensitivePatterns()
+	rules := LoadRules(cwd)
+	sensitive := LoadSensitivePatterns(cwd)
 	ruleMatch := MatchRuleByPriority(command, rules, sensitive)
 	if ruleMatch != nil && ruleMatch.Action == "deny" {
 		userReason := fmt.Sprintf("rule %s", ruleMatch.Pattern)
@@ -426,6 +476,17 @@ func cmdHook() {
 		}
 		emitHook(hookResponse("allow", "rule", userReason, command))
 		return
+	}
+
+	// Replay only after the current deny/allow rules have had their say.
+	// Tool IDs survive middleware rewrites; the binding must also match
+	// this command, cwd and script snapshot before reusing a verdict.
+	if !modRun {
+		if e := modLookupBound(sessionID, payload.ToolUseID, command, cwd); e != nil {
+			quietOnAllow = true
+			emitHook(hookResponse(e.Decision, e.Layer, e.Reason, command))
+			return
+		}
 	}
 
 	// Step 0.5: Session match → allow. Wrapper-aware lookup: matches if
@@ -469,42 +530,14 @@ func cmdHook() {
 	// keeps `rtk curl evil` denied when plain `curl evil` was denied, and
 	// vice versa.
 	if sessionID != "" {
-		if MatchesLineOrWrappedVariant(projSessionID, "denied", command) {
+		if matchesRejectedCommand(projSessionID, command) {
 			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "previously_rejected"})
 			emitHook(hookResponse("deny", "session_deny", "previously rejected this session", command))
 			return
 		}
-		if ContainsLine(projSessionID, "asked", command) && !ContainsLine(projSessionID, "approved", command) {
-			// Before inferring rejection, check if the command was approved
-			// as a wrapped variant (e.g. rtk rewrote `curl X` → `rtk curl X`
-			// between our ask and actual execution). Record the plain form
-			// so future checks are an exact match.
-			if ApprovedAsWrappedVariant(projSessionID, command) {
-				// Same content gate as step 0.5. Stale contents fall through
-				// to re-judging — NOT to the denied branch below: an edited
-				// script is new evidence, not a prior user rejection.
-				if sessionContentOK(projSessionID, command, cwd) {
-					saveApproved(projSessionID, command, cwd)
-					LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session", Decision: "allow", Source: "wrapped_variant"})
-					emitHook(hookResponse("allow", "session", "previously approved as wrapped command this session", command))
-					return
-				}
-				Verbosef("session: wrapper-approved command %q has changed script contents; re-judging", command)
-			} else {
-				AppendLine(projSessionID, "denied", command)
-				// Human verdict (inferred): we asked, no PostToolUse ever
-				// recorded an approval, and the agent is retrying the same
-				// command — the user answered no. Logged as its own
-				// layer:"human" entry (alongside the session_deny gate entry
-				// below) so history mining sees the rejection the moment we
-				// can infer it. Weaker than ask_approved: a rejection where
-				// the agent never retries is never observed.
-				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "human", Decision: "deny", Source: "ask_rejected"})
-				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "session_deny", Decision: "deny", Source: "asked_not_approved"})
-				emitHook(hookResponse("deny", "session_deny", "previously rejected this session", command))
-				return
-			}
-		}
+		// An unanswered ask is not evidence of rejection. Duplicate hooks,
+		// cancellation and interrupted calls all leave pending markers.
+		// Only an explicit human/mod/CLI denial may populate denied.
 	}
 
 	// Step 0.6: Rule ask. Deny/allow already handled above; remaining
@@ -531,9 +564,9 @@ func cmdHook() {
 	// are consulted once, right before the first remote judge.
 	specs := config.JudgeSpecs()
 	in := &JudgeInput{Command: command, Cwd: cwd, Canonical: canonicalInput, Rules: rules,
-		Config: config, Harness: ActiveHarness(), HookStart: hookStart}
+		Config: config, Harness: ActiveHarness(), HookStart: hookStart, Context: hookContext}
 	beforeRemote := func() bool {
-		return hookMemoryLookup(command, cwd, sessionID, projSessionID, contentStale)
+		return hookMemoryLookup(hookContext, command, cwd, sessionID, projSessionID, contentStale)
 	}
 	v, jerr, done := RunJudges(specs, in, beforeRemote)
 	if done {
@@ -542,6 +575,12 @@ func cmdHook() {
 	if v == nil {
 		hookNoVerdict(jerr, payload, command, cwd, sessionID, projSessionID)
 		return
+	}
+	if v.Dec != nil {
+		// Earlier exec judges may have changed scripts after hook entry.
+		// Pin replay to the snapshot actually sent to the adopted model.
+		modBinding = v.ReplayBinding
+		modApprovalHashes = v.ApprovalHashes
 	}
 	escalateUncertain(in, v)
 
@@ -598,7 +637,7 @@ func cmdHook() {
 	// policy, and a cached "ask" would contradict this run's deny on every
 	// replay.
 	if escCacheOK && unresolvedReason == "" {
-		saveCacheHash(v.CacheKey, d)
+		saveCacheHash(v.CacheKey, d, v.CacheContext)
 	}
 
 	entry := DecisionEntry{
@@ -621,7 +660,7 @@ func cmdHook() {
 	switch finalDecision {
 	case "allow":
 		if sessionID != "" {
-			saveApproved(projSessionID, command, cwd)
+			saveApprovedSnapshot(projSessionID, command, v.ApprovalHashes)
 		}
 		emitHook(hookResponse("allow", layer, d.Reasoning, command))
 	case "deny":
@@ -645,7 +684,7 @@ func cmdHook() {
 
 // hookMemoryLookup is the former steps 2 and 4: session similarity (LLM
 // compare) and the script cache. Returns true when it emitted a response.
-func hookMemoryLookup(command, cwd, sessionID, projSessionID string, contentStale bool) bool {
+func hookMemoryLookup(ctx context.Context, command, cwd, sessionID, projSessionID string, contentStale bool) bool {
 	// Session similarity. Skipped when the content gate flagged this exact
 	// command as stale — the identical string sits in the approved list,
 	// so the compare would trivially answer "same command, allow" and
@@ -654,6 +693,7 @@ func hookMemoryLookup(command, cwd, sessionID, projSessionID string, contentStal
 		approved := ReadLines(projSessionID, "approved")
 		candidates := filterByPrefix(command, approved)
 		cfg := GetLLMConfig()
+		cfg.Context = ctx
 		// A decision model cannot answer a free-text compare; the command falls
 		// through to the cache/classifier like any un-approved one.
 		if len(candidates) > 0 && requireChatModel(cfg) == nil {
@@ -719,28 +759,49 @@ func hookMemoryLookup(command, cwd, sessionID, projSessionID string, contentStal
 // applies the profile abstain action; a classifier failure emits the
 // decisionless envelope so the host's own permission layer takes over.
 func hookNoVerdict(jerr *judgeError, payload HookPayload, command, cwd, sessionID, projSessionID string) {
+	if jerr != nil {
+		cfg := LoadConfig()
+		configured := cfg.Failure.Unavailable
+		switch jerr.Kind {
+		case judgeErrParse:
+			configured = cfg.Failure.Parse
+		case judgeErrOversize:
+			configured = cfg.Failure.Oversize
+		case judgeErrBudget:
+			configured = cfg.Failure.Timeout
+		}
+		if configured != "" {
+			emitFailure(cfg, payload, command, cwd, sessionID, projSessionID, jerr.Kind, jerr.Msg)
+			return
+		}
+	}
 	if jerr == nil {
 		// Nothing configured that could decide — transparent.
 		emitHook("")
 		return
 	}
 	switch jerr.Kind {
-	case judgeErrOversize:
+	case judgeErrOversize, judgeErrBudget:
 		// Do not ship an oversized prompt to any model. Apply the active
 		// profile's abstain action (its critical policy, never more
 		// permissive than ask) instead of silently deferring to the host —
 		// which fails open on ask-less harnesses. Uncached: the oversized
 		// content is exactly what we could not judge.
-		act := abstainAction(ActiveHarness())
+		act := failureAction(LoadConfig(), ActiveHarness(), judgeErrOversize)
+		layer := "oversize"
+		if jerr.Kind == judgeErrBudget {
+			layer = "timeout"
+			act = budgetAbstainAction(ActiveHarness())
+		}
 		reason := fmt.Sprintf("%s; profile abstain → %s", jerr.Msg, act)
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "oversize", Decision: act, Reasoning: reason})
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: layer, Decision: act, Reasoning: reason})
 		if act == "deny" {
-			emitHook(hookResponse("deny", "oversize", reason, command))
+			emitHook(hookResponse("deny", layer, reason, command))
 		} else { // abstainAction only ever returns deny or ask
 			if sessionID != "" {
 				AppendLine(projSessionID, "asked", command)
 			}
-			emitHook(hookResponse("ask", "oversize", reason, command))
+			emitHook(hookResponse("ask", layer, reason, command))
 		}
 	case judgeErrParse:
 		// When a custom system_prompt override is active, name it as the
@@ -750,7 +811,7 @@ func hookNoVerdict(jerr *judgeError, payload HookPayload, command, cwd, sessionI
 		banner := "yolonot: 🧑‍🚀 LLM response parse error, falling back to host permissions"
 		if jerr.Override {
 			reason = "parse error (custom system_prompt override active)"
-			banner = "yolonot: 🧑‍🚀 LLM reply unparseable — custom system_prompt may be malformed; run `yolonot classifier verify`. Falling back to host permissions"
+			banner = "yolonot: 🧑‍🚀 LLM reply unparseable — custom system_prompt may be malformed; run `yolonot prompt verify`. Falling back to host permissions"
 		}
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: passthroughLayer(), Decision: "passthrough", Reasoning: reason, DurationMs: jerr.Verdict.Ms})
 		r := HookResponse{}
@@ -837,15 +898,29 @@ func scriptHash(command, cwd string) string {
 // is stored too, so a plain re-run of a wrapper-approved command still
 // passes the content gate.
 func saveApproved(projSessionID, command, cwd string) {
-	AppendLine(projSessionID, "approved", command)
-	if h := scriptHash(command, cwd); h != "" {
-		AppendLine(projSessionID, "approvedhash", h)
+	_, hashes := modCommandSnapshot(command, cwd)
+	saveApprovedSnapshot(projSessionID, command, hashes)
+}
+
+func approvalHashesFromCollected(command string, attached []attachedScript, withheld []withheldScript) []string {
+	var hashes []string
+	if hash := hashCollected(command, attached, withheld); hash != "" {
+		hashes = append(hashes, hash)
 	}
 	if inner := UnwrapCommand(command, SessionWrappers()); inner != "" {
-		if h := scriptHash(inner, cwd); h != "" {
-			AppendLine(projSessionID, "approvedhash", h)
+		if hash := hashCollected(inner, attached, withheld); hash != "" {
+			hashes = append(hashes, hash)
 		}
 	}
+	return hashes
+}
+
+func saveApprovedSnapshot(projSessionID, command string, hashes []string) {
+	AppendLine(projSessionID, "approved", command)
+	for _, hash := range hashes {
+		AppendLine(projSessionID, "approvedhash", hash)
+	}
+	dropLineOrVariant(projSessionID, "asked", command)
 }
 
 // sessionContentOK reports whether a session-approved command's attached
@@ -856,6 +931,20 @@ func saveApproved(projSessionID, command, cwd string) {
 // (script edited since approval, or approval predates hashing) makes the
 // session layer fall through so the cache/LLM re-judge the new contents.
 func sessionContentOK(projSessionID, command, cwd string) bool {
+	identity, _ := nativeExecutableIdentity(command, cwd)
+	prefix := executableApprovalPrefix(command)
+	hadNativeSnapshot := false
+	for _, hash := range ReadLines(projSessionID, "approvedhash") {
+		if strings.HasPrefix(hash, prefix) {
+			hadNativeSnapshot = true
+			break
+		}
+	}
+	if identity != "" || hadNativeSnapshot {
+		if identity == "" || !ContainsLine(projSessionID, "approvedhash", prefix+identity) {
+			return false
+		}
+	}
 	h := scriptHash(command, cwd)
 	if h == "" {
 		if inner := UnwrapCommand(command, SessionWrappers()); inner != "" {
@@ -878,11 +967,14 @@ func checkCache(command, cwd string) *Decision {
 	if err != nil {
 		return nil
 	}
-	var d Decision
-	if err := json.Unmarshal(data, &d); err != nil {
+	var entry cachedDecision
+	if err := json.Unmarshal(data, &entry); err != nil {
 		return nil
 	}
-	return &d
+	if entry.Context == "" || entry.Context != currentCacheContext(command, cwd) {
+		return nil
+	}
+	return &entry.Decision
 }
 
 // runPreCheck invokes an external hook binary with the same JSON stdin
@@ -892,32 +984,7 @@ func checkCache(command, cwd string) *Decision {
 // pipeline continues. The caller is responsible for re-serializing (and may
 // mutate systemMessage before doing so — e.g. to brand the banner).
 func runPreCheck(cmdPath string, input []byte) (*HookResponse, string, bool) {
-	parts := strings.Fields(cmdPath)
-	if len(parts) == 0 {
-		return nil, "", false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
-	cmd.Stdin = bytes.NewReader(input)
-	out, err := cmd.Output()
-	if err != nil || len(out) == 0 {
-		return nil, "", false
-	}
-
-	var resp HookResponse
-	if err := json.Unmarshal(bytes.TrimSpace(out), &resp); err != nil {
-		return nil, "", false
-	}
-	if resp.HookSpecificOutput.PermissionDecision != "allow" {
-		return nil, "", false
-	}
-	reason := resp.HookSpecificOutput.PermissionDecisionReason
-	if reason == "" {
-		reason = "allowed by pre-check hook"
-	}
-	return &resp, reason, true
+	return runPreCheckContext(context.Background(), cmdPath, input)
 }
 
 // preCheckShortName returns a short label for a pre-check hook command,
@@ -936,24 +1003,23 @@ func preCheckShortName(cmdPath string) string {
 }
 
 func saveCache(command, cwd string, d *Decision) {
-	saveCacheHash(scriptHash(command, cwd), d)
+	saveCacheHash(scriptHash(command, cwd), d, currentCacheContext(command, cwd))
 }
 
 // saveCacheHash persists a decision under a precomputed script-cache key.
 // A "" key (no attachable script) is a no-op.
-func saveCacheHash(hash string, d *Decision) {
-	if hash == "" {
+func saveCacheHash(hash string, d *Decision, contextKey string) {
+	if hash == "" || contextKey == "" || d == nil {
 		return
 	}
 	dir := cacheDir()
 	os.MkdirAll(dir, 0700)
-	data, err := json.Marshal(d)
+	data, err := json.Marshal(cachedDecision{Decision: *d, Context: contextKey})
 	if err != nil {
 		return
 	}
 	cachePath := filepath.Join(dir, hash+".json")
-	os.WriteFile(cachePath, data, 0600)
-	os.Chmod(cachePath, 0600)
+	atomicWriteFile(cachePath, data, 0600)
 }
 
 // passthroughLayer attributes an unavailable-model passthrough to the first

@@ -3,9 +3,11 @@ package yolonot
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // tuiNotice collects one-line messages from prompts while the settings
@@ -74,13 +76,17 @@ func tuiPassword(title string) string {
 // page notice; elsewhere it prints.
 func tuiNote(title string, description string) {
 	if tuiInPage {
-		tuiNotice = title
+		tuiNotice = oneLine(title)
 		if description != "" {
-			tuiNotice += ": " + description
+			tuiNotice += ": " + oneLine(description)
 		}
 		return
 	}
 	fmt.Printf("\n  %s\n  %s\n\n", title, description)
+}
+
+func oneLine(text string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ", "\t", "    ").Replace(text)
 }
 
 // noteCancelled prints the picker's cancel line, except inside the settings
@@ -97,4 +103,60 @@ func tuiClear() {
 	if tuiInPage {
 		fmt.Print("\x1b[2J\x1b[H")
 	}
+}
+
+// Keep the header and action bar visible while scrolling the body. The
+// returned indices are shared by rendering and mouse hit testing.
+func viewportLines(total, header, footer, height, offset int) []int {
+	if height <= 0 || total <= height {
+		out := make([]int, total)
+		for i := range out {
+			out[i] = i
+		}
+		return out
+	}
+	header = min(header, height)
+	footer = min(footer, height-header)
+	capacity := height - header - footer
+	offset = max(0, min(offset, total-header-footer-capacity))
+	out := make([]int, 0, height)
+	for i := 0; i < header; i++ {
+		out = append(out, i)
+	}
+	for i := header + offset; i < header+offset+capacity; i++ {
+		out = append(out, i)
+	}
+	for i := total - footer; i < total; i++ {
+		out = append(out, i)
+	}
+	return out
+}
+
+func viewportOffset(total, header, footer, height, offset, selected int) int {
+	if height <= 0 || total <= height {
+		return 0
+	}
+	capacity := height - header - footer
+	if capacity <= 0 {
+		return 0
+	}
+	if selected < header+offset {
+		offset = selected - header
+	} else if selected >= header+offset+capacity {
+		offset = selected - header - capacity + 1
+	}
+	return max(0, min(offset, total-header-footer-capacity))
+}
+
+func viewportView(view string, indices []int, width int) string {
+	lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
+	out := make([]string, 0, len(indices))
+	for _, i := range indices {
+		if i >= 0 && i < len(lines) {
+			// Every logical row occupies one terminal row, including narrow
+			// windows: wrapping would otherwise invalidate mouse coordinates.
+			out = append(out, ansi.Truncate(lines[i], max(width, 1), "…"))
+		}
+	}
+	return strings.Join(out, "\n")
 }

@@ -15,12 +15,13 @@ in banners (`🧑‍🚀 gemini -> npm test`) and in `decisions.jsonl` (`layer`)
 "escalation": {"model": "deepseek"}
 ```
 
-A model is **chat** or **typed**, decided by its URL: a System One
-(`/systemone`, or any `typesafe.ai` host), OpenAI Decisions (`/decisions`)
-or Cloudflare Workers AI Clef (`/ai/run/@cf/cloudflare/clef…`) endpoint is
-typed, anything else is chat. Chat models judge with a prompt and also power
-session similarity, `yolonot suggest` and `yolonot prompt review`. Typed
-models answer fixed questions with probabilities and cannot generate text.
+Set a model's `protocol` explicitly: `chat`, `anthropic`, `claude-cli`,
+`systemone`, `decisions` or `workers-ai`. Typed protocols are the last three;
+they answer fixed questions and cannot generate text. Chat models also power
+session similarity, Explain, `yolonot suggest` and `yolonot prompt review`. Omitting
+`protocol` preserves legacy URL inference. Explicit protocols support custom
+proxy paths without relying on URL substrings; `claude-cli` requires the
+`claude-cli` URL sentinel. See [configuration.md](configuration.md).
 
 A third judge kind lives outside the catalog: an **exec hook**,
 `exec:<path>` in `judges`, any binary that reads the PreToolUse JSON on
@@ -42,46 +43,61 @@ model id), runs a connection test and offers to append the model to the
 chain. `models test` exits 1 on a failed connection, 2 for an unknown name.
 
 Names: lowercase letters, digits, `. _ : -`, starting with a letter or
-digit. Reserved: `fast_allow`, `exec` and the fixed layer names (`rule`,
-`session`, `cache`, `human`, …). API keys are never written to disk;
-`env_key` names the variable to read.
+digit. Reserved: the `exec:` prefix, `fast_allow`, `exec` and the fixed layer names (`rule`,
+`session`, `cache`, `human`, `timeout`, …). New config saves retain the `env_key`
+variable name, not its API-key value. Existing legacy backups can still contain
+older configuration; inspect them before sharing.
+
+Explain uses the **first chat model in the judge chain**, even if a typed model
+already classified the command. Those entries can require different keys.
+Variables must reach the yolonot process, including desktop hook/mod processes;
+a terminal export is not proof of that. See [desktop credentials](configuration.md#credentials-in-desktop-hosts).
 
 ## Chat providers
 
-| Provider | Cost | Per-command latency | Notes |
-|----------|------|--------------------:|-------|
-| **OpenAI** (`gpt-5.4-mini`) | ~10¢/day | ~500ms | Fastest chat model. Needs `OPENAI_API_KEY`. |
-| **OpenRouter** (free models) | ~10¢/day | 500ms–3s | Broad model choice. Needs `OPENROUTER_API_KEY`. |
-| **Ollama** (`gemma4:e4b`) | free | 2–10s | Local, no API key. `brew install ollama && ollama pull gemma4:e4b`. |
-| **Claude Code** (default) | free | ~10s | Uses your Claude subscription, no API key, but slowest. |
-| **Anthropic (API)** | pay-per-token | ~1s | Needs `ANTHROPIC_API_KEY`. |
-| **xAI** | pay-per-token | ~1s | Needs `XAI_API_KEY`. Grok models. |
-| **Custom** | — | — | Bring your own OpenAI-compatible endpoint. |
+| Provider | Integration | Authentication |
+|----------|-------------|----------------|
+| **OpenAI** | Chat endpoint | `OPENAI_API_KEY` |
+| **OpenRouter** | OpenAI-compatible endpoint | `OPENROUTER_API_KEY` |
+| **Ollama** | Local endpoint | No API key by default |
+| **Claude Code** | Local `claude -p` process | Your existing Claude CLI login |
+| **Anthropic (API)** | Messages endpoint | `ANTHROPIC_API_KEY` |
+| **xAI** | OpenAI-compatible endpoint | `XAI_API_KEY` |
+| **Custom** | Your OpenAI-compatible endpoint | Configurable `env_key` |
+
+Cost and latency depend on the model, request size, provider and hardware.
+Use `yolonot models test <name>` to check your configured endpoint.
 
 ### Models and timeouts
 
-| Provider | Models (primary / escalation suggestions) | Timeout |
+| Provider | Wizard model choices (primary / escalation) | Timeout |
 |----------|-------------------------------------------|---------|
 | Claude Code | claude-haiku-5-5, claude-sonnet-5-5 / claude-opus-5-5 | 30s |
 | OpenAI | gpt-6-luna, gpt-5.6-luna, gpt-5.4-mini / gpt-6.1-sol, gpt-6-sol | 10s |
 | Anthropic (API) | claude-haiku-5-5, claude-sonnet-5-5 / claude-opus-5-5 | 10s |
 | xAI | grok-4.3, grok-4.20-0309-non-reasoning / grok-4.7, grok-4.6 | 10s |
-| Ollama | any installed model (recommended: gemma4:e4b) | 30s |
+| Ollama | any installed model | 30s |
 | OpenRouter | free models fetched live (primary); type any model ID for escalation | 30s |
 | Custom | any URL | 10s |
 
+These are bundled wizard choices, not a guarantee of current provider or
+account availability. Use an accessible model ID and test it in your runtime.
 Timeouts are set per provider at add time and stored in the entry's `timeout`.
+Hook calls also share a configurable deadline (55 seconds by default) across similarity, all judges
+and escalation; a later stage gets only the remaining time.
 
 ## Env vars
 
 | Var | Purpose |
 |-----|---------|
 | `YOLONOT_DISABLED=1` | Hook is a no-op for this environment |
-| `YOLONOT_HARNESS` | Pin the harness adapter (claude, codex, opencode, gemini, cursor) |
+| `YOLONOT_HARNESS` | Pin the harness adapter (claude, codex, opencode, antigravity, cursor) |
 | `YOLONOT_PROFILE`, `YOLONOT_<HARNESS>_PROFILE` | Risk profile for this session (see [risk-profiles.md](risk-profiles.md)) |
 | `YOLONOT_<HARNESS>_RISK_<TIER>` | One tier → action cell for this session |
 | `YOLONOT_ESCALATION=off` | Disable escalation for this environment |
 | `YOLONOT_ESCALATION_UNRESOLVED=deny` | Fail a post-escalation residual ask closed (headless runs) |
+| `YOLONOT_CURSOR_NATIVE_ASK=1` | Opt into Cursor's native ask response; force/yolo modes can still auto-accept it |
+| `YOLONOT_CONFIRM_BYPASS=1` | Explicit opt-in for the pause CLI; equivalent to `--confirm-bypass` |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `XAI_API_KEY` / `OPENROUTER_API_KEY` / `TYPESAFE_API_KEY` / `CLOUDFLARE_API_TOKEN` | Provider auth, named per model by `env_key` |
 | `CLOUDFLARE_ACCOUNT_ID` | Default for the account id prompt when adding a Workers AI model; the id is stored in the entry's URL |
 
@@ -149,10 +165,10 @@ Silicon build, use the Workers AI preset instead.
 
 `yolonot setup` step 3b offers TypeSafe Jev and writes the chain
 `fast_allow → <typed> → <chat>`. A typed entry looks like any other catalog
-entry; the URL makes it typed:
+entry; set its protocol explicitly:
 
 ```json
-"jev": {"url": "https://api.typesafe.ai/v1/systemone", "model": "jev-latest", "env_key": "TYPESAFE_API_KEY"}
+"jev": {"protocol": "systemone", "url": "https://api.typesafe.ai/v1/systemone", "model": "jev-latest", "env_key": "TYPESAFE_API_KEY"}
 ```
 
 Measured on the shipped greenfield suite (176 cases, one run): 92.0%
@@ -167,11 +183,12 @@ What a decision model does not do:
   "Project context", "Allow when" and "Ask when" sections; the ninth
   condition (`project_ask`) fires when an "Ask when" line matches, and
   "Allow when" lines tell the model what this project treats as routine.
-  The request carries only the command, attached script contents and
-  these sections: no cwd, no session history. The question set alone is
-  about 6.5 KB per request.
+  The request carries the command, attached script contents and these sections.
+  When learning is enabled, nearby project human precedents are supplied as
+  historical hints too; they are not current authorization. Raw host chat
+  history is not sent. The question set alone is about 6.5 KB per request.
 - It cannot be the escalation model, and it never says `deny`.
-- Session similarity compare (`session_llm`), `yolonot suggest` smart
+- Explain, session similarity compare (`session_llm`), `yolonot suggest` smart
   mode and `yolonot prompt review` use the first chat model in the chain;
   with no chat model they are skipped or refuse with a clear message.
 
@@ -189,7 +206,8 @@ the primary classifier is uncertain in a way that would surface an ask**
 a confident `allow` with a `safe`/`low` tier, the ask is rescued into an
 allow; if it returns a *more* dangerous tier, the verdict is hardened
 upward. Anything else leaves the primary verdict untouched, and any
-escalation error keeps the ask — the feature can time out, never fail open.
+escalation error preserves the primary verdict; it does not turn an ask into
+allow. The final unresolved policy and host permissions still apply.
 
 ### Why rescue requires `safe`/`low` — not just `allow`
 
@@ -266,17 +284,19 @@ yolonot prompts the LLM to return a single JSON object. Any provider/model you p
 
 ```json
 {
-  "decision": "allow" | "ask",
-  "risk": "safe" | "low" | "moderate" | "high" | "critical",
-  "short": "6 words or fewer",
-  "reasoning": "one-sentence explanation",
-  "compared_to": "optional — similarity comparisons only"
+  "decision": "ask",
+  "risk": "moderate",
+  "short": "Confirm the remote target",
+  "reasoning": "This command writes to a remote service."
 }
 ```
 
-| Field | Required | Purpose |
+The table describes the requested output contract; it is not a JSON Schema.
+Legacy chat outputs are more permissively parsed than typed answer protocols.
+
+| Field | Requested | Purpose |
 |-------|----------|---------|
-| `decision` | yes | 2-class classifier. `deny` is reserved for explicit rules + the per-harness [risk map](risk-tiers.md); LLMs never emit `deny` directly. |
+| `decision` | yes | `allow` or `ask`; `deny` is produced by explicit policy, session rejection or the per-harness [risk map](risk-tiers.md). |
 | `risk` | yes | Categorical tier by reversibility × blast radius. The active harness's RiskMap turns the tier into a final action (allow / ask / deny / passthrough). |
 | `short` | no | ≤6-word banner shown in the terminal. Keeps `systemMessage` compact. Falls back to a truncated `reasoning` if missing. |
 | `reasoning` | yes | One sentence. Written to `decisions.jsonl` and surfaced via `yolonot log`. |
@@ -284,4 +304,7 @@ yolonot prompts the LLM to return a single JSON object. Any provider/model you p
 
 Legacy outputs that emit `confidence` (0.0–1.0) instead of `risk` are mapped to a tier for backward compatibility and logged at verbose level. Migrate your provider prompt to emit `risk` when convenient.
 
-If a model returns unparseable JSON or omits required fields, yolonot treats the LLM as unreachable and falls through to the host CLI's native permission prompt (never a silent allow).
+If a model returns an invalid decision, the next judge can run. If the chain
+produces no verdict, the configured unavailable/parse failure policy applies;
+the default defers to host permissions, which may prompt or allow. Deadline
+exhaustion has its own failure action. See [security.md](security.md).

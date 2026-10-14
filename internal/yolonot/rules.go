@@ -67,8 +67,8 @@ var scriptPathRe = regexp.MustCompile(`[\s]([^\s]+\.(py|sh|bash|zsh|js|mjs|cjs|t
 //     containing a .yolonot (closer = more specific = higher priority);
 //  2. ~/.yolonot/rules (per-user directory form);
 //  3. ~/.yolonot (per-user file form, if present).
-func LoadRules() []Rule {
-	paths := yolonotConfigSearchPaths()
+func LoadRules(cwd ...string) []Rule {
+	paths := yolonotConfigSearchPaths(cwd...)
 
 	var rules []Rule
 	for _, path := range paths {
@@ -81,8 +81,8 @@ func LoadRules() []Rule {
 // LoadRules. Unlike rules, hints stack across every file in the chain — the
 // LLM gets the union as part of its system prompt, with closer-to-cwd files
 // listed first so per-project context appears before per-team or per-user.
-func LoadHints() WalkupHints {
-	paths := yolonotConfigSearchPaths()
+func LoadHints(cwd ...string) WalkupHints {
+	paths := yolonotConfigSearchPaths(cwd...)
 
 	var out WalkupHints
 	for _, path := range paths {
@@ -198,10 +198,13 @@ func unquoteHintBody(s string) string {
 // Claude Code is launched under it. If cwd is not inside a git repo, no
 // ancestor `.yolonot` is loaded — only the global config. Users who want
 // "repo-less" walk-up can `git init` or place rules in ~/.yolonot/rules.
-func yolonotConfigSearchPaths() []string {
+func yolonotConfigSearchPaths(directory ...string) []string {
 	var paths []string
 
 	cwd, err := os.Getwd()
+	if len(directory) > 0 && directory[0] != "" {
+		cwd, err = canonicalDirectory(directory[0]), nil
+	}
 	if err == nil {
 		home, _ := os.UserHomeDir()
 		cur, _ := filepath.Abs(cwd)
@@ -485,8 +488,8 @@ var allSensitivePatterns = []string{
 // LoadSensitivePatterns returns the active sensitive patterns from .yolonot
 // rule files. Only explicitly added "sensitive <pattern>" directives are
 // active — nothing is enabled by default.
-func LoadSensitivePatterns() []string {
-	paths := yolonotConfigSearchPaths()
+func LoadSensitivePatterns(cwd ...string) []string {
+	paths := yolonotConfigSearchPaths(cwd...)
 
 	var adds []string
 	removes := map[string]bool{}
@@ -763,4 +766,3 @@ func extractExecutables(command string) []string {
 	}
 	return exes
 }
-

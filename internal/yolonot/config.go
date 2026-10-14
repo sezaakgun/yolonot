@@ -16,15 +16,17 @@ import (
 )
 
 type ProviderConfig struct {
-	Name    string `json:"name,omitempty"`
-	URL     string `json:"url,omitempty"`
-	Model   string `json:"model,omitempty"`
-	EnvKey  string `json:"env_key,omitempty"`
-	APIKey  string `json:"api_key,omitempty"`
-	Timeout int    `json:"timeout,omitempty"` // LLM call timeout in seconds
+	Name     string `json:"name,omitempty"`
+	URL      string `json:"url,omitempty"`
+	Model    string `json:"model,omitempty"`
+	EnvKey   string `json:"env_key,omitempty"`
+	APIKey   string `json:"api_key,omitempty"`
+	Timeout  int    `json:"timeout,omitempty"`  // LLM call timeout in seconds
+	Protocol string `json:"protocol,omitempty"` // chat | anthropic | claude-cli | systemone | decisions | workers-ai; empty = legacy URL inference
 }
 
 type Config struct {
+	Schema string `json:"$schema,omitempty"`
 	// ConfigVersion is 1 for the models/judges/prompt/policy shape written
 	// by yolonot 1.x. Absent on v0 files; LoadConfig folds v0 keys into the
 	// v1 fields in memory and SaveConfig writes v1 only.
@@ -50,7 +52,11 @@ type Config struct {
 	// repo root of the session cwd, else the cwd). Sensitive home dirs stay
 	// floored regardless. Config-file only by design: no CLI verb and no
 	// .yolonot directive, so an untrusted clone can never widen the boundary.
-	AttachOutsideRoot bool `json:"attach_outside_root,omitempty"`
+	AttachOutsideRoot bool           `json:"attach_outside_root,omitempty"`
+	HookTimeout       int            `json:"hook_timeout,omitempty"` // overall model/exec budget, 1..55 seconds; default 55
+	Failure           FailurePolicy  `json:"failure,omitzero"`
+	Learning          LearningConfig `json:"learning,omitzero"`
+	LoadError         error          `json:"-"`
 
 	// v0 keys (yolonot ≤ 0.23). Read only: normalize() folds them into the
 	// fields above and clears them, so they never reach disk again.
@@ -241,17 +247,22 @@ func configPath() string {
 }
 
 func LoadConfig() Config {
-	data, err := os.ReadFile(configPath())
-	if err != nil {
-		return Config{}
-	}
-	var c Config
-	json.Unmarshal(data, &c)
-	c.normalize()
+	c, err := readConfig(configPath())
+	c.LoadError = err
 	return c
 }
 
-func SaveConfig(c Config) {
+func SaveConfig(c Config) error {
+	if err := saveConfig(c); err != nil {
+		fmt.Fprintf(os.Stderr, "yolonot: save config failed: %v\n", err)
+		return err
+	}
+	return nil
+}
+
+// saveConfig reports write failures to interactive callers, which must keep
+// their draft open when persistence did not succeed.
+func saveConfig(c Config) error {
 	c.normalize()
 	c.ConfigVersion = 1
 	// Never persist APIKey to disk. If a user entered a key via the TUI,
@@ -268,14 +279,17 @@ func SaveConfig(c Config) {
 		}
 		c.Models = scrubbed
 	}
-	data, _ := json.MarshalIndent(c, "", "  ")
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
 	// atomicWriteFile does symlink rejection + rename-from-tempfile so
 	// an attacker can't redirect the write via a TOCTOU symlink.
 	if err := atomicWriteFile(configPath(), append(data, '\n'), 0600); err != nil {
-		Verbosef("save config failed: %v", err)
-		return
+		return err
 	}
 	Verbosef("wrote %s (%d bytes)", configPath(), len(data)+1)
+	return nil
 }
 
 // parseHarnessFlag scans os.Args[2:] for "--harness <name>", "--harness=<name>",
@@ -314,6 +328,15 @@ func hasFlag(name string) bool {
 	return false
 }
 
+func hasHarnessTarget(targets []Harness, name string) bool {
+	for _, h := range targets {
+		if h.Name() == name {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveInstallTargets picks which harnesses to install/uninstall into.
 //   - --harness <name> → that single adapter (errors if unknown)
 //   - --all            → every registered adapter
@@ -331,15 +354,23 @@ func resolveInstallTargets(purpose string) []Harness {
 			fmt.Fprintln(os.Stderr)
 			os.Exit(2)
 		}
+		if purpose != "uninstall" && h.Name() == "gemini" {
+			fmt.Fprintln(os.Stderr, "Gemini CLI support has been retired. Use --harness antigravity (agy). To remove old hooks: yolonot uninstall --harness gemini")
+			os.Exit(2)
+		}
 		return []Harness{h}
 	}
 	if all {
-		return Harnesses()
+		if purpose == "uninstall" {
+			return Harnesses()
+		}
+		return supportedHarnesses()
 	}
 	if purpose == "uninstall" {
 		var installed []Harness
+		_, modErr := os.Stat(modDir())
 		for _, h := range Harnesses() {
-			if h.IsInstalled() {
+			if h.IsInstalled() || (h.Name() == "claude" && modErr == nil) {
 				installed = append(installed, h)
 			}
 		}
@@ -348,13 +379,13 @@ func resolveInstallTargets(purpose string) []Harness {
 	// Install default: any detected harness; falls back to the full registry
 	// so a first-time user still gets the historical Claude-only install.
 	var detected []Harness
-	for _, h := range Harnesses() {
+	for _, h := range supportedHarnesses() {
 		if h.IsDetected() {
 			detected = append(detected, h)
 		}
 	}
 	if len(detected) == 0 {
-		return Harnesses()
+		return supportedHarnesses()
 	}
 	return detected
 }
@@ -409,10 +440,10 @@ func cmdInstall() {
 		}
 	}
 
-	// --mod opts in; an existing mod dir is refreshed on every install so an
-	// upgrade never leaves an old register.tsx behind.
+	// --mod opts in; installs targeting Claude refresh an existing mod so
+	// upgrades do not leave an old register.tsx behind.
 	modPath := ""
-	if _, err := os.Stat(modDir()); hasFlag("--mod") || err == nil {
+	if _, err := os.Stat(modDir()); hasHarnessTarget(targets, "claude") && (hasFlag("--mod") || err == nil) {
 		p, err := modInstall(bp)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "mod install failed: %v\n", err)
@@ -488,7 +519,6 @@ func cmdInstallSkillOnly(targets []Harness) {
 	}
 	if len(written) == 0 {
 		fmt.Println("No harness in scope ships a skill bundle. Nothing to do.")
-		fmt.Println("(Skills currently apply to Claude only.)")
 		return
 	}
 	fmt.Println("Skill bundle refreshed.")
@@ -512,7 +542,9 @@ func cmdUninstall() {
 			Verbosef("skill uninstall for %s failed: %v", h.Name(), err)
 		}
 	}
-	modUninstall()
+	if hasHarnessTarget(targets, "claude") {
+		modUninstall()
+	}
 
 	fmt.Println("yolonot uninstalled. Restart your AI coding CLI to deactivate.")
 	fmt.Printf("Data preserved at %s — delete manually if wanted.\n", YolonotDir())
@@ -852,7 +884,7 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 func testProviderConnection(selected ProviderConfig) bool {
 	if tuiInPage {
 		// The settings page reports the result as a notice.
-		cfg := LLMConfig{URL: selected.URL, Model: selected.Model, APIKey: selected.APIKey, Timeout: selected.Timeout}
+		cfg := LLMConfig{URL: selected.URL, Model: selected.Model, APIKey: selected.APIKey, Timeout: selected.Timeout, Protocol: selected.Protocol}
 		if cfg.APIKey == "" && selected.EnvKey != "" {
 			cfg.APIKey = os.Getenv(selected.EnvKey)
 		}
@@ -860,7 +892,7 @@ func testProviderConnection(selected ProviderConfig) bool {
 		return err == nil && text != ""
 	}
 	fmt.Print("Testing connection... ")
-	cfg := LLMConfig{URL: selected.URL, Model: selected.Model, APIKey: selected.APIKey, Timeout: selected.Timeout}
+	cfg := LLMConfig{URL: selected.URL, Model: selected.Model, APIKey: selected.APIKey, Timeout: selected.Timeout, Protocol: selected.Protocol}
 	if cfg.APIKey == "" && selected.EnvKey != "" {
 		cfg.APIKey = os.Getenv(selected.EnvKey)
 	}
@@ -1673,7 +1705,7 @@ func cmdQuiet(args []string) {
 	if !requireV1(&cfg) {
 		return
 	}
-	SaveConfig(cfg)
+	mustSaveConfig(cfg)
 	if cfg.QuietOnAllow {
 		fmt.Println("Quiet on approve: ON — allow decisions will be silent.")
 	} else {
@@ -1730,7 +1762,7 @@ func cmdRisk(args []string) {
 			hp := cfg.harnessPolicy(h.Name())
 			hp.RiskMap = nil
 			cfg.setHarnessPolicy(h.Name(), hp)
-			SaveConfig(cfg)
+			mustSaveConfig(cfg)
 			fmt.Printf("Reset all risk overrides for %s.\n", h.Name())
 			return
 		}
@@ -1741,7 +1773,7 @@ func cmdRisk(args []string) {
 			hp.RiskMap = nil
 		}
 		cfg.setHarnessPolicy(h.Name(), hp)
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		fmt.Printf("Reset %s/%s to default.\n", h.Name(), tier)
 		return
 	}
@@ -1769,11 +1801,12 @@ func cmdRisk(args []string) {
 	}
 	hp.RiskMap[tier] = action
 	cfg.setHarnessPolicy(h.Name(), hp)
-	SaveConfig(cfg)
+	mustSaveConfig(cfg)
 	fmt.Printf("%s/%s → %s\n", h.Name(), tier, action)
 }
 
 func printRiskMap(h Harness) {
+	defer prepareHarnessCapabilities(h)()
 	defaults := h.RiskMap()
 	effective := ResolveRiskMap(h)
 	cfg := LoadConfig()

@@ -75,7 +75,7 @@ const (
 var reservedJudgeNames = map[string]bool{
 	"fast_allow": true, "exec": true, "rule": true, "session": true, "session_deny": true,
 	"session_llm": true, "cache": true, "human": true, "oversize": true, "pause": true,
-	"passthrough": true, "unknown": true, "pre_check": true, "llm": true, "decision": true, "escalation": true,
+	"passthrough": true, "unknown": true, "pre_check": true, "llm": true, "decision": true, "escalation": true, "timeout": true,
 }
 
 var modelNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]*$`)
@@ -85,7 +85,7 @@ func ValidModelName(s string) error {
 	if !modelNameRe.MatchString(s) {
 		return fmt.Errorf("model name %q: use lowercase letters, digits, . _ : -", s)
 	}
-	if reservedJudgeNames[s] {
+	if reservedJudgeNames[s] || strings.HasPrefix(s, "exec:") {
 		return fmt.Errorf("model name %q is reserved", s)
 	}
 	return nil
@@ -113,7 +113,7 @@ func modelKey(m ModelConfig) string {
 		return -1
 	}, k)
 	k = strings.TrimLeft(k, "._:-")
-	if k == "" || reservedJudgeNames[k] {
+	if ValidModelName(k) != nil {
 		k = "model"
 	}
 	return k
@@ -131,7 +131,7 @@ func (c Config) kindOf(sp JudgeSpec) string {
 	if !ok {
 		return judgeUnknown
 	}
-	if isDecisionURL(m.URL) {
+	if isTypedModel(m) {
 		return judgeTyped
 	}
 	return judgeChat
@@ -160,7 +160,7 @@ func (c Config) ModelLLM(name string) LLMConfig {
 			key = v
 		}
 	}
-	return LLMConfig{URL: m.URL, Model: m.Model, APIKey: key, Timeout: m.Timeout}
+	return LLMConfig{URL: m.URL, Model: m.Model, ModelName: name, APIKeyEnv: m.EnvKey, APIKey: key, Timeout: m.Timeout, Protocol: m.Protocol}
 }
 
 // ChatModelName is the first chat model in the chain: the one used for
@@ -192,8 +192,9 @@ func (c *Config) putModel(name string, m ModelConfig) {
 	c.Models[name] = m
 }
 
-// addModel inserts m under a derived key, suffixing on collision with a
-// different endpoint. Returns the key.
+// addModel inserts m under a derived key, suffixing on collision with
+// different call settings. Reusing an endpoint/model must not discard a
+// stage's explicit timeout or credentials during legacy migration.
 func (c *Config) addModel(m ModelConfig) string {
 	if c.Models == nil {
 		c.Models = map[string]ModelConfig{}
@@ -206,7 +207,8 @@ func (c *Config) addModel(m ModelConfig) string {
 			c.Models[key] = m
 			return key
 		}
-		if existing.URL == m.URL && existing.Model == m.Model {
+		if existing.URL == m.URL && existing.Model == m.Model &&
+			existing.Timeout == m.Timeout && existing.EnvKey == m.EnvKey && existing.APIKey == m.APIKey && existing.Protocol == m.Protocol {
 			return key
 		}
 		key = fmt.Sprintf("%s-%d", base, i)
@@ -230,10 +232,13 @@ func (c *Config) normalize() {
 	}
 	if c.Escalation != nil && (c.Escalation.Provider.URL != "" || c.Escalation.Provider.Model != "") {
 		p := c.Escalation.Provider
-		if p.URL == "" && chat != "" && !isDecisionURL(c.Models[chat].URL) {
+		if p.URL == "" && chat != "" && !isTypedModel(c.Models[chat]) {
 			// v0 inheritance: model-only escalation ran on the primary's endpoint.
 			prim := c.Models[chat]
-			p.URL, p.Timeout = prim.URL, prim.Timeout
+			p.URL = prim.URL
+			if p.Timeout == 0 {
+				p.Timeout = prim.Timeout
+			}
 			if p.EnvKey == "" && p.APIKey == "" {
 				p.EnvKey, p.APIKey = prim.EnvKey, prim.APIKey
 			}

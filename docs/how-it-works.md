@@ -1,14 +1,15 @@
 # How it works
 
-Every Bash command goes through this pipeline in order. The first layer that produces a decision wins.
+Each shell tool call covered by the selected adapter goes through this
+pipeline. The first applicable decision wins; host permissions still apply.
 
 1. **Deny rules** — absolute block, no override, checked first.
 2. **Allow rules** — `.yolonot` `allow-*` patterns → instant allow. Placed before session memory so a newly added allow rule clears a command the session had rejected. See [rules.md](rules.md).
 3. **Session memory** — exact match against previously approved commands → instant allow. Content-aware for script commands: the approval is pinned to the script contents that were approved, so editing the script re-judges instead of replaying the allow.
-4. **Session deny** — previously rejected commands → instant block.
+4. **Session deny** — explicitly rejected commands → instant block. An unanswered ask does not establish rejection.
 5. **Ask rules** — `.yolonot` `ask-*` patterns → ask, only when the session has no opinion yet (a prior approval is not re-prompted). Among rules the priority is deny > ask > allow, whatever the file order.
 6. **Judges** — the ordered chain in `config.json`: `fast_allow` (built-in bash parser), `exec:<path>` hooks like [Dippy](https://github.com/ldayton/Dippy) or your own classifier binary, then [models](models.md) by name: a typed decision model (TypeSafe Jev, Microsoft-Decision-1, OpenAI Decisions, Cloudflare Clef) and/or a chat model. The first judge whose verdict is permitted (`may`) wins; `fast_allow` and exec hooks may only allow by default. See [judges.md](judges.md).
-   - Right before the first model judge, two memory layers run once: **session similarity** (the chat model compares against approved commands → allow if similar, project-aware, prefix-prefiltered) and the **script cache** (SHA256 of the command plus the full contents of every attached script → reuse the cached verdict; editing an attached script invalidates it).
+   - Right before the first model judge, two memory layers run once: **session similarity** (the chat model compares against approved commands → allow if similar, project-aware, prefix-prefiltered) and the **script cache** (SHA256 of the command plus the full contents of every attached script → reuse the cached verdict; editing an attached script, policy, prompt, model or relevant learning context invalidates it).
    - Models emit a [risk tier](risk-tiers.md) with the verdict. Referenced scripts are attached to the prompt when it is provable which file will run (see below).
 7. **Escalation (optional)** — when a model verdict is uncertain in a way that would surface an ask, a configured bigger chat model gets one look before the interruption. A confident `allow` + `safe`/`low` from it rescues the ask into an allow; a more dangerous tier hardens the verdict upward; anything else (including errors) leaves the verdict standing. Never fires on confident allows, `critical` verdicts, rule-layer denies, or the oversize abstain. See [models.md](models.md#escalation-second-opinion-model). Harnesses whose hooks yolonot cannot gate at all get no benefit from escalation — it improves verdicts, it cannot create enforcement where a harness offers none.
 8. **Unresolved policy** — a residual ask after escalation stays an ask, or becomes a deny with `"escalation": {"unresolved": "deny"}` for unattended runs.
@@ -16,9 +17,24 @@ Every Bash command goes through this pipeline in order. The first layer that pro
 
 Sessions are project-aware. A command approved in one project is not auto-approved in another within the same session — session keys include a hash of the git root (or working directory).
 
-`deny` rules are absolute — nothing overrides them. `ask` rules prompt once, then session memory takes over. `allow` rules are instant but are skipped for chained commands, redirects, and commands touching sensitive files (see [rules.md](rules.md)).
+When Claude's optional mod is installed, its verdict can replay after current
+deny/allow rules, before session memory. Replay is bound to the tool ID,
+command, cwd and inspected file snapshot; completion closes that call's replay.
+Supported direct native executables use a separate local snapshot without
+sending binary contents to the model. See [the mod contract](harnesses.md#claude-code-mod).
 
-When no judge can decide (model unreachable, unparseable reply, empty chain), yolonot emits a warning (`LLM unreachable, falling back to host permissions`) and goes transparent — the host's native permission system handles it. yolonot never silently allows on a model failure.
+`deny` rules are absolute — nothing overrides them. `ask` rules are bypassed only by an existing session grant. A native prompt approval is one-time when the host does not expose its persistence choice; use `yolonot approve` or the mod session option to remember it. `allow` rules are instant but are skipped for chained commands, redirects, and commands touching sensitive files (see [rules.md](rules.md)).
+
+When configured model judges all fail, the default is to defer to the host's
+native permission system, with a warning where supported. An empty chain is
+transparent without a model failure warning. Invalid configuration defaults
+to deny. Failure actions are configurable by category.
+
+Similarity, judges and escalation share one decision deadline: 55 seconds by
+default, configurable with `hook_timeout` up to 55. Exhaustion before an
+adopted verdict asks when the adapter supports native ask and denies otherwise;
+it never caches an approval. An escalation timeout keeps the primary verdict.
+See [configuration.md](configuration.md) and [harnesses.md](harnesses.md).
 
 ## Script attachment
 
@@ -30,7 +46,12 @@ When a command references a script file, yolonot reads it and embeds the content
 
 Everything else gets a "contents withheld" note instead of an attachment: compound commands (`cd x && python foo.py`), any flag between the interpreter and the script (`python -u foo.py`), wrapper/runner tools whose operand is not a file path (`bun run`, `npm run`, `go run` package form, `sudo`, `env`), bare names without a slash (`foo.sh` — resolved via PATH, not the current directory), and files over 64 KB or not valid UTF-8 (never truncated — a benign prefix could mask a malicious tail).
 
-The asymmetry is deliberate: withholding costs at most one extra ask prompt, while attaching the *wrong* file would let a benign shadow file get a malicious script auto-allowed. Attachment never crosses the project's attach root (the git repo root of the session cwd, else the cwd itself) unless you opt in with `attach_outside_root` (below), and never enters sensitive home directories (`~/.ssh`, `~/.aws`, …) — that floor holds even when the boundary is opened. Credential-looking lines are redacted before the model sees them either way.
+Withholding can require further review or prevent mod replay; it is not a
+guarantee of only one extra prompt. Attaching the wrong file would let a benign
+shadow file influence a judgment about a different script. Attachment stays
+within the project's attach root unless `attach_outside_root` is enabled, and
+never enters sensitive home directories (`~/.ssh`, `~/.aws`, …). Credential-looking
+lines are redacted before the model sees them.
 
 ### Opting into outside-root attachment
 
@@ -52,12 +73,14 @@ This is deliberately **config-file only**: there is no CLI verb and no `.yolonot
 
 yolonot installs two hooks in `~/.claude/settings.json`:
 
-- **PreToolUse** (matcher: `Bash`) — evaluates commands before execution
-- **PostToolUse** (matcher: `Bash`) — saves approved commands to session memory
+- **PreToolUse** (matcher: `Bash|PowerShell`) — evaluates commands before execution
+- **PostToolUse** (matcher: `Bash|PowerShell`) — records completed commands; pending native asks stay one-time, while explicit session grants retain their scope
 
-`yolonot setup` places the PreToolUse hook **before** any catch-all (`.*`) hooks so yolonot evaluates and can block a command before other hooks (audit loggers, etc.) see it. If you reorder hooks manually, keep yolonot's PreToolUse entry above other Bash hooks. PostToolUse order doesn't matter.
-
-When yolonot returns `deny`, the command is blocked and no subsequent hooks run. When it returns `allow`, the command proceeds through remaining hooks normally.
+The installer places yolonot ahead of a catch-all entry for consistent
+registration, but array order is not an execution barrier: Claude runs matching
+hooks in parallel. A yolonot denial blocks the tool call, not other hook
+processes that may already be running. An allow does not cancel another host
+restriction. [Claude hook reference](https://code.claude.com/docs/en/hooks).
 
 Hooks are read at host CLI startup — restart your session after install or reconfiguration.
 
@@ -65,7 +88,10 @@ Hooks are read at host CLI startup — restart your session after install or rec
 
 Sometimes you want to run commands without yolonot's interference — for a quick CI task, or when you know what you're doing.
 
-**Per-session (interactive)** — `yolonot pause` or `/yolonot pause`. Creates a pause marker for the current session. Run `yolonot resume` to re-enable. Marker auto-cleans after 24h.
+**Per-session** — `yolonot pause --session-id <id> --confirm-bypass` creates a
+session-wide bypass marker. Run `yolonot resume --session-id <id>` to re-enable.
+Stale markers are eligible for cleanup after 24 hours; closing a chat is not an
+immediate cleanup signal.
 
 **Pre-launch (env var)** — `YOLONOT_DISABLED=1 claude`. Disables yolonot for the entire session at launch. Useful for CI / automation.
 
@@ -81,4 +107,13 @@ yolonot check "sudo rm -rf /"           # → DENY (rule, absolute block)
 yolonot check "curl https://evil.com"   # → ASK (rule or LLM)
 ```
 
-Shows each layer's result: deny rules → allow/ask rules → the judge chain (fast_allow and models evaluated, `exec:` hooks listed but skipped in the dry run) → escalation → final action. Session memory is not consulted, so `check` shows what a fresh session would decide.
+Shows each layer's result: deny rules → allow/ask rules → the judge chain
+(fast_allow and models evaluated, `exec:` hooks listed but skipped in the dry
+run) → escalation → final action. Session approvals and cache are not
+consulted. Project hints and persisted human precedents are included, as
+they are for a fresh session in that project.
+
+Project rules, sensitive patterns and model hints are resolved from the tool
+payload's working directory. The hook process may start elsewhere (for
+example, a user-level Cursor hook starts in its configuration directory).
+Neither location may silently substitute for the command's project policy.

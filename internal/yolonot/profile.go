@@ -295,6 +295,19 @@ func translateProfileAction(h Harness, tier, act string) string {
 	if h == nil {
 		return ActionAsk
 	}
+	if h.Name() == "opencode" || h.Name() == "cursor" {
+		// Adding native asks must not silently relax these adapters' existing
+		// hard-deny floor. Explicit per-tier overrides can still change it.
+		if tier == RiskHigh || tier == RiskCritical {
+			return ActionDeny
+		}
+		if harnessSupportsAsk(h) {
+			return ActionAsk
+		}
+	}
+	if harnessSupportsAsk(h) {
+		return ActionAsk
+	}
 	switch h.Name() {
 	case "claude", "gemini":
 		return ActionAsk
@@ -546,7 +559,7 @@ func cmdProfileUse(args []string) {
 		hp := cfg.harnessPolicy(harness)
 		hp.Profile = name
 		cfg.setHarnessPolicy(harness, hp)
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		fmt.Printf("%s profile → %s (per-harness override)\n", harness, name)
 		return
 	}
@@ -554,7 +567,7 @@ func cmdProfileUse(args []string) {
 		return
 	}
 	cfg.Policy.Profile = name
-	SaveConfig(cfg)
+	mustSaveConfig(cfg)
 	fmt.Printf("Global profile → %s\n", name)
 }
 
@@ -595,7 +608,7 @@ func cmdProfileReset(args []string) {
 		}
 		hp.Profile = ""
 		cfg.setHarnessPolicy(harness, hp)
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		fmt.Printf("Cleared profile override for %s. Falling back to global %s.\n", harness, effectiveGlobal(cfg))
 		return
 	}
@@ -607,7 +620,7 @@ func cmdProfileReset(args []string) {
 		return
 	}
 	cfg.Policy.Profile = ""
-	SaveConfig(cfg)
+	mustSaveConfig(cfg)
 	fmt.Printf("Global profile reset → %s\n", DefaultProfileName)
 }
 
@@ -662,7 +675,7 @@ func cmdProfileCreate(args []string) {
 		cfg.Policy.Profiles = map[string]map[string]string{}
 	}
 	cfg.Policy.Profiles[name] = tierMap
-	SaveConfig(cfg)
+	mustSaveConfig(cfg)
 
 	fmt.Printf("Created custom profile %q:\n", name)
 	for _, t := range allRiskTiers {
@@ -704,7 +717,7 @@ func cmdProfileDelete(args []string) {
 	if len(cfg.Policy.Profiles) == 0 {
 		cfg.Policy.Profiles = nil
 	}
-	SaveConfig(cfg)
+	mustSaveConfig(cfg)
 	fmt.Printf("Deleted custom profile %q.\n", name)
 }
 

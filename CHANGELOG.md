@@ -17,6 +17,16 @@ reader stays through 1.x and goes away in 2.0. Full table in
 [docs/upgrading.md](docs/upgrading.md).
 
 ### Added
+- Strict config validation, JSON Schema and ready-to-edit examples; configurable
+  failure actions, shared hook deadline and explicit provider protocols.
+- Project-scoped CLI approve/deny/reset, native skills for all five supported adapters,
+  learning opt-out/retention/caps/forget/prune and context-aware script caches.
+- `doctor` and `effective` diagnostics, including JSON output and optional model probes.
+- Antigravity CLI adapter. yolonot Gemini CLI support is retired; new installs
+  exclude it, while legacy diagnostics and uninstall remain available.
+- OpenCode V2 plugin lifecycle and native ask support; Codex PermissionRequest
+  integration and hook-trust diagnostics. Current version and verification
+  matrix: [docs/harnesses.md](docs/harnesses.md).
 - **Model catalog.** `models` in config.json: named entries (`url`,
   `model`, `env_key`, `timeout`), chat or typed by URL. `yolonot models
   [add [typed]|remove|test]`. The name is what banners and
@@ -107,6 +117,40 @@ reader stays through 1.x and goes away in 2.0. Full table in
   `returned_as` (declared, never written).
 
 ### Fixed
+- Documentation now distinguishes host credential environments, explicit human
+  answers, rule priority and configurable failure behavior; Claude installation
+  surfaces the Desktop model-key setup caveat.
+- Claude mod: preserve one-time/session grant scope across duplicate hooks,
+  close replay after tool completion, and bind native ELF/Mach-O executable
+  paths independently of model script attachment. Unanswered asks and failed
+  dialogs no longer fabricate human/session denials.
+- Report missing model credential variables before making a provider request;
+  distinguish provider HTTP 401/403 errors and avoid duplicate Explain prefixes.
+- Codex installation migrates deprecated `features.codex_hooks` to canonical
+  `features.hooks`, preserving TOML and avoiding repeated deprecation warnings.
+- Native one-time approvals no longer silently become yolonot session grants
+  or learned precedents; explicit session approval remains available.
+- Hook rules, sensitive patterns, model hints and cache context use payload cwd,
+  including hosts that launch global hooks outside the command's project.
+- Claude mod replay checks current rules and binds verdicts to the command,
+  cwd and exact inspected script snapshot. Rejections are enforced in the
+  core so pause and new rules apply consistently to wrapped retries.
+- Typed responses reject missing/null answers, wrong types, out-of-range
+  probabilities and non-success HTTP responses. Model names cannot shadow
+  exec judges or reserved log layers; empty exec entries are rejected.
+- Similarity, judge failover and escalation share a 55-second decision
+  deadline, including HTTP and subprocess calls. Exhaustion asks or denies
+  according to adapter capabilities without caching an approval.
+- Codex install preserves valid TOML without duplicate feature tables;
+  OpenCode honors successful empty hook output. Targeted install/uninstall
+  leaves other harnesses and the Claude mod alone.
+- Dry-run checks include project precedents. Legacy migration preserves
+  explicit escalation timeouts and distinct model credentials.
+- Settings scroll on small terminals, keep mouse targets aligned, show the
+  active escalation model and stage rule edits until Save. Failed config
+  writes roll rules back. Re-running setup keeps typed models ahead of chat
+  while preserving local judges and model restrictions.
+- `models list` and `judges list` work as read-only aliases on legacy config.
 - Concurrent hooks could glue two `decisions.jsonl` records onto one line
   (record + newline were two writes); one atomic append now. `yolonot log`
   shows multiline commands on one row (`⏎`) and honours `yolonot log <n>`.
@@ -149,7 +193,7 @@ reader stays through 1.x and goes away in 2.0. Full table in
   expands `\n` to real newlines so a one-line directive can carry a multi-line
   prompt. A cloned-repo override replaces the whole safety base (larger blast
   radius than a hint) — `deny-cmd` rules still fire first and a broken override
-  passes through to the host, never a silent allow. See docs/llm-customization.md.
+  passes through to the host, never a silent allow. See [docs/prompt.md](docs/prompt.md).
 - **`yolonot classifier verify`.** Proves a custom `system_prompt` still yields
   parseable verdicts: a static check that the JSON verdict contract survived the
   rewrite, then a live round-trip of real probes (`ls`, `rm -rf /`,
@@ -395,7 +439,7 @@ reader stays through 1.x and goes away in 2.0. Full table in
   layers (profile, RiskMap, harness) don't affect this metric, so it
   isolates prompt-quality signal. Cases without `expected_risk` are
   skipped with a count; brownfield suites are skipped entirely.
-- See [docs/llm-customization.md](docs/llm-customization.md) for the full
+- See [docs/prompt.md](docs/prompt.md) for the full
   schema, examples, and security notes.
 
 ### Changed

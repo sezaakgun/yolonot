@@ -48,7 +48,7 @@ type Harness interface {
 	Uninstall() error
 
 	// InstallSkill writes any harness-specific skill/doc bundle. Returns
-	// the path written, or empty if the harness has no skill concept.
+	// the path written, or empty if skill installation is unavailable.
 	InstallSkill() (string, error)
 
 	// UninstallSkill removes the skill bundle. Safe to call when absent.
@@ -71,7 +71,7 @@ type Harness interface {
 	// `yolonot install`. Each element becomes a bullet in the install
 	// summary. Empty slice when there's nothing to say — Claude is the
 	// canonical shape and has no surprises; adapters that diverge (Gemini
-	// needs --yolo, Codex/OpenCode can't emit "ask") declare them here.
+	// needs --yolo or hooks require trust review) declare them here.
 	PostInstallNotes() []string
 }
 
@@ -114,8 +114,24 @@ func Harnesses() []Harness {
 	return out
 }
 
+// supportedHarnesses excludes retired adapters from new installations.
+// Legacy adapters remain registered so existing hooks and config can be
+// inspected and safely uninstalled during migration.
+func supportedHarnesses() []Harness {
+	var out []Harness
+	for _, h := range Harnesses() {
+		if h.Name() != "gemini" {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 // GetHarness returns the adapter with the given name, or nil.
 func GetHarness(name string) Harness {
+	if name == "agy" {
+		name = "antigravity"
+	}
 	harnessMu.RLock()
 	defer harnessMu.RUnlock()
 	for _, h := range registeredHarnesses {

@@ -626,7 +626,7 @@ func runCase(c EvalCase, cfg LLMConfig, systemPrompt string, suiteType string, o
 			maxTokens = 256
 		} else {
 			userPrompt = buildGreenfieldPrompt(c, opts.NoThink)
-			if isDecisionURL(cfg.URL) {
+			if isDecisionConfig(cfg) {
 				userPrompt += opts.DecisionHints
 			}
 		}

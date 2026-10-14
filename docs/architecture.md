@@ -16,6 +16,7 @@ yolonot/
 │   │   ├── classifier.go       # risk tiers + risk map resolution
 │   │   ├── config_v1.go        # model catalog, judge list encoding, v0 → v1 fold
 │   │   ├── judge.go            # the judge chain: fast_allow, exec hooks, typed and chat models
+│   │   ├── budget.go           # shared hook deadline and bounded external judges
 │   │   ├── decision.go         # typed decision-model backend (System One / OpenAI Decisions / Workers AI)
 │   │   ├── escalation.go       # second-opinion model after the chain
 │   │   ├── profile.go          # risk profiles, per-harness pins, `profile` verb
@@ -26,6 +27,7 @@ yolonot/
 │   │   ├── tui_menu.go         # mouse-aware menus and option groups (bubbletea)
 │   │   ├── tui_config.go       # `yolonot config` rows and editors
 │   │   ├── tui_config_view.go  # the settings page model
+│   │   ├── tui_rules.go        # staged rule edits, conflict checks and save rollback
 │   │   ├── update.go           # GitHub release update checker + `upgrade` command
 │   │   ├── embed.go            # embedded SKILL.md + OpenCode plugin TS
 │   │   ├── eval.go             # LLM evaluation runner with timing
@@ -33,13 +35,17 @@ yolonot/
 │   │   ├── stats.go            # decision analytics
 │   │   ├── similarity.go       # session similarity pre-filtering
 │   │   ├── log.go              # decision logging (JSONL)
+│   │   ├── learn.go            # project human precedents supplied to model prompts
+│   │   ├── mod.go              # optional Claude mod lifecycle and bound verdict replay
+│   │   ├── executable_snapshot.go # local native executable identity for approval/replay
 │   │   ├── pause.go            # session pause/resume marker handling
 │   │   ├── harness.go          # Harness interface + registry + resolution
 │   │   ├── harness_claude.go   # Claude Code adapter
 │   │   ├── harness_codex.go    # Codex CLI adapter
 │   │   ├── harness_opencode.go # OpenCode plugin adapter
 │   │   ├── harness_opencode_plugin.ts  # OpenCode plugin shim (embedded)
-│   │   ├── harness_gemini.go   # Gemini CLI adapter
+│   │   ├── harness_antigravity.go # Antigravity CLI adapter
+│   │   ├── harness_gemini.go   # retired Gemini compatibility/cleanup
 │   │   ├── harness_cursor.go   # Cursor adapter
 │   │   └── skills/
 │   │       └── SKILL.md        # Claude Code skill (embedded in binary)
@@ -62,7 +68,7 @@ whose verdict is permitted (`may`) wins. Four kinds, all in `judge.go`:
 |------|-------|------|----------|
 | built-in parser | `fast_allow` | `internal/fastallow` bash AST walk, no network | allow |
 | exec hook | `exec:<path>` | the binary with Claude's PreToolUse JSON on stdin (`runPreCheck`, 3 s timeout) | allow |
-| typed decision model | a catalog name whose URL is a System One, OpenAI Decisions or Workers AI endpoint | one request with the risk-tier choice and nine yes/no conditions (`decision.go`) | allow / ask |
+| typed decision model | a catalog entry with a typed protocol (or legacy inferred URL) | one request with the risk-tier choice and nine yes/no conditions (`decision.go`) | allow / ask |
 | chat model | any other catalog name | the system prompt plus `Command: …` and attached scripts (`llm.go`) | allow / ask / deny |
 
 Rules and session memory run before the chain; escalation, the unresolved
@@ -78,11 +84,29 @@ All yolonot data lives at `~/.yolonot/`:
 | `config.json` | Model catalog, judge chain, escalation, prompt hints, policy (see [models.md](models.md)) |
 | `config.json.bak` | Previous config, written by `yolonot migrate` and by saves from `yolonot config` |
 | `rules` | Global rules (allow/deny/ask) |
-| `sessions/` | Per-session per-project approved/asked/denied lists, plus `<id>.paused` and `<id>.profile` pins |
-| `cache/` | Attached-script content hash (command + full-file sha256s) → cached model decisions |
+| `sessions/` | Per-session per-project approved/asked/denied lists, script/native executable hashes and allow-once markers; session-wide `<id>.paused` and `<id>.profile` pins |
+| `sessions/<id>.mod` | Claude mod verdicts bound to tool ID, command, cwd and snapshot, with explicit grant scope and completion state |
+| `mod/` | Optional Claude plugin manifest and TypeScript module |
+| `precedents.jsonl` | Human ask resolutions used as project-scoped model hints across sessions; allow-once answers are excluded |
+| `cache/` | Attached-script content hash (command + full-file sha256s) → cached model decisions plus a policy/prompt/model/learning context fingerprint |
 | `decisions.jsonl` | Decision log with timestamps and model timing, one record per line |
 | `suggest-cache.json` | `yolonot suggest` cache |
 | `migrate-declined` | Marker: the one-time migration offer was declined |
 | `update_check.json` | Cached update check (once per day) |
 
 Session files are keyed by a hash of the git root (or cwd), so approvals in one project don't bleed into another.
+
+## Configuration and operational controls
+
+`config_validate.go` owns strict decoding and semantic validation;
+`protocol.go` selects provider wire formats. `failure.go` and `budget.go`
+apply configurable failure actions and the shared deadline. `diagnostics.go`
+implements `doctor` and `effective` without exposing API keys.
+
+`session_commands.go` implements project-scoped approve/deny/reset, with
+script and supported native executable snapshots. Multiline commands use one JSON-encoded physical record
+in session files; old single-line records remain readable.
+`learning_controls.go` implements opt-out, retention, caps, pruning and
+forgetting. `cache_context.go` invalidates verdicts when their decision
+context changes. `harness_skill.go` installs managed native skills while
+preserving unrelated user files. See [configuration.md](configuration.md).

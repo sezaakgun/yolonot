@@ -113,7 +113,7 @@ func TestGeminiHarnessFormatHookResponseFlat(t *testing.T) {
 }
 
 func TestGeminiHarnessFormatHookResponseAskIsPreserved(t *testing.T) {
-	// Regression guard: unlike Codex (ask→deny) and OpenCode (ask→throw),
+	// Regression guard: unlike Codex and OpenCode (ask→host),
 	// Gemini has native ask support via scheduler.ts forcing PolicyDecision.
 	// ASK_USER when decision=="ask". Translating it would defeat the whole
 	// point of the Gemini adapter. Mirror of harness_codex_test.go's
@@ -314,14 +314,22 @@ func TestGeminiHarnessIsDetected(t *testing.T) {
 	}
 }
 
-func TestGeminiHarnessSkillNoOp(t *testing.T) {
+func TestGeminiHarnessSkillInstallUninstall(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	h := &GeminiHarness{}
 	path, err := h.InstallSkill()
-	if err != nil || path != "" {
-		t.Errorf("InstallSkill() = (%q, %v), want (\"\", nil)", path, err)
+	if err != nil || path == "" {
+		t.Fatalf("InstallSkill() = (%q, %v)", path, err)
+	}
+	data, err := os.ReadFile(filepath.Join(geminiSkillDir(), "SKILL.md"))
+	if err != nil || !strings.Contains(string(data), "name: yolonot") {
+		t.Fatalf("Gemini skill not written with valid metadata: %v", err)
 	}
 	if err := h.UninstallSkill(); err != nil {
 		t.Errorf("UninstallSkill() = %v, want nil", err)
+	}
+	if _, err := os.Stat(filepath.Join(geminiSkillDir(), "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatal("Gemini skill remains after uninstall")
 	}
 }
 

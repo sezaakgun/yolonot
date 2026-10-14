@@ -1,6 +1,7 @@
 package yolonot
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -129,7 +130,13 @@ func truncateStr(s string, n int) string {
 // run's script-cache write — otherwise the un-rescued ask freezes into the
 // cross-session cache and the one-shot rescue never re-fires.
 func maybeEscalate(h Harness, cfg Config, d *Decision, sysPrompt, userPrompt string, hookStart time.Time) (out escalationOutcome, cacheOK bool) {
+	return maybeEscalateContext(nil, h, cfg, d, sysPrompt, userPrompt, hookStart)
+}
+
+func maybeEscalateContext(parent context.Context, h Harness, cfg Config, d *Decision, sysPrompt, userPrompt string, hookStart time.Time) (out escalationOutcome, cacheOK bool) {
 	cacheOK = true
+	ctx, cancel := hookBudgetContext(parent, hookStart)
+	defer cancel()
 
 	esc := GetEscalationConfig()
 	switch reason := escalationGateReason(cfg, esc); reason {
@@ -148,7 +155,7 @@ func maybeEscalate(h Harness, cfg Config, d *Decision, sysPrompt, userPrompt str
 		}
 		return out, cacheOK
 	}
-	if time.Since(hookStart) > escalationHookBudget {
+	if ctx.Err() != nil || (!hookStart.IsZero() && time.Since(hookStart) > escalationHookBudget) {
 		out.Outcome = "skipped:budget"
 		// Transient, like an error: don't freeze the un-escalated verdict
 		// into the cross-session cache — a faster future run should get
@@ -158,6 +165,7 @@ func maybeEscalate(h Harness, cfg Config, d *Decision, sysPrompt, userPrompt str
 
 	out.Fired = true
 	out.Model = esc.Model
+	esc.Context = ctx
 	start := time.Now()
 	text, err := escalationCallLLM(esc, sysPrompt, userPrompt, 4096)
 	out.Ms = time.Since(start).Milliseconds()
@@ -294,7 +302,7 @@ func cmdEscalation(args []string) {
 			return
 		}
 		cfg.Escalation.Disabled = false
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		fmt.Printf("Escalation: ON — %s consulted before surfacing an ask.\n", GetEscalationConfig().Model)
 	case "off", "false", "0", "no", "n":
 		if cfg.Escalation == nil || cfg.Escalation.Model == "" {
@@ -306,7 +314,7 @@ func cmdEscalation(args []string) {
 		}
 		// Keep the model reference — re-enabling must not need a re-setup.
 		cfg.Escalation.Disabled = true
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		fmt.Println("Escalation: OFF — model reference kept; re-enable with: yolonot escalation on")
 	case "setup":
 		if !requireV1(&cfg) {
@@ -317,7 +325,7 @@ func cmdEscalation(args []string) {
 			return
 		}
 		setEscalationModel(&cfg, name)
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		m := cfg.Models[name]
 		fmt.Printf("\nEscalation model set: %s (%s via %s)\n", name, m.Model, m.URL)
 		testProviderConnection(m)

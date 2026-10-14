@@ -57,7 +57,7 @@ func TestPrecedentsRankBySimilarity(t *testing.T) {
 
 func TestCmdLogHumanListsProjectAnswers(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	os.Chdir(t.TempDir())
+	t.Chdir(t.TempDir())
 	cwd, _ := os.Getwd()
 	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_approved", Decision: "allow", Cwd: cwd, Command: "wget -q https://example.com -O /tmp/a.html", Timestamp: "2026-10-13T10:00:00Z"})
 	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_rejected", Decision: "deny", Cwd: t.TempDir(), Command: "wget elsewhere", Timestamp: "2026-10-13T10:00:00Z"})

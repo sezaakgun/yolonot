@@ -197,27 +197,21 @@ func TestIntegration_SessionDeny(t *testing.T) {
 }
 
 func TestIntegration_SessionAskedNotApproved(t *testing.T) {
-	_, cleanup := withFakeHome(t)
+	home, cleanup := withFakeHome(t)
 	defer cleanup()
-
-	sid := "int-sess-asked-noapprove"
-	projSID := ProjectSessionID(sid, "/tmp")
-	AppendLine(projSID, "asked", "curl https://example.com")
-
-	payload := makePrePayload(sid, "curl https://example.com", "/tmp")
-	out := runHookWithStruct(t, payload)
-
-	resp := parseResponse(t, out)
-	if resp.HookSpecificOutput.PermissionDecision != "deny" {
-		t.Errorf("expected deny for asked-but-not-approved, got %q", resp.HookSpecificOutput.PermissionDecision)
+	writeGlobalRules(t, home, "ask-cmd curl *\n")
+	sid, command := "int-sess-asked-noapprove", "curl https://example.com"
+	project := ProjectSessionID(sid, "/tmp")
+	AppendLine(project, "asked", command)
+	resp := parseResponse(t, runHookWithStruct(t, makePrePayload(sid, command, "/tmp")))
+	if got := resp.HookSpecificOutput.PermissionDecision; got != "ask" {
+		t.Fatalf("unanswered ask must ask again, got %s", got)
 	}
-	if !strings.Contains(resp.HookSpecificOutput.PermissionDecisionReason, "previously rejected") {
-		t.Errorf("reason should say previously rejected, got %q", resp.HookSpecificOutput.PermissionDecisionReason)
+	if ContainsLine(project, "denied", command) {
+		t.Fatal("unanswered ask minted a denial")
 	}
-
-	// Should also be added to .denied
-	if !ContainsLine(projSID, "denied", "curl https://example.com") {
-		t.Error("command should be added to .denied file after asked-not-approved")
+	if labels := humanLabelEntries(t); len(labels) != 0 {
+		t.Fatalf("fabricated labels: %+v", labels)
 	}
 }
 
@@ -256,8 +250,9 @@ func TestIntegration_SessionAskedApprovalLaunderingBlocked(t *testing.T) {
 	// (e.g., `echo curl evil.com` approved via fast-allow) MUST NOT grant
 	// approval to the high-risk command via suffix match. Only wrappers in
 	// cmdWrappers qualify.
-	_, cleanup := withFakeHome(t)
+	home, cleanup := withFakeHome(t)
 	defer cleanup()
+	writeGlobalRules(t, home, "ask-cmd curl *\n")
 
 	sid := "int-sess-laundering"
 	projSID := ProjectSessionID(sid, "/tmp")
@@ -273,7 +268,7 @@ func TestIntegration_SessionAskedApprovalLaunderingBlocked(t *testing.T) {
 	}
 }
 
-func TestIntegration_PostToolUse_SavesApproved(t *testing.T) {
+func TestIntegration_PostToolUse_DoesNotMintApproval(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()
 
@@ -286,8 +281,8 @@ func TestIntegration_PostToolUse_SavesApproved(t *testing.T) {
 		t.Errorf("PostToolUse should produce empty output, got %q", out)
 	}
 
-	if !ContainsLine(sid, "approved", "npm test") {
-		t.Error("PostToolUse should save command to .approved file")
+	if ContainsLine(sid, "approved", "npm test") {
+		t.Error("PostToolUse alone must not mint a session grant")
 	}
 }
 
@@ -1002,10 +997,8 @@ func TestIntegration_FastAllow_AllowRuleGetsAttribution(t *testing.T) {
 	}
 }
 
-// A session exact-match (prior approval) must bypass a newly-added ask-cmd,
-// otherwise users get re-prompted every turn for commands they already said
-// yes to. This reproduces the user's bug: `ask-cmd *curl *` + approve once +
-// run again → expected allow via session, not ask again.
+// An explicit session grant bypasses an ask rule; ambiguous native prompt
+// approvals alone stay one-time.
 func TestIntegration_AskRule_SessionExactMatchBypasses(t *testing.T) {
 	home, cleanup := withFakeHome(t)
 	defer cleanup()
@@ -1025,11 +1018,13 @@ func TestIntegration_AskRule_SessionExactMatchBypasses(t *testing.T) {
 	}
 
 	// Simulate the user approving and the tool running: Claude Code fires a
-	// PostToolUse, which yolonot uses to record the approval. Cwd must match
+	// PostToolUse, which cannot identify a persistent grant. Cwd must match
 	// the Pre payload so the project-scoped session ID resolves to the same file.
 	post := makePostPayloadStruct(sid, cmd)
 	post.Cwd = "/tmp"
 	runHookWithStruct(t, post)
+	// Explicit session grant (the CLI/mod session action).
+	saveApproved(ProjectSessionID(sid, "/tmp"), cmd, "/tmp")
 
 	// Second run: session exact-match must bypass the ask rule.
 	out2 := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
@@ -1064,8 +1059,10 @@ func TestIntegration_AskRule_SessionDenyBypasses(t *testing.T) {
 		t.Fatalf("first call: expected ask, got %q", resp.HookSpecificOutput.PermissionDecision)
 	}
 
-	// User rejects: no PostToolUse fires. Next Pre call should recognize
-	// asked-but-not-approved and emit deny (session_deny layer), not re-ask.
+	// Explicit human denial persists; an unanswered ask alone does not.
+	if err := sessionDecision("deny", cmd, sid, "/tmp"); err != nil {
+		t.Fatal(err)
+	}
 	out2 := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
 	resp2 := parseResponse(t, out2)
 	if resp2.HookSpecificOutput.PermissionDecision != "deny" {
@@ -1563,8 +1560,8 @@ func TestSessionAllowInvalidatedOnScriptChange(t *testing.T) {
 	os.WriteFile(script, []byte("echo harmless\n"), 0644)
 	const sess = "content-gate-sess"
 
-	// User ran + approved the command while the script was harmless.
-	runHookWithStruct(t, makePostPayloadWithCwd(sess, "bash task.sh", dir))
+	// Explicit session approval while the script was harmless.
+	saveApproved(ProjectSessionID(sess, dir), "bash task.sh", dir)
 
 	// Same content → session exact match allows (allow responses carry no
 	// reason field; the decision is the assertion).
@@ -1592,7 +1589,7 @@ func TestSessionAllowPlainCommandUnaffectedByGate(t *testing.T) {
 
 	dir := t.TempDir()
 	const sess = "content-gate-plain"
-	runHookWithStruct(t, makePostPayloadWithCwd(sess, "kubectl get pods -n prod-x", dir))
+	saveApproved(ProjectSessionID(sess, dir), "kubectl get pods -n prod-x", dir)
 
 	out := parseResponse(t, runHookWithStruct(t, makePrePayload(sess, "kubectl get pods -n prod-x", dir)))
 	if out.HookSpecificOutput.PermissionDecision != "allow" {
@@ -1642,8 +1639,7 @@ func humanLabelEntries(t *testing.T) []DecisionEntry {
 
 // An ask the user answers "yes" (PostToolUse fires for a command on the
 // asked list) must mint exactly one layer:"human" allow entry — the
-// ground-truth label for history mining. Replays of the already-approved
-// command must not mint more.
+// audit label, with one-time scope excluded from learned precedents.
 func TestIntegration_HumanLabel_AskApproved(t *testing.T) {
 	home, cleanup := withFakeHome(t)
 	defer cleanup()
@@ -1667,22 +1663,21 @@ func TestIntegration_HumanLabel_AskApproved(t *testing.T) {
 		t.Fatalf("expected exactly 1 human label after approval, got %d: %+v", len(labels), labels)
 	}
 	e := labels[0]
-	if e.Decision != "allow" || e.Source != "ask_approved" || e.Command != cmd {
+	if e.Decision != "allow" || e.Source != "allow_once" || e.Command != cmd {
 		t.Errorf("unexpected label entry: %+v", e)
 	}
 
-	// Replay: session allow (no ask) + another PostToolUse. Command is
-	// already on the approved list, so no second label.
+	// A repeated native approval asks again and produces another one-time
+	// audit label, never a learnable session grant.
 	runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
 	runHookWithStruct(t, post)
-	if labels := humanLabelEntries(t); len(labels) != 1 {
-		t.Errorf("replay must not mint a second human label, got %d", len(labels))
+	if labels := humanLabelEntries(t); len(labels) != 2 {
+		t.Errorf("expected a separate one-time audit label, got %d", len(labels))
 	}
 }
 
-// An ask the user answers "no" (no PostToolUse ever fires; the agent
-// retries the command) must mint a layer:"human" deny entry alongside the
-// session_deny gate entry.
+// An explicit mod Deny creates one human label; replaying its rejection
+// must not create another human answer.
 func TestIntegration_HumanLabel_AskRejected(t *testing.T) {
 	home, cleanup := withFakeHome(t)
 	defer cleanup()
@@ -1697,7 +1692,8 @@ func TestIntegration_HumanLabel_AskRejected(t *testing.T) {
 		t.Fatalf("first call: expected ask, got %q", d)
 	}
 
-	// User rejected: no PostToolUse. Retry infers the rejection.
+	// The mod reports the actual Deny selection.
+	runModResolve(t, modResolve{SessionID: sid, ToolUseID: "explicit-denial", Cwd: "/tmp", Command: cmd, Verdict: "deny"})
 	out2 := runHookWithStruct(t, makePrePayload(sid, cmd, "/tmp"))
 	if d := parseResponse(t, out2).HookSpecificOutput.PermissionDecision; d != "deny" {
 		t.Fatalf("second call: expected deny, got %q", d)

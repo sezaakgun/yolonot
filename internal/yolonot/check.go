@@ -2,6 +2,7 @@ package yolonot
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 // cmdCheck simulates the hook pipeline for a command and prints
 // human-readable output showing what each layer would decide.
 func cmdCheck(command string) {
+	defer prepareHarnessCapabilities(ActiveHarness())()
 	fmt.Printf("Command: %s\n\n", command)
 
 	rules := LoadRules()
@@ -107,7 +109,8 @@ func cmdCheck(command string) {
 	// exec judges are never invoked here (they may have side effects).
 	specs := checkCfg.JudgeSpecs()
 	fmt.Printf("  [%d] Judges:\n", step)
-	in := &JudgeInput{Command: command, Rules: rules, Config: checkCfg, Harness: ActiveHarness(), HookStart: time.Now(), DryRun: true}
+	cwd, _ := os.Getwd()
+	in := &JudgeInput{Command: command, Cwd: cwd, Rules: rules, Config: checkCfg, Harness: ActiveHarness(), HookStart: time.Now(), DryRun: true}
 	var adopted *Verdict
 	var lastErr *judgeError
 	for _, spec := range specs {
@@ -168,12 +171,15 @@ func cmdCheck(command string) {
 		case lastErr == nil:
 			fmt.Printf("  → Result: PASS-THROUGH (no judge decided)\n")
 		case lastErr.Kind == judgeErrOversize:
-			act := abstainAction(ActiveHarness())
+			act := failureAction(checkCfg, ActiveHarness(), judgeErrOversize)
 			fmt.Printf("  → Result: %s (layer: oversize, %s, profile abstain)\n", strings.ToUpper(act), lastErr.Msg)
+		case lastErr.Kind == judgeErrBudget:
+			act := failureAction(checkCfg, ActiveHarness(), judgeErrBudget)
+			fmt.Printf("  → Result: %s (layer: timeout, %s, profile abstain)\n", strings.ToUpper(act), lastErr.Msg)
 		case lastErr.Kind == judgeErrParse:
-			fmt.Printf("  → Result: PASS-THROUGH (parse error)\n")
+			fmt.Printf("  → Result: %s (parse error, failure policy)\n", failureActionLabel(failureAction(checkCfg, ActiveHarness(), judgeErrParse)))
 		default:
-			fmt.Printf("  → Result: PASS-THROUGH (LLM unavailable: %s)\n", lastErr.Msg)
+			fmt.Printf("  → Result: %s (LLM unavailable: %s)\n", failureActionLabel(failureAction(checkCfg, ActiveHarness(), judgeErrUnavailable)), lastErr.Msg)
 		}
 		return
 	}

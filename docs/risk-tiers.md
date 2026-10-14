@@ -4,29 +4,32 @@ Every LLM decision carries a risk tier — `safe`, `low`, `moderate`, `high`, `c
 
 ## Defaults
 
-| Tier | Claude | Codex / OpenCode | Gemini |
-|---|---|---|---|
-| safe / low | allow | allow | allow |
-| moderate | ask | passthrough | ask |
-| high | ask | deny | ask |
-| critical | ask | deny | ask |
+| Tier | Claude / Antigravity | Codex / Cursor default | OpenCode V2 | OpenCode V1 |
+|---|---|---|---|---|
+| safe / low | allow | allow | allow | allow |
+| moderate | ask | passthrough | ask | allow |
+| high | ask | deny | deny | deny |
+| critical | ask | deny | deny | deny |
 
 - `passthrough` means yolonot emits no decision and lets the host's own permission engine handle the command.
-- On ask-capable harnesses (Claude, Gemini), the LLM layer never denies by default — `deny` stays rule-origin only.
-- Codex / OpenCode have no `ask` primitive in their hook APIs, so `deny` is the only way to block there. See [harnesses.md](harnesses.md) for the upstream limitations.
+- On ask-capable harnesses (Claude, Antigravity), the LLM layer never denies by default — `deny` stays rule-origin only.
+- OpenCode V2 supports native asks. Cursor native ask is opt-in; otherwise
+  it defers alongside Codex. Native ask support does not relax their existing
+  high/critical deny floor. See [harnesses.md](harnesses.md).
 
 ## Profiles (recommended starting point)
 
 Most users should pick a [risk profile](risk-profiles.md) instead of editing tiers cell-by-cell:
 
 ```bash
-yolonot profile use fast        # allow everything reversible; deny prod-breaking only
-yolonot profile use balanced    # default; ask on moderate+
+yolonot profile use fast        # allow cells through moderate; deny high/critical
+yolonot profile use balanced    # ask on moderate+, translated per harness
 yolonot profile use strict      # ask earlier, hard-deny on high+
 yolonot profile use paranoid    # ask on safe; deny moderate+
 ```
 
 Profiles set the baseline; per-cell overrides below still win.
+An allow cell preserves a model's ask; it does not automatically approve it.
 
 ## Overrides
 

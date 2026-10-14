@@ -420,10 +420,42 @@ func (d *Decision) ShortReason() string {
 
 // LLMConfig holds provider connection info.
 type LLMConfig struct {
-	URL     string
-	Model   string
-	APIKey  string
-	Timeout int // seconds, 0 = use default
+	Protocol  string
+	URL       string
+	Model     string
+	APIKey    string
+	APIKeyEnv string          // configured credential source; never contains the value
+	ModelName string          // catalog name for actionable errors
+	Timeout   int             // seconds, 0 = use default
+	Context   context.Context // optional caller deadline shared across hook stages
+}
+
+// credentialError only requires authentication when the model declares an
+// environment source. Anonymous local endpoints remain supported.
+func (cfg LLMConfig) credentialError() error {
+	if cfg.APIKeyEnv != "" && strings.TrimSpace(cfg.APIKey) == "" {
+		name := cfg.ModelName
+		if name == "" {
+			name = cfg.Model
+		}
+		return fmt.Errorf("model %q: missing API key (%s is unavailable in this process); desktop apps and hooks may not load .zshrc; provide the variable to the host process and restart it", name, cfg.APIKeyEnv)
+	}
+	return nil
+}
+
+func (cfg LLMConfig) authenticationError(status int) error {
+	name := cfg.ModelName
+	if name == "" {
+		name = cfg.Model
+	}
+	return fmt.Errorf("model %q: authentication failed (HTTP %d); check the supplied API key and provider permissions", name, status)
+}
+
+func (cfg LLMConfig) requestContext() context.Context {
+	if cfg.Context != nil {
+		return cfg.Context
+	}
+	return context.Background()
 }
 
 // resolveTimeoutSeconds returns cfg.Timeout, or def when unset.
@@ -490,10 +522,22 @@ func needsNewTokenParam(model string) bool {
 // CallLLM sends a chat completion request and returns the raw response text.
 // Routes to claude CLI when URL is "claude-cli".
 func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (string, error) {
-	if cfg.URL == "claude-cli" {
+	if cfg.Protocol != "" && !validProtocol(cfg.Protocol) {
+		return "", fmt.Errorf("unknown model protocol %q", cfg.Protocol)
+	}
+	if cfg.URL == "claude-cli" && llmProtocol(cfg) != "claude-cli" {
+		return "", fmt.Errorf("claude-cli URL requires claude-cli protocol")
+	}
+	if llmProtocol(cfg) == "claude-cli" {
+		if cfg.URL != "claude-cli" {
+			return "", fmt.Errorf("claude-cli protocol requires claude-cli URL")
+		}
 		return callClaudeCLI(cfg, systemPrompt, userPrompt)
 	}
-	if isDecisionURL(cfg.URL) {
+	if err := cfg.credentialError(); err != nil {
+		return "", err
+	}
+	if isDecisionConfig(cfg) {
 		return callDecision(cfg, userPrompt)
 	}
 
@@ -505,7 +549,7 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 	}
 
 	// Build request body
-	isAnthropic := strings.Contains(cfg.URL, "anthropic")
+	isAnthropic := cfg.Protocol == "anthropic" || (cfg.Protocol == "" && strings.Contains(cfg.URL, "anthropic"))
 
 	var body map[string]interface{}
 	if isAnthropic {
@@ -536,7 +580,7 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 	if err := validateLLMURL(cfg.URL); err != nil {
 		return "", err
 	}
-	req, err := http.NewRequest("POST", cfg.URL, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(cfg.requestContext(), "POST", cfg.URL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", err
 	}
@@ -564,6 +608,12 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return "", cfg.authenticationError(resp.StatusCode)
+		}
+		return "", fmt.Errorf("API error: HTTP %d", resp.StatusCode)
 	}
 
 	// Extract text content from response
@@ -617,7 +667,7 @@ func callClaudeCLI(cfg LLMConfig, systemPrompt, userPrompt string) (string, erro
 	// own ~60s kill, which fails toward host permissions instead of a
 	// verdict. Default is 30s — the CLI is much slower than raw HTTP.
 	timeoutSec := resolveTimeoutSeconds(cfg, 30)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	ctx, cancel := context.WithTimeout(cfg.requestContext(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
@@ -631,7 +681,10 @@ func callClaudeCLI(cfg LLMConfig, systemPrompt, userPrompt string) (string, erro
 	err := cmd.Run()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("claude -p: timeout after %ds", timeoutSec)
+			return "", fmt.Errorf("claude -p: timeout: %w", ctx.Err())
+		}
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("claude -p: %w", ctx.Err())
 		}
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {

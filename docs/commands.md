@@ -6,17 +6,24 @@
 yolonot              Status overview + session summary + update check (opens the settings screen on a terminal)
 yolonot setup        First-run wizard (install + rules + models + chain)
 yolonot config       Settings screen: judges, models, policy (profiles, harness overrides, rules), prompt
-yolonot install      Install hooks only (see --harness flags; --mod adds the Claude Code mod)
-yolonot explain <cmd> One chat-model paragraph on why a command was flagged (stdin JSON {command, reason} also works)
+yolonot install      Install hooks + native skill (--skill-only skips hooks; --mod adds the Claude mod)
+yolonot explain <cmd> Up to three lines from the first chat judge (stdin JSON {command, reason} also works)
 yolonot models       Model catalog: list | add [typed] | remove <name> | test <name>
 yolonot judges       Judge chain: list | add <entry> | remove <n|entry> | move <n|entry> up|down
                      (entry = fast_allow, exec:<path to hook>, or a model name)
-yolonot rules        Show active rules + sensitive patterns
+yolonot rules        Show active rules + sensitive patterns (--trace includes sources)
 yolonot status       Show session state (approved/asked/denied)
 yolonot log [n]      Show the last n decisions with model timing (default 20; `-n <n>` also works; `--human` lists your answers to asks in this project)
 yolonot suggest      Analyze history, suggest permanent rules
 yolonot stats        Show analytics from decision history
-yolonot check <cmd>  Dry-run: what would the pipeline decide?
+yolonot check <cmd>  Preview rules/judges without command execution; may call models
+yolonot config validate [file] Validate config without rewriting it
+yolonot doctor       Check config, hook registration, host version and model/exec readiness
+yolonot effective    Show consolidated resolved policy (--harness <name>, --json)
+yolonot approve <cmd> Approve an exact command for this session/project (--session-id <id>)
+yolonot deny <cmd>   Reject an exact command for this session/project
+yolonot reset        Clear this project's session decisions; preserve logs and learning
+yolonot learning     status|list|on|off|retention|limit|forget|clear|prune
 yolonot risk         Show/set per-harness risk tier → action policy
 yolonot profile      Pick a named risk policy (fast/balanced/strict/paranoid + custom)
 yolonot prompt       Inspect/validate the chat-model prompt customization (defaults|config|review|verify)
@@ -25,7 +32,7 @@ yolonot quiet        Silence banners for allow decisions (only show ask/deny)
 yolonot migrate      Rewrite a 0.x config.json in the 1.x format (--dry-run | --undo)
 yolonot pause        Disable yolonot for current session (total bypass)
 yolonot resume       Re-enable yolonot for current session
-yolonot uninstall    Remove hooks from the active harness(es)
+yolonot uninstall    Remove hooks + managed native skill; preserve yolonot data
 yolonot upgrade      Update to latest release
 yolonot version      Show version
 ```
@@ -42,12 +49,21 @@ Add `-v` (or `--verbose`) to any command — before or after the subcommand — 
 
 ```bash
 yolonot install --harness codex    # one harness
-yolonot install --all              # every registered adapter
+yolonot install --all              # every supported adapter
 ```
 
-When neither flag is passed, yolonot operates on **detected** harnesses (hosts you actually have installed). See [harnesses.md](harnesses.md).
+Without a flag, install/setup target **detected** harnesses and uninstall
+targets **installed** adapters. A targeted operation changes only that
+harness, including its optional mod. See [harnesses.md](harnesses.md).
 
 `yolonot install --mod` also writes the Claude Code mod (a function-hooks module) to `~/.yolonot/mod/` and names it in `~/.claude/settings.json` under `env.CLAUDE_CODE_PLUGIN_DIRS`; `yolonot uninstall` removes both. `yolonot mod install|uninstall` does only that part. See [harnesses.md](harnesses.md#claude-code-mod).
+
+### Saving settings
+
+`yolonot config` stages changes until Save, including global and project
+rule-file edits made in `$EDITOR`. Discard leaves the active files unchanged.
+Save creates a config backup and reports write errors; a failed config save
+rolls back rule-file writes and keeps the draft available for retry.
 
 ### Quiet mode
 
@@ -60,6 +76,24 @@ yolonot quiet off      # restore default
 ```
 
 Quiet mode only affects the user-facing `systemMessage`. The underlying `permissionDecision` + `permissionDecisionReason` still flow to the host CLI, and the decision log (`yolonot log`) is unchanged.
+
+### Session identity and pause
+
+Use `--session-id <id>` for the intended conversation. `--current` means the
+latest recorded session, which may be a different chat. `status` also falls
+back to the latest session when its host session variable is absent.
+
+Pause is a session-wide bypass, including explicit deny rules, and requires
+an explicit opt-in:
+
+```bash
+yolonot pause --session-id <id> --confirm-bypass
+yolonot resume --session-id <id>
+```
+
+For one command, prefer project-scoped `approve` rather than pausing.
+`check` excludes session memory/cache and skips exec judges; it cannot verify
+a native approval dialog. See [configuration.md](configuration.md).
 
 ### Prompt customization
 
@@ -77,14 +111,22 @@ Customize via `~/.yolonot/config.json` (`prompt.{context,allow_hints,ask_hints,s
 
 ### Learning from your answers
 
-Every ask you answer (allow this session, deny) is a **precedent**, kept in `~/.yolonot/precedents.jsonl` (built once from the decision log if missing). Two things use them:
+Explicit remembered answers (mod Allow this session/Deny or CLI approve/deny)
+can become **precedents** when learning is enabled, subject to retention and
+caps. They are stored in `~/.yolonot/precedents.jsonl`, initially reconstructed
+from eligible decision logs if missing. Native one-time approvals, unanswered
+asks and answers recorded with learning disabled do not become precedents.
+Two things use this history:
 
-- **Every judge call.** Before a chat or typed model sees a command, the closest precedents from the same repository (git root) are added to its hints: an allowed precedent as an "Allow when" line, a rejected one as an "Ask when" line. No configuration; "allow once" answers are never used.
+- **Model judge calls when learning is enabled.** Nearby precedents from the same project are supplied as historical hints. They do not grant current authorization. `learning off`, retention/caps, forget and clear control this behavior; allow-once answers are excluded.
 - **`/yolonot learn`.** The harness's own model reads `yolonot log --human` (this repository's answers, latest per command) and proposes a handful of `allow-hint` / `ask-hint` sentences with their evidence; the ones you accept go into the project `.yolonot`. Sentences, not globs: they reach chat and typed models alike and generalise to variants an `allow-cmd` pattern would miss. yolonot itself makes no model call for this; the skill does the distilling, so the quality is that of the model you are already talking to.
 
 ## Skill (`/yolonot`)
 
-After install, `/yolonot` is available as a Claude Code skill:
+Every supported host receives the same management workflows through its native
+skill. Claude uses `/yolonot`, Codex Desktop uses `@yolonot` and Codex CLI/IDE
+uses `$yolonot`; other hosts expose their own skill picker. The menu below uses
+Claude syntax; the actions and shared CLI are portable:
 
 ```
 /yolonot             Session summary + command menu
@@ -109,4 +151,7 @@ After install, `/yolonot` is available as a Claude Code skill:
 /yolonot resume      Re-enable yolonot for current session
 ```
 
-`approve`, `deny` and `reset` are skill-only: there is no `yolonot approve` verb. The skill edits the session files under `~/.yolonot/sessions/` after you confirm. Mutating verbs are printed for you to run, not executed by the assistant.
+`approve`, `deny` and `reset` are native CLI verbs on all adapters. They
+preserve project scope and script snapshots; use them instead of manually
+editing session files. Skills require explicit user authorization for
+mutations. See [configuration.md](configuration.md) for flags and examples.

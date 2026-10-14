@@ -2,6 +2,7 @@ package yolonot
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,15 +24,11 @@ func init() { RegisterHarness(&CursorHarness{}) }
 //     sets ToolName=Bash so the rest of yolonot sees Claude-shaped values.
 //   - Matcher is a regex against the command text (not tool name). Omitted
 //     matcher = match all.
-//   - Stdout response is FLAT: {"permission":"allow|ask|deny","user_message":"...","agent_message":"..."}.
-//     Schema accepts "ask" but Cursor does NOT enforce it — no TUI prompt
-//     fires, and the hook is re-invoked before the user can respond, which
-//     trips yolonot's asked-not-approved → session_deny heuristic. Verified
-//     against Cursor docs ("ask is accepted by the schema but not enforced")
-//     and live testing (2026-04-21). Treat Cursor as deny-only, same class
-//     as Codex / OpenCode — FormatHookResponse collapses ask to empty
-//     (passthrough) so Cursor's own permission UI handles moderate-risk
-//     commands.
+//   - Stdout response is FLAT: {"permission":"allow|ask|deny",
+//     "user_message":"...","agent_message":"..."}. Current native ask
+//     was verified on IDE 3.24.18. Older builds accepted ask without a
+//     prompt, so deployments opt in with YOLONOT_CURSOR_NATIVE_ASK=1;
+//     compatibility mode keeps host-deferred asks.
 //   - Timeout is seconds (same as Claude, different from Gemini's ms).
 //   - Session id arrives as `conversation_id` on stdin. No env export;
 //     SessionIDFromEnv honours YOLONOT_CURSOR_SESSION_ID for user overrides.
@@ -39,12 +36,22 @@ type CursorHarness struct{}
 
 func (c *CursorHarness) Name() string { return "cursor" }
 
-// RiskMap matches the Codex pattern (see memory: cursor_ask_not_enforced).
-// Cursor's schema accepts "ask" but does not surface a TUI prompt — the
-// hook re-fires before the user can respond and session_deny pins the
-// command as rejected. Moderate risk is therefore passthrough (Cursor's own
-// permission UI takes over); high/critical escalate to deny.
+// Current Cursor documentation specifies native ask handling. Keep the
+// historical adapter behavior unless a deployment opts in after checking
+// its installed IDE/CLI: older builds accepted ask without prompting.
+func (c *CursorHarness) SupportsAsk() bool {
+	return os.Getenv("YOLONOT_CURSOR_NATIVE_ASK") == "1"
+}
+
+// RiskMap keeps moderate risk host-deferred unless native ask is explicitly
+// enabled. High/critical retain their deny defaults in either mode.
 func (c *CursorHarness) RiskMap() map[string]string {
+	if c.SupportsAsk() {
+		return map[string]string{
+			RiskSafe: ActionAllow, RiskLow: ActionAllow, RiskModerate: ActionAsk,
+			RiskHigh: ActionDeny, RiskCritical: ActionDeny,
+		}
+	}
 	return map[string]string{
 		RiskSafe:     ActionAllow,
 		RiskLow:      ActionAllow,
@@ -70,10 +77,12 @@ func (c *CursorHarness) SessionIDFromEnv() string {
 // cursorPayload is the stdin shape Cursor emits for beforeShellExecution.
 // Only the fields yolonot needs are modelled; Unmarshal tolerates extras.
 type cursorPayload struct {
-	ConversationID string `json:"conversation_id"`
-	HookEventName  string `json:"hook_event_name"`
-	Cwd            string `json:"cwd"`
-	Command        string `json:"command"`
+	ConversationID string   `json:"conversation_id"`
+	ToolUseID      string   `json:"tool_use_id"`
+	HookEventName  string   `json:"hook_event_name"`
+	Cwd            string   `json:"cwd"`
+	Command        string   `json:"command"`
+	WorkspaceRoots []string `json:"workspace_roots"`
 }
 
 // ParseHookInput decodes Cursor's stdin JSON into the canonical HookPayload
@@ -94,11 +103,21 @@ func (c *CursorHarness) ParseHookInput(input []byte) (HookPayload, error) {
 	case "afterShellExecution":
 		event = "PostToolUse"
 	}
+	// Current IDE/CLI shell hooks can omit cwd (Post) or send it empty
+	// (Pre). Their primary workspace is the execution default, not the
+	// hook subprocess's cwd, which wrappers may deliberately change.
+	cwd := raw.Cwd
+	if cwd == "" && len(raw.WorkspaceRoots) > 0 {
+		cwd = raw.WorkspaceRoots[0]
+	} else if cwd != "" && !filepath.IsAbs(cwd) && len(raw.WorkspaceRoots) > 0 {
+		cwd = filepath.Join(raw.WorkspaceRoots[0], cwd)
+	}
 	return HookPayload{
 		HookEventName: event,
 		ToolName:      "Bash",
 		SessionID:     raw.ConversationID,
-		Cwd:           raw.Cwd,
+		ToolUseID:     raw.ToolUseID,
+		Cwd:           cwd,
 		ToolInput:     map[string]interface{}{"command": raw.Command},
 	}, nil
 }
@@ -120,25 +139,19 @@ type cursorResponse struct {
 //     memory invisible to the user. Verified live (2026-04-21).
 //   - deny  → {"permission":"deny",…} flat envelope with user_message +
 //     agent_message.
-//   - ask   → empty (passthrough). Cursor's schema accepts "ask" but never
-//     surfaces a TUI prompt, and our asked-list bookkeeping pins the next
-//     invocation as session_deny. Letting Cursor's own permission UI handle
-//     moderate-risk commands is safer than silently denying. The risk map
-//     sets moderate → passthrough, so ask should not reach the wire in
-//     practice; if a rule forces ask, we still defer to Cursor rather than
-//     rewriting to deny.
-//   - ""    → empty (cmdHook silent mode, no decision to convey).
-//
-// This diverges from the earlier Cursor implementation, which assumed full
-// 3-state parity based on the published schema. Live testing proved Cursor
-// does not enforce ask AND does not honor "implicit allow"; we now match
-// Codex/OpenCode semantics for ask/deny while still emitting explicit allow
-// so session-approval memory actually bypasses Cursor's UI.
+//   - ask   → explicit ask only with YOLONOT_CURSOR_NATIVE_ASK=1. Verified
+//     IDE 3.24.18 and CLI 2026.10.14 prompt interactively; CLI --force
+//     automatically permits asks. Compatibility mode defers to host policy.
+//   - ""    → empty (no yolonot decision; retain host permissions).
 func (c *CursorHarness) FormatHookResponse(r HookResponse) string {
 	decision := r.HookSpecificOutput.PermissionDecision
 	switch decision {
-	case "ask", "":
+	case "":
 		return ""
+	case "ask":
+		if !c.SupportsAsk() {
+			return ""
+		}
 	}
 	reason := r.HookSpecificOutput.PermissionDecisionReason
 	if r.SystemMessage != "" && reason == "" {
@@ -170,12 +183,11 @@ func (c *CursorHarness) IsInstalled() bool {
 }
 
 func (c *CursorHarness) Install(binaryPath string) error {
-	if c.IsInstalled() {
-		Verbosef("existing install detected — removing old hooks from %s", c.SettingsPath())
-		c.removeHooks()
+	s, err := c.readHooks()
+	if err != nil {
+		return err
 	}
-
-	s := c.loadHooks()
+	stripCursorHooks(s)
 	if _, ok := s["version"]; !ok {
 		s["version"] = 1.0
 	}
@@ -211,24 +223,35 @@ func (c *CursorHarness) appendHookEntry(hooks map[string]interface{}, event stri
 
 func (c *CursorHarness) Uninstall() error {
 	Verbosef("stripping yolonot hooks from %s", c.SettingsPath())
-	c.removeHooks()
-	return nil
+	return c.removeHooks()
 }
 
-// InstallSkill / UninstallSkill are no-ops — Cursor has no skill concept.
-func (c *CursorHarness) InstallSkill() (string, error) { return "", nil }
-func (c *CursorHarness) UninstallSkill() error         { return nil }
+func cursorSkillDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cursor", "skills", "yolonot")
+}
+
+func (c *CursorHarness) InstallSkill() (string, error) {
+	return installHarnessSkill(c.Name(), cursorSkillDir())
+}
+
+func (c *CursorHarness) UninstallSkill() error {
+	return uninstallHarnessSkill(cursorSkillDir())
+}
 
 // PostInstallNotes surfaces the cursor-agent CLI compatibility, reload
 // requirement, and the ask-not-enforced upstream limitation. Cursor's IDE
 // reads hooks.json on agent start, so a running Cursor window needs a fresh
 // chat/session for yolonot to take effect.
 func (c *CursorHarness) PostInstallNotes() []string {
-	return []string{
+	notes := []string{
 		"Restart Cursor (or start a new chat) so the agent re-reads ~/.cursor/hooks.json.",
 		"The same hooks.json governs the `cursor-agent` CLI — no extra install step needed.",
-		"Cursor does not enforce hook 'ask' — yolonot 'ask' rules fall through to Cursor's own permission UI; use 'deny' rules for hard blocks.",
 	}
+	if c.SupportsAsk() {
+		return append(notes, "Native ask output is enabled via YOLONOT_CURSOR_NATIVE_ASK=1; verify a real approval prompt on your installed Cursor release.")
+	}
+	return append(notes, "Native ask output is disabled for compatibility with older Cursor releases. Verify prompting, then opt in with YOLONOT_CURSOR_NATIVE_ASK=1; deny rules remain hard blocks.")
 }
 
 // IsDetected returns true if ~/.cursor exists. Follows the Codex/Gemini
@@ -243,25 +266,63 @@ func (c *CursorHarness) IsDetected() bool {
 }
 
 func (c *CursorHarness) loadHooks() map[string]interface{} {
-	data, err := os.ReadFile(c.SettingsPath())
-	if err != nil {
-		return map[string]interface{}{}
-	}
-	var s map[string]interface{}
-	json.Unmarshal(data, &s)
+	s, _ := c.readHooks()
 	if s == nil {
-		s = map[string]interface{}{}
+		return map[string]interface{}{}
 	}
 	return s
 }
 
-func (c *CursorHarness) saveHooks(s map[string]interface{}) error {
-	data, _ := json.MarshalIndent(s, "", "  ")
-	return atomicWriteFile(c.SettingsPath(), append(data, '\n'), 0644)
+func (c *CursorHarness) readHooks() (map[string]interface{}, error) {
+	data, err := os.ReadFile(c.SettingsPath())
+	if os.IsNotExist(err) {
+		return map[string]interface{}{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var s map[string]interface{}
+	if err := json.Unmarshal(data, &s); err != nil || s == nil {
+		return nil, fmt.Errorf("%s: expected a valid JSON object", c.SettingsPath())
+	}
+	if err := uniqueJSONFields(data); err != nil {
+		return nil, err
+	}
+	if value, exists := s["hooks"]; exists {
+		hooks, ok := value.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("%s: hooks must be an object", c.SettingsPath())
+		}
+		for _, event := range []string{"beforeShellExecution", "afterShellExecution"} {
+			if value, exists := hooks[event]; exists && value != nil {
+				if _, ok := value.([]interface{}); !ok {
+					return nil, fmt.Errorf("%s: hooks.%s must be an array", c.SettingsPath(), event)
+				}
+			}
+		}
+	}
+	return s, nil
 }
 
-func (c *CursorHarness) removeHooks() {
-	s := c.loadHooks()
+func (c *CursorHarness) saveHooks(s map[string]interface{}) error {
+	data, _ := json.MarshalIndent(s, "", "  ")
+	perm := os.FileMode(0600)
+	if info, err := os.Stat(c.SettingsPath()); err == nil {
+		perm = info.Mode().Perm()
+	}
+	return atomicWriteFile(c.SettingsPath(), append(data, '\n'), perm)
+}
+
+func (c *CursorHarness) removeHooks() error {
+	s, err := c.readHooks()
+	if err != nil {
+		return err
+	}
+	stripCursorHooks(s)
+	return c.saveHooks(s)
+}
+
+func stripCursorHooks(s map[string]interface{}) {
 	hooks, _ := s["hooks"].(map[string]interface{})
 
 	for _, event := range []string{"beforeShellExecution", "afterShellExecution"} {
@@ -285,5 +346,4 @@ func (c *CursorHarness) removeHooks() {
 		}
 	}
 
-	c.saveHooks(s)
 }

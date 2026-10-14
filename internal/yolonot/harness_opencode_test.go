@@ -20,7 +20,7 @@ func TestOpencodeHarnessSettingsPath(t *testing.T) {
 	defer os.Unsetenv("HOME")
 
 	h := &OpencodeHarness{}
-	want := filepath.Join(dir, ".config", "opencode", "plugin", "yolonot.ts")
+	want := filepath.Join(dir, ".config", "opencode", "plugins", "yolonot.ts")
 	if got := h.SettingsPath(); got != want {
 		t.Errorf("SettingsPath() = %s, want %s", got, want)
 	}
@@ -60,10 +60,12 @@ func TestOpencodeHarnessInstallWritesPlugin(t *testing.T) {
 	if !strings.Contains(s, "tool.execute.before") || !strings.Contains(s, "tool.execute.after") {
 		t.Errorf("plugin missing expected hooks: %s", s)
 	}
-	// OpenCode 1.4.3 only recognises named exports; a regression to
-	// `export default` silently no-ops in the loader.
+	// V1 retains its named factory; V2 requires a default id/setup definition.
 	if !strings.Contains(s, "export const YolonotPlugin") {
 		t.Errorf("plugin missing named export (must be `export const YolonotPlugin`, not default): %s", s)
+	}
+	if !strings.Contains(s, "export default") || !strings.Contains(s, "async setup(ctx") {
+		t.Errorf("plugin missing V2 definition: %s", s)
 	}
 }
 
@@ -104,14 +106,85 @@ func TestOpencodeHarnessIsDetected(t *testing.T) {
 	}
 }
 
-func TestOpencodeHarnessSkillNoOp(t *testing.T) {
+func TestOpencodeHarnessSkillInstall(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	h := &OpencodeHarness{}
 	path, err := h.InstallSkill()
-	if err != nil || path != "" {
-		t.Errorf("InstallSkill() = (%q, %v), want (\"\", nil)", path, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != filepath.Join(opencodeConfigDir(), "skills", "yolonot") {
+		t.Fatalf("skill installed outside OpenCode's config: %s", path)
+	}
+	if data, err := os.ReadFile(filepath.Join(path, "SKILL.md")); err != nil || !strings.Contains(string(data), "yolonot") {
+		t.Fatalf("skill bundle not written: %v", err)
 	}
 	if err := h.UninstallSkill(); err != nil {
 		t.Errorf("UninstallSkill() = %v, want nil", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("skill not uninstalled: %v", err)
+	}
+}
+
+func TestOpencodeHarnessXDGAndLegacyPluginMigration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := &OpencodeHarness{}
+	legacy := filepath.Join(opencodeConfigDir(), "plugin", "yolonot.ts")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, embeddedOpencodePluginTS, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !h.IsDetected() || !h.IsInstalled() {
+		t.Fatal("legacy installation must still be detected")
+	}
+	if err := h.Install("/path/to/yolonot"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy plugin could cause duplicate policy execution: %v", err)
+	}
+	if !strings.HasPrefix(h.SettingsPath(), os.Getenv("XDG_CONFIG_HOME")+string(os.PathSeparator)) {
+		t.Fatal("XDG_CONFIG_HOME was ignored")
+	}
+	if err := os.WriteFile(legacy, []byte("// unrelated user plugin named yolonot.ts\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacy); err != nil {
+		t.Fatal("uninstall must preserve unowned legacy file")
+	}
+}
+
+func TestOpencodeHarnessNativeAskCapability(t *testing.T) {
+	h := &OpencodeHarness{}
+	for _, version := range []string{"", "1", "2"} {
+		t.Setenv("YOLONOT_OPENCODE_API", version)
+		if h.SupportsAsk() != (version == "2") {
+			t.Fatalf("API %q capability mismatch", version)
+		}
+		wantModerate := ActionAllow
+		if version == "2" {
+			wantModerate = ActionAsk
+		}
+		if h.RiskMap()[RiskModerate] != wantModerate {
+			t.Fatalf("API %q moderate policy mismatch", version)
+		}
+	}
+	t.Setenv("YOLONOT_OPENCODE_SESSION_ID", "")
+	t.Setenv("OPENCODE_SESSION_ID", "native-session")
+	if h.SessionIDFromEnv() != "native-session" {
+		t.Fatal("shell commands must target the session exported by OpenCode V2")
+	}
+	t.Setenv("YOLONOT_OPENCODE_SESSION_ID", "explicit-override")
+	if h.SessionIDFromEnv() != "explicit-override" {
+		t.Fatal("explicit session override must win")
 	}
 }
 
@@ -220,6 +293,14 @@ func TestOpencodeHarnessFormatHookResponseMatchesClaude(t *testing.T) {
 	}
 }
 
+func TestOpencodeHarnessDecisionlessWarningIsPassthrough(t *testing.T) {
+	response := HookResponse{SystemMessage: "yolonot: model unavailable, falling back to host permissions"}
+	response.HookSpecificOutput.HookEventName = "PreToolUse"
+	if got := (&OpencodeHarness{}).FormatHookResponse(response); got != "" {
+		t.Fatalf("trusted no-decision fallback must be empty stdout, got %q", got)
+	}
+}
+
 func TestOpencodeHarnessDefaultRiskMap(t *testing.T) {
 	// OpenCode's plugin treats empty stdout as allow, so ActionPassthrough
 	// would silently promote moderate to allow. Guard against a regression
@@ -252,5 +333,78 @@ func TestOpencodeHarnessPostInstallNotesMentionAskLimitation(t *testing.T) {
 	joined := strings.Join(notes, "\n")
 	if !strings.Contains(strings.ToLower(joined), "ask") {
 		t.Errorf("PostInstallNotes should mention the ask limitation; got:\n%s", joined)
+	}
+}
+
+// Execute the installed shim, not a copy of its response parser. The child
+// hook fixture exercises Bun's actual stdin/stdout/exit-code bridge.
+func TestOpencodePluginHookContract(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	requestPath := filepath.Join(home, "request.json")
+	t.Setenv("YOLONOT_SHIM_REQUEST", requestPath)
+	fixture := filepath.Join(home, "fake-yolonot")
+	const hookFixture = "#!/bin/sh\ncat > \"$YOLONOT_SHIM_REQUEST\"\nprintf '%s' \"$YOLONOT_SHIM_REPLY\"\nexit \"$YOLONOT_SHIM_EXIT\"\n"
+	if err := os.WriteFile(fixture, []byte(hookFixture), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runShim := installedOpencodeDriver(t, fixture)
+	response := func(decision string) string {
+		return `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"` + decision + `","permissionDecisionReason":"fixture reason"}}`
+	}
+	cases := []struct {
+		name, event, reply string
+		exit               string
+		blocked            bool
+	}{
+		{"intentional empty passthrough", "tool.execute.before", "", "0", false},
+		{"whitespace passthrough", "tool.execute.before", " \n", "0", false},
+		{"explicit allow", "tool.execute.before", response("allow"), "0", false},
+		{"explicit ask defers to host", "tool.execute.before", response("ask"), "0", false},
+		{"explicit deny", "tool.execute.before", response("deny"), "0", true},
+		{"failure without output", "tool.execute.before", "", "1", true},
+		{"failure despite allow output", "tool.execute.before", response("allow"), "7", true},
+		{"invalid JSON", "tool.execute.before", "{broken", "0", true},
+		{"missing envelope", "tool.execute.before", "{}", "0", true},
+		{"null response", "tool.execute.before", "null", "0", true},
+		{"array envelope", "tool.execute.before", `{"hookSpecificOutput":[]}`, "0", true},
+		{"missing decision", "tool.execute.before", `{"hookSpecificOutput":{}}`, "0", true},
+		{"invalid decision", "tool.execute.before", response("permit"), "0", true},
+		{"invalid decision type", "tool.execute.before", `{"hookSpecificOutput":{"permissionDecision":true}}`, "0", true},
+		{"invalid reason type", "tool.execute.before", `{"hookSpecificOutput":{"permissionDecision":"allow","permissionDecisionReason":42}}`, "0", true},
+		{"post tool use empty output", "tool.execute.after", "", "0", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("YOLONOT_SHIM_REPLY", tc.reply)
+			t.Setenv("YOLONOT_SHIM_EXIT", tc.exit)
+			shimErr := runShim(tc.event, "/project")
+			if blocked := shimErr != ""; blocked != tc.blocked {
+				t.Fatalf("blocked=%v, want %v (error=%q)", blocked, tc.blocked, shimErr)
+			}
+			data, err := os.ReadFile(requestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload HookPayload
+			if err := json.Unmarshal(data, &payload); err != nil {
+				t.Fatal(err)
+			}
+			wantEvent := "PreToolUse"
+			if tc.event == "tool.execute.after" {
+				wantEvent = "PostToolUse"
+				var raw map[string]interface{}
+				if err := json.Unmarshal(data, &raw); err != nil {
+					t.Fatal(err)
+				}
+				response, _ := raw["tool_response"].(map[string]interface{})
+				if response["output"] != "probe output" || response["title"] != "probe title" {
+					t.Error("post-tool-use payload must contain the response")
+				}
+			}
+			if payload.HookEventName != wantEvent || payload.SessionID != "shim-session" || payload.Cwd != "/project" || payload.ToolInput["command"] != "my-tool --probe" {
+				t.Errorf("canonical payload lost bridge context: %+v", payload)
+			}
+		})
 	}
 }

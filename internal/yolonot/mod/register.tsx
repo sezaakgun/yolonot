@@ -18,18 +18,7 @@ let sid = ''
 let cwd = ''
 
 const firstLine = (s: string) => s.split('\n')[0]
-// commands the user rejected this session, so a shell-wrapped retry is
-// refused without another dialog
-const rejected = new Set<string>()
 const VARIANT_NOTE = ' The user already rejected this command this session: do not retry it through a wrapper, heredoc or variable path; ask the user instead.'
-const unwrap = (c: string) => {
-  const s = c.trim()
-  const m = /^(?:bash|sh|zsh)\s+(?:-[a-z]+\s+)*-c\s+(['"])([\s\S]*)\1\s*$/.exec(s)
-  if (m) return m[2].trim()
-  const h = /^(?:bash|sh|zsh)\s*<<-?\s*['"]?(\w+)['"]?\n([\s\S]*)\n\1\s*$/.exec(s)
-  if (h) return h[2].trim()
-  return s
-}
 // banners read "🧑‍🚀 <layer> -> <text>"
 const parseBanner = (s: string) => {
   const m = /^🧑‍🚀 (\S+) -> ([\s\S]*)$/.exec(s)
@@ -59,7 +48,9 @@ async function resolve($: any, verdict: string, id: string, command: string, rea
 
 async function explain($: any, command: string, reason: string): Promise<string> {
   const r = await $.process.run([BIN, 'explain'], { stdin: JSON.stringify({ command, reason }), timeoutMs: 30000 })
-  return r.exitCode === 0 ? r.stdout.trim() : 'explain failed: ' + (r.stderr.trim() || 'no chat model')
+  if (r.exitCode === 0) return r.stdout.trim()
+  const error = r.stderr.trim() || 'no chat model'
+  return error.startsWith('explain failed:') ? error : 'explain failed: ' + error
 }
 
 export const register: Register = on => {
@@ -73,11 +64,8 @@ export const register: Register = on => {
     const command = e.tool === 'Bash' ? (e as any).command : undefined
     const id = e.tool_use_id ?? ''
     if (!sid || typeof command !== 'string' || !command || !id) return next(e)
-    if (rejected.has(unwrap(command))) {
-      entries.set(id, { decision: 'deny', layer: 'session_deny', reason: 'rejected earlier this session', ms: 0 })
-      $.ui.invalidate('ui.render')
-      return { deny: 'yolonot: previously rejected this session.' + VARIANT_NOTE }
-    }
+    // The Go hook owns rejection memory and current policy precedence,
+    // including pause, explicit allow rules and shell-wrapped retries.
     const h = await judge($, command, id)
     entries.set(id, h)
     $.ui.invalidate('ui.render')
@@ -89,8 +77,11 @@ export const register: Register = on => {
     for (;;) {
       const q = `yolonot: ${h.reason}\n\n$ ${command}` + (explanation ? `\n\n${explanation}` : '')
       const options = explanation ? ['Allow once', 'Allow this session', 'Deny'] : ['Allow once', 'Allow this session', 'Explain', 'Deny']
-      let a = 'Deny'
-      try { a = await $.ui.ask(q, { options, header: 'yolonot' }) } catch {}
+      let a: string
+      try { a = await $.ui.ask(q, { options, header: 'yolonot' }) } catch {
+        return { deny: 'yolonot: approval dialog unavailable; this call was not approved.' }
+      }
+      if (!options.includes(a)) return { deny: 'yolonot: no approval answer; this call was not approved.' }
       if (a === 'Explain') { explanation = await explain($, command, h.reason); continue }
       const verdict = a === 'Allow once' ? 'allow-once' : a === 'Allow this session' ? 'allow-session' : 'deny'
       await resolve($, verdict, id, command, h.reason)
@@ -99,7 +90,6 @@ export const register: Register = on => {
       h.reason = verdict === 'deny' ? 'rejected' : verdict === 'allow-once' ? 'allowed once' : 'allowed this session'
       $.ui.invalidate('ui.render')
       if (verdict === 'deny') {
-        rejected.add(unwrap(command))
         return { deny: 'yolonot: the user rejected this command.' + VARIANT_NOTE }
       }
       return next(e)

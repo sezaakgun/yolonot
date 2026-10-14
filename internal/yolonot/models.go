@@ -12,7 +12,7 @@ import (
 
 func cmdModels(args []string) {
 	cfg := LoadConfig()
-	if len(args) == 0 {
+	if len(args) == 0 || args[0] == "list" {
 		printModels(cfg)
 		return
 	}
@@ -26,14 +26,14 @@ func cmdModels(args []string) {
 			return
 		}
 		cfg.putModel(name, m)
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		fmt.Printf("Added %s: %s via %s\n", name, m.Model, m.URL)
 		if !testProviderConnection(m) {
 			return
 		}
 		if len(cfg.Judges) == 0 || tuiConfirm("Add "+name+" to the judge chain?") {
 			cfg.Judges = append(cfg.Judges, JudgeSpec{Use: name})
-			SaveConfig(cfg)
+			mustSaveConfig(cfg)
 			printJudges(cfg)
 		}
 	case "remove", "rm":
@@ -60,7 +60,7 @@ func cmdModels(args []string) {
 			os.Exit(2)
 		}
 		delete(cfg.Models, name)
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		fmt.Printf("Removed %s.\n", name)
 	case "test":
 		if len(args) < 2 {
@@ -94,7 +94,7 @@ func printModels(cfg Config) {
 	for _, name := range cfg.ModelNames() {
 		m := cfg.Models[name]
 		kind := "chat"
-		if isDecisionURL(m.URL) {
+		if isTypedModel(m) {
 			kind = "typed"
 		}
 		role := ""
@@ -121,6 +121,9 @@ func pickModel(cfg Config, typed bool) (string, ModelConfig, bool) {
 	}
 	if !ok {
 		return "", m, false
+	}
+	if m.Protocol == "" {
+		m.Protocol = inferProtocol(m.URL)
 	}
 	def := modelKey(m)
 	for {
@@ -185,7 +188,7 @@ func migrateConfig(cfg Config) {
 	if data, err := os.ReadFile(configPath()); err == nil {
 		os.WriteFile(configPath()+".bak", data, 0600)
 	}
-	SaveConfig(cfg)
+	mustSaveConfig(cfg)
 	os.Remove(migrateDeclinedPath())
 	fmt.Println("Migrated to v1. Backup: " + tildePath(configPath()) + ".bak")
 	printMigrationSummary(cfg)

@@ -5,8 +5,8 @@
 <h1 align="center">yolonot</h1>
 
 <p align="center">
-  Smart auto-mode for AI coding assistants. The safe alternative to <code>--dangerously-skip-permissions</code>.<br>
-  Built for Claude Code. Also works with Codex CLI, OpenCode, Gemini CLI, and Cursor.
+  Configurable command guardrails for AI coding agents.<br>
+  One policy engine across Claude Code, Codex CLI, OpenCode, Antigravity, and Cursor.
 </p>
 
 <p align="center">
@@ -17,30 +17,21 @@
 
 ---
 
-yolonot sits between your AI coding assistant and your shell. It uses an LLM to classify every Bash command as **safe** (allow) or **needs-review** (ask), with session memory so approved commands don't ask twice and rejected commands stay blocked. Deny rules give you absolute blocks nothing can override. Optionally, an [escalation model](docs/models.md#escalation-second-opinion-model) — a second, bigger LLM — gets one look at uncertain verdicts before you're interrupted: confident false alarms get rescued into allows, sneaky-dangerous ones get hardened, and everything else still asks.
+yolonot evaluates shell commands before your coding agent runs them. Combine explicit rules, local parsers, external hooks and [model judges](docs/judges.md), then apply a configurable risk policy. Session memory remembers approved commands and rejects repeated denied commands; script approvals track their contents. An optional [escalation model](docs/models.md#escalation-second-opinion-model) reviews uncertain model verdicts before they reach you.
 
-> **Claude Code first.** yolonot was designed for Claude Code and that's where it gets the richest UX (full allow/ask/deny). Cursor, Codex CLI, OpenCode, and Gemini CLI adapters ship in-tree but have upstream hook-API limitations — see [docs/harnesses.md](docs/harnesses.md) for each host's caveats.
+> **Shared policy, host-specific enforcement.** Each harness exposes different hook and approval capabilities. Check [the adapter behavior](docs/harnesses.md) and `yolonot risk <harness>` for the effective action map. Claude Code also has an optional transcript mod.
 
-> **⚠ LLMs are not deterministic.** yolonot's classifier is a probabilistic safety net, not a guarantee. Models hallucinate, miss context, and can be tricked by adversarial prompts. Use yolonot at your discretion: keep your own judgment in the loop, write **deny rules** for anything you truly never want run (rules beat the LLM, always), and don't treat it as a substitute for reviewing what your AI assistant is doing. If yolonot allows a destructive command, **you** are still the one who installed it on your machine.
+> Model judgments can be wrong. Use explicit deny rules for commands that must be blocked. yolonot gates shell tool calls; it does not sandbox processes or cover every file, MCP or native tool action. See [security, privacy and failure behavior](docs/security.md).
 
 ## Quick start
 
-### 1. Pick a model
-
-| Model | Kind | Cost | Latency | Key |
-|-------|------|------|--------:|-----|
-| **TypeSafe Jev** `jev-latest` | typed | <1¢/day | ~300ms | `TYPESAFE_API_KEY` |
-| **OpenAI** `gpt-5.4-mini` | chat | ~10¢/day | ~500ms | `OPENAI_API_KEY` |
-| **Kev-4B** self-hosted ([Kev](https://github.com/jaredpalmer/kev)) | typed | free | ~40ms on a GPU box, seconds on a laptop | — (local) |
-| **Ollama** `gemma4:e4b` | chat | free | 2–10s | — (local) |
-| **Claude Code** (default) | chat | free | ~10s | — (subscription) |
-
-Full matrix in [docs/models.md](docs/models.md). Models live in a named catalog; the judge chain and the escalation step refer to them by name. A typed decision model answers in ~300ms and runs before the chat model, which then only sees what it could not decide. The chain can also hold `fast_allow` (a built-in read-only parser) and `exec:<path>` hooks, any binary that reads the PreToolUse JSON; see [docs/judges.md](docs/judges.md). After setup, `yolonot config` opens a settings screen for judges, models, policy and prompt, keyboard or mouse.
-
-### 2. Install and run setup
+### 1. Install and configure your harness
 
 ```bash
 go install github.com/sezaakgun/yolonot@latest
+
+# To install the current source checkout instead of the published tag:
+# go install .
 
 # Make sure Go bin is in PATH
 export PATH="$PATH:$(go env GOPATH)/bin"
@@ -48,18 +39,56 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 # First-run wizard: hooks + rules + models + judge chain
 yolonot setup
 
-# Optional, Claude Code 2.1.296+: verdicts in the transcript, a status row above
-# the prompt, and a four-way ask (allow once / this session / explain / deny)
-yolonot install --mod
+# Or target one harness explicitly
+yolonot setup --harness codex
 ```
 
-Upgrading from 0.x? Your config keeps working; `yolonot migrate` rewrites it in the 1.x shape when you are ready. See [docs/upgrading.md](docs/upgrading.md).
+Targets: `claude`, `codex`, `opencode`, `antigravity` (`agy`), `cursor`. Without a target,
+setup installs into detected harnesses. The optional Claude transcript mod
+is installed with `yolonot install --harness claude --mod`.
 
-### 3. Restart your host CLI
+Setup offers chat providers, typed decision models and local endpoints.
+Models live in a named [catalog](docs/models.md); an ordered [judge chain](docs/judges.md)
+can combine them with `fast_allow` and trusted `exec:` hooks. `yolonot config`
+lets you edit the chain, model endpoints, risk profiles and rules.
 
-Hooks are read at startup, so restart Claude Code (or whichever harness you're using) to activate yolonot.
+Upgrading from 0.x? File-based config is read without rewriting it;
+`yolonot migrate` writes the 1.x shape. Review the [removed environment
+overrides](docs/upgrading.md) before upgrading.
 
-That's it. Every Bash command now runs through [the pipeline](docs/how-it-works.md).
+### 2. Restart and inspect the policy
+
+Restart your host CLI or start a new desktop session to load the hooks, then
+inspect the effective policy:
+
+```bash
+yolonot risk codex                  # use your harness name
+yolonot config validate
+yolonot doctor --harness codex       # inspect /hooks trust in Codex too
+yolonot effective --harness codex
+yolonot judges list
+yolonot check "git status"          # dry-run without executing the command
+```
+
+Shell tool calls now run through [the pipeline](docs/how-it-works.md).
+
+Using Claude Desktop? Configure model API-key variables in **Local → gear**;
+terminal exports may not reach its hooks or mod. See the [Desktop credential
+caveat](docs/harnesses.md#claude-desktop-model-credentials).
+
+OpenCode V2 has a native plugin integration, including approval prompts.
+Google workflows use Antigravity. yolonot Gemini CLI support has been retired;
+remove old hooks with `yolonot uninstall --harness gemini`. See the dated [version and verification matrix](docs/harnesses.md).
+
+Choose failure handling, learning/retention and the total decision budget
+through settings or [configuration](docs/configuration.md). Native
+`approve`, `deny` and `reset` commands work across harnesses. Start from a
+reviewed [example config](examples/) and validate it before installation.
+
+An example of `effective` with the local-only configuration (temporary paths
+shortened for display; hooks have not been installed in this example):
+
+![Effective policy diagnostics](assets/diagnostics.png)
 
 ## Docs
 
@@ -67,6 +96,8 @@ That's it. Every Bash command now runs through [the pipeline](docs/how-it-works.
 |-------|------|
 | How the pipeline decides — layers, hook ordering, pausing, dry-run | [docs/how-it-works.md](docs/how-it-works.md) |
 | All CLI + `/yolonot` skill commands | [docs/commands.md](docs/commands.md) |
+| Configuration, diagnostics, failure policy, learning and session controls | [docs/configuration.md](docs/configuration.md) |
+| Editor schema and example configs | [docs/config.schema.json](docs/config.schema.json), [examples/](examples/) |
 | `.yolonot` rule files — format, walk-up, messages, redirects, sensitive files | [docs/rules.md](docs/rules.md) |
 | Judges — the chain, `fast_allow` internals, Dippy and other hooks, security model | [docs/judges.md](docs/judges.md) |
 | Risk tiers — per-harness action policy, overrides | [docs/risk-tiers.md](docs/risk-tiers.md) |
@@ -75,9 +106,11 @@ That's it. Every Bash command now runs through [the pipeline](docs/how-it-works.
 | Prompt customization — prose hints or a full `system_prompt` override, plus `prompt verify` | [docs/prompt.md](docs/prompt.md) |
 | Upgrading from 0.x — what changed in config.json and the CLI, `yolonot migrate` | [docs/upgrading.md](docs/upgrading.md) |
 | Harnesses — install flags, runtime pinning, per-host caveats | [docs/harnesses.md](docs/harnesses.md) |
+| Native verification scope and known host limitations | [docs/harnesses.md](docs/harnesses.md#verification-scope) |
 | Analytics — `yolonot log`, `stats`, `suggest`, quiet mode | [docs/analytics.md](docs/analytics.md) |
 | Eval suite — test prompt quality across models | [docs/eval.md](docs/eval.md) |
 | Architecture — code layout, data directory | [docs/architecture.md](docs/architecture.md) |
+| Security scope, trusted configuration, privacy and failure behavior | [docs/security.md](docs/security.md) |
 
 ## Uninstall
 
