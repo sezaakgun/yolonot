@@ -117,6 +117,28 @@ reader stays through 1.x and goes away in 2.0. Full table in
   `returned_as` (declared, never written).
 
 ### Fixed
+- An agent can no longer grant itself approval: when it runs `yolonot approve`,
+  `deny`, `reset`, `learning`, `pause`, `resume`, `uninstall` or a policy
+  change, the hook always asks (deny on Codex), including through global flags
+  and `sh -c`. `approve`/`deny`/`learning forget` reject a command split into
+  several words instead of storing a broader joined command.
+- Precedents rebuilt from the decision log only use entries marked eligible
+  when written, so labels that older versions inferred from completions are
+  not imported. Codex completions after a deferred ask are no longer logged as
+  human approvals.
+- Claude mod: judges with the session's current directory, leaves subagent and
+  teammate calls to the classic hook (which sees their real cwd, so a call is
+  judged once), fails closed when `yolonot hook` crashes, times out or answers
+  unreadably, and quotes its binary path.
+- Claude install writes exec-form hooks only for Claude 2.1.295+ and the quoted
+  shell form otherwise; Cursor hook commands quote the binary path.
+- Antigravity denies a `run_command` it cannot read instead of leaving it to
+  the host; `YOLONOT_DISABLED` is honored before parsing.
+- Failure-policy passthrough banners are sanitized and provider error bodies
+  are capped. `yolonot check` applies the same deny-to-ask rule as the hook.
+  Profile pins given as `agy` are stored as `antigravity`.
+- Settings: returns to its screen after `$EDITOR`, and refuses to save over a
+  config changed on disk while it was open.
 - Documentation now distinguishes host credential environments, explicit human
   answers, rule priority and configurable failure behavior; Claude installation
   surfaces the Desktop model-key setup caveat.

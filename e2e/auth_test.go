@@ -21,11 +21,16 @@ import (
 // project-scoped into a temporary git workspace. The host runs with
 // YOLONOT_DISABLED=1 so a yolonot the user installed globally stays out of
 // the way and learns nothing; the wrapper re-enables the sandbox hook.
-func authHost(t *testing.T, name string) (string, *sandbox, string) {
+func needAuth(t *testing.T) {
 	t.Helper()
 	if os.Getenv("YOLONOT_E2E_AUTH") != "1" {
 		t.Skip("set YOLONOT_E2E_AUTH=1 to run hosts that need a login")
 	}
+}
+
+func authHost(t *testing.T, name string) (string, *sandbox, string) {
+	t.Helper()
+	needAuth(t)
 	bin := hostBinary(t, name)
 	s := newSandbox(t, "")
 	s.write(".yolonot/rules", "allow-cmd /usr/bin/touch *ALLOW*\ndeny-cmd /usr/bin/touch *DENY*\nask-cmd /usr/bin/touch *ASK*\n")
@@ -151,6 +156,9 @@ func interactiveAsk(t *testing.T, s *sandbox, marker string, x *tmux, prompt str
 
 // Cursor's native ask is opt-in (YOLONOT_CURSOR_NATIVE_ASK=1).
 func TestCursorLiveInteractiveAsk(t *testing.T) {
+	needAuth(t)
+	hostBinary(t, "cursor-agent")
+	needTmux(t)
 	for _, approve := range []bool{true, false} {
 		t.Run(map[bool]string{true: "approved", false: "rejected"}[approve], func(t *testing.T) {
 			bin, s, ws := authHost(t, "cursor-agent")

@@ -58,7 +58,18 @@ func hostBinary(t *testing.T, name string) string {
 
 func hostVersion(t *testing.T, bin string, args ...string) {
 	t.Helper()
-	out, _ := exec.Command(bin, args...).CombinedOutput()
+	home := t.TempDir()
+	cmd := exec.Command(bin, args...)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"TMPDIR=" + os.TempDir(),
+		"HOME=" + home,
+		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
+		"XDG_DATA_HOME=" + filepath.Join(home, ".local/share"),
+		"XDG_CACHE_HOME=" + filepath.Join(home, ".cache"),
+		"XDG_STATE_HOME=" + filepath.Join(home, ".local/state"),
+	}
+	out, _ := cmd.CombinedOutput()
 	t.Logf("%s %s", filepath.Base(bin), strings.TrimSpace(string(out)))
 }
 

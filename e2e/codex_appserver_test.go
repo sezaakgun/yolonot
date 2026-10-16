@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -20,6 +22,7 @@ type rpcClient struct {
 	in   io.WriteCloser
 	msgs chan obj
 	id   int
+	once sync.Once
 }
 
 func startAppServer(t *testing.T, codex string, s *sandbox) *rpcClient {
@@ -32,6 +35,7 @@ func startAppServer(t *testing.T, codex string, s *sandbox) *rpcClient {
 		t.Fatal(err)
 	}
 	c := &rpcClient{t: t, cmd: cmd, in: in, msgs: make(chan obj, 256)}
+	t.Cleanup(c.stop)
 	go func() {
 		sc := bufio.NewScanner(out)
 		sc.Buffer(nil, 8<<20)
@@ -84,9 +88,11 @@ func (c *rpcClient) call(method string, params obj) obj {
 }
 
 func (c *rpcClient) stop() {
-	c.in.Close()
-	c.cmd.Process.Kill()
-	c.cmd.Wait()
+	c.once.Do(func() {
+		c.in.Close()
+		c.cmd.Process.Kill()
+		c.cmd.Wait()
+	})
 }
 
 // trustHooks records the current hook hashes as trusted in config.toml,
@@ -154,7 +160,6 @@ func TestCodexAppServer(t *testing.T) {
 			}
 			trustHooks(t, codex, s)
 			rpc := startAppServer(t, codex, s)
-			defer rpc.stop()
 			th := rpc.call("thread/start", obj{"cwd": s.Work, "model": "fixture-model", "modelProvider": "fixture", "approvalPolicy": "on-request", "sandbox": "workspace-write", "ephemeral": true})
 			tid := th["thread"].(obj)["id"]
 			rpc.call("turn/start", obj{"threadId": tid, "input": []any{obj{"type": "text", "text": "Run the fixture command once.", "text_elements": []any{}}}})
@@ -179,6 +184,9 @@ func TestCodexAppServer(t *testing.T) {
 				t.Errorf("frontend approval requests=%v, want any=%v", approvals, c.approval)
 			}
 			s.expect(c.marker, c.decision, strings.Join(approvals, "\n"))
+			if c.name == "permission-deny" && !slices.Contains(s.layers(), "rule:allow") {
+				t.Errorf("PreToolUse did not allow first: %v", s.layers())
+			}
 		})
 	}
 }
@@ -190,7 +198,6 @@ func TestCodexSkillDiscovery(t *testing.T) {
 		t.Fatalf("install --skill-only: %v\n%s", err, out)
 	}
 	rpc := startAppServer(t, codex, s)
-	defer rpc.stop()
 	list := rpc.call("skills/list", obj{"cwds": []string{s.Work}, "forceReload": true})
 	data, _ := list["data"].([]any)
 	for _, item := range data {

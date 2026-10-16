@@ -276,12 +276,21 @@ func cmdHook() {
 		}
 	}
 
+	// Disabled via env var — total bypass (applies to Post too, so paused
+	// sessions don't silently accumulate pre-approvals).
+	if os.Getenv("YOLONOT_DISABLED") == "1" {
+		return
+	}
+
 	harness := ActiveHarness()
 	if harness == nil {
 		return
 	}
 	payload, err := harness.ParseHookInput(raw)
 	if err != nil {
+		if f, ok := harness.(interface{ ParseFailure([]byte, error) string }); ok {
+			emitHook(f.ParseFailure(raw, err))
+		}
 		return
 	}
 	if payload.HookEventName == "" {
@@ -311,12 +320,6 @@ func cmdHook() {
 
 	// Clean old sessions (background, non-blocking)
 	go CleanOldSessions()
-
-	// Disabled via env var — total bypass (applies to Post too, so paused
-	// sessions don't silently accumulate pre-approvals).
-	if os.Getenv("YOLONOT_DISABLED") == "1" {
-		return
-	}
 
 	// Claude Code --dangerously-skip-permissions — total bypass, same shape
 	// as YOLONOT_DISABLED. User asked the host to skip its own permission
@@ -457,6 +460,20 @@ func cmdHook() {
 		}
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "rule", Decision: "deny", Reasoning: reasoning})
 		emitHook(hookResponse("deny", "rule", userReason, command))
+		return
+	}
+
+	// Step 0.3: an agent changing yolonot's own grants. These verbs record
+	// human answers and session grants, so the user must see each call;
+	// allow rules, session memory and judges never clear it.
+	if verb := selfPolicyVerb(command); verb != "" {
+		action := ActionAsk
+		if !harnessSupportsAsk(harness) {
+			action = ActionDeny
+		}
+		reason := fmt.Sprintf("yolonot %s changes yolonot's own approvals; the user must run or confirm it", verb)
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "self", Decision: action, Reasoning: reason})
+		emitHook(hookResponse(action, "self", reason, command))
 		return
 	}
 

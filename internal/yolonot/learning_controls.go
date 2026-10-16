@@ -152,8 +152,16 @@ func cmdLearning(args []string) {
 		}
 		root := projectRoot(cwd)
 		command := ""
+		if sub == "forget" && len(args) > 2 {
+			fmt.Fprintln(os.Stderr, "Pass the command as one quoted argument: yolonot learning forget '<exact command>'")
+			os.Exit(2)
+		}
+		if sub == "prune" && len(args) > 1 {
+			fmt.Fprintln(os.Stderr, "Usage: yolonot learning prune")
+			os.Exit(2)
+		}
 		if len(args) > 1 {
-			command = strings.Join(args[1:], " ")
+			command = args[1]
 		}
 		if sub == "forget" && command == "" {
 			fmt.Fprintln(os.Stderr, "Usage: yolonot learning forget '<exact command>'")

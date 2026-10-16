@@ -553,6 +553,7 @@ func cmdProfileUse(args []string) {
 			fmt.Fprintf(os.Stderr, "Unknown harness %q.\n", harness)
 			os.Exit(1)
 		}
+		harness = GetHarness(harness).Name()
 		if !requireV1(&cfg) {
 			return
 		}
@@ -598,6 +599,9 @@ func cmdProfileReset(args []string) {
 	}
 	cfg := LoadConfig()
 	if harness != "" {
+		if h := GetHarness(harness); h != nil {
+			harness = h.Name()
+		}
 		hp := cfg.harnessPolicy(harness)
 		if hp.Profile == "" {
 			fmt.Printf("No override for %s.\n", harness)

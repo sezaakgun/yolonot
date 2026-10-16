@@ -134,8 +134,9 @@ func cmdCheck(command string) {
 			fmt.Printf("      · %s — fall through\n", spec.Use)
 			continue
 		}
-		if !spec.may(v.Decision) {
-			fmt.Printf("      · %s — %s not permitted for this judge, fall through\n", spec.Use, v.Decision)
+		raw := v.Decision
+		if !spec.permit(&v) {
+			fmt.Printf("      · %s — %s not permitted for this judge, fall through\n", spec.Use, raw)
 			continue
 		}
 		if v.Dec != nil {

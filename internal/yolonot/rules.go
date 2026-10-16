@@ -740,6 +740,41 @@ func splitSegments(command string) []string {
 	return segments
 }
 
+// selfPolicyVerb returns the yolonot verb when command, or a shell-wrapped
+// form of it, runs one that writes approvals, denials, learning state or
+// policy. Global flags may sit before the verb.
+func selfPolicyVerb(command string) string {
+	always := map[string]bool{"approve": true, "deny": true, "reset": true, "learning": true, "pause": true, "resume": true, "uninstall": true}
+	withArgs := map[string]bool{"profile": true, "risk": true, "judges": true, "models": true, "escalation": true, "quiet": true}
+	readOnly := map[string]bool{"list": true, "show": true, "status": true}
+	for form := range rejectionForms(command) {
+		for _, seg := range splitSegments(form) {
+			for inner := range rejectionForms(seg) {
+				f := strings.Fields(inner)
+				for len(f) > 0 && (strings.Contains(f[0], "=") || f[0] == "sudo" || f[0] == "env" || f[0] == "command" || f[0] == "exec") {
+					f = f[1:]
+				}
+				if len(f) == 0 || filepath.Base(strings.Trim(f[0], `"'`)) != "yolonot" {
+					continue
+				}
+				var words []string
+				for _, w := range f[1:] {
+					if !strings.HasPrefix(w, "-") {
+						words = append(words, w)
+					}
+				}
+				if len(words) == 0 {
+					continue
+				}
+				if always[words[0]] || withArgs[words[0]] && len(words) > 1 && !readOnly[words[1]] {
+					return words[0]
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // extractExecutables returns the command names from a command string,
 // handling prefixes like sudo, env, and paths.
 func extractExecutables(command string) []string {

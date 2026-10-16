@@ -127,7 +127,7 @@ func TestModInstallAndUninstallKeepOtherPluginDirs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(reg), "const BIN = '/usr/local/bin/yolonot'") || strings.Contains(string(reg), "__YOLONOT_") {
+	if !strings.Contains(string(reg), `const BIN = "/usr/local/bin/yolonot"`) || strings.Contains(string(reg), "__YOLONOT_") {
 		t.Fatal("register.tsx must carry the binary path and no placeholder")
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".claude-plugin", "plugin.json")); err != nil {
@@ -150,5 +150,22 @@ func TestModInstallAndUninstallKeepOtherPluginDirs(t *testing.T) {
 	}
 	if env := loadSettings()["env"].(map[string]interface{}); env[pluginDirsKey] != "/opt/other" {
 		t.Fatalf("other plugin dirs must survive: %v", env[pluginDirsKey])
+	}
+}
+
+func TestModInstallQuotesBinaryPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	os.MkdirAll(filepath.Join(home, ".claude"), 0755)
+	bin := `/Users/o'neil/My Tools\bin/yolonot`
+	dir, err := modInstall(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, _ := os.ReadFile(filepath.Join(dir, "hooks", "register.tsx"))
+	quoted, _ := json.Marshal(bin)
+	if !strings.Contains(string(reg), "const BIN = "+string(quoted)) {
+		t.Fatalf("binary path not quoted as a string literal:\n%s", reg)
 	}
 }

@@ -165,6 +165,8 @@ func TestCursorCLI(t *testing.T) {
 
 // Native ask (opt-in) in the interactive CLI: Run once / Skip.
 func TestCursorInteractiveAsk(t *testing.T) {
+	hostBinary(t, "cursor-agent")
+	needTmux(t)
 	for _, approve := range []bool{true, false} {
 		t.Run(map[bool]string{true: "approved", false: "rejected"}[approve], func(t *testing.T) {
 			bin, s, backend := cursorSandbox(t, "ask", true)

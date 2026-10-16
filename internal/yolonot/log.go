@@ -26,6 +26,7 @@ type DecisionEntry struct {
 	Reasoning        string  `json:"reasoning,omitempty"`
 	Source           string  `json:"source,omitempty"`
 	LearningExcluded bool    `json:"learning_excluded,omitempty"`
+	Precedent        bool    `json:"precedent,omitempty"`   // eligible when written; rebuilds trust only these
 	DurationMs       int64   `json:"duration_ms,omitempty"` // primary LLM call only; escalation time is escalation_ms
 
 	// Escalation fields — set only when the escalation layer was configured
@@ -69,6 +70,7 @@ func LogDecision(entry DecisionEntry) {
 	if !learningEnabled(LoadConfig()) {
 		entry.LearningExcluded = true
 	}
+	entry.Precedent = isPrecedent(entry)
 	recordPrecedent(entry)
 
 	dir := YolonotDir()

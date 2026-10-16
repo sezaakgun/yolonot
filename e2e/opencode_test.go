@@ -85,6 +85,7 @@ func startOpencode(t *testing.T, bin string, s *sandbox) *opencodeServer {
 	cmd.Dir, cmd.Env = s.Work, s.Env
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw
+	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -94,19 +95,27 @@ func startOpencode(t *testing.T, bin string, s *sandbox) *opencodeServer {
 	o := &opencodeServer{}
 	found := make(chan struct{})
 	go func() {
+		var url, auth string
+		reported := false
 		sc := bufio.NewScanner(pr)
 		for sc.Scan() {
+			if reported {
+				continue
+			}
 			if m := listen.FindStringSubmatch(sc.Text()); m != nil {
-				o.url = m[1]
+				url = m[1]
 			}
 			if m := pass.FindStringSubmatch(sc.Text()); m != nil {
-				o.auth = "Basic " + base64.StdEncoding.EncodeToString([]byte("opencode:"+m[1]))
+				auth = "Basic " + base64.StdEncoding.EncodeToString([]byte("opencode:"+m[1]))
 			}
-			if o.url != "" && o.auth != "" && found != nil {
+			if url != "" && auth != "" {
+				o.url, o.auth = url, auth
 				close(found)
-				found = nil
+				reported = true
 			}
 		}
+		// Keep draining after a scan error so the writer never blocks Wait.
+		io.Copy(io.Discard, pr)
 	}()
 	select {
 	case <-found:

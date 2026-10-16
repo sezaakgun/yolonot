@@ -313,7 +313,8 @@ func modInstall(bin string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		s := strings.ReplaceAll(string(b), "__YOLONOT_BIN__", bin)
+		quoted, _ := json.Marshal(bin)
+		s := strings.ReplaceAll(string(b), `'__YOLONOT_BIN__'`, string(quoted))
 		s = strings.ReplaceAll(s, "__YOLONOT_VERSION__", strings.TrimPrefix(Version, "v"))
 		p := filepath.Join(dir, dst)
 		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {

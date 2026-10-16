@@ -199,7 +199,7 @@ func (c *CursorHarness) Install(binaryPath string) error {
 
 	// Pin --harness cursor so ActiveHarness() routes through this adapter
 	// regardless of any CLAUDE_SESSION_ID Cursor may emit for IDE-compat.
-	bp := binaryPath + " hook --harness cursor"
+	bp := shellHookCommand(binaryPath, "cursor")
 	entry := func() map[string]interface{} {
 		return map[string]interface{}{"command": bp, "timeout": 60.0}
 	}

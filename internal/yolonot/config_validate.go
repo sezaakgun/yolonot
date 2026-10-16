@@ -220,8 +220,10 @@ func ValidateConfig(cfg Config) error {
 		}
 	}
 	for name, hp := range cfg.Policy.Harness {
-		if GetHarness(name) == nil {
+		if h := GetHarness(name); h == nil {
 			add("unknown harness %q in policy", name)
+		} else if h.Name() != name {
+			add("harness %q in policy must be written as %q", name, h.Name())
 		}
 		if !profileKnown(hp.Profile) {
 			add("harness %q has unknown profile %q", name, hp.Profile)

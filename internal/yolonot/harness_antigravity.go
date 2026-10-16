@@ -69,28 +69,44 @@ func (a *AntigravityHarness) ParseHookInput(input []byte) (HookPayload, error) {
 	if cwd == "" {
 		return HookPayload{}, fmt.Errorf("Antigravity run_command requires an unambiguous working directory")
 	}
-	// Antigravity's common stdin fields do not include the event name.
-	// Pin it in each installed command instead of inferring PostToolUse
-	// from the optional error field (successful calls omit that field).
-	event := raw.HookEventName
-	if event == "" {
-		event = "PreToolUse"
-		for i := 2; i < len(os.Args); i++ {
-			if os.Args[i] == "--hook-event" && i+1 < len(os.Args) {
-				event = os.Args[i+1]
-				break
-			}
-			if strings.HasPrefix(os.Args[i], "--hook-event=") {
-				event = strings.TrimPrefix(os.Args[i], "--hook-event=")
-				break
-			}
-		}
-	}
+	event := antigravityEvent(raw.HookEventName)
 	if event != "PreToolUse" && event != "PostToolUse" {
 		return HookPayload{}, fmt.Errorf("unsupported Antigravity hook event %q", event)
 	}
 	return HookPayload{HookEventName: event, ToolName: "Bash", SessionID: raw.ConversationID,
 		Cwd: cwd, ToolInput: map[string]interface{}{"command": command}}, nil
+}
+
+// Antigravity's common stdin fields do not include the event name.
+// Pin it in each installed command instead of inferring PostToolUse
+// from the optional error field (successful calls omit that field).
+func antigravityEvent(fromInput string) string {
+	if fromInput != "" {
+		return fromInput
+	}
+	for i := 2; i < len(os.Args); i++ {
+		if os.Args[i] == "--hook-event" && i+1 < len(os.Args) {
+			return os.Args[i+1]
+		}
+		if strings.HasPrefix(os.Args[i], "--hook-event=") {
+			return strings.TrimPrefix(os.Args[i], "--hook-event=")
+		}
+	}
+	return "PreToolUse"
+}
+
+// ParseFailure answers a run_command the adapter cannot read: a silent exit
+// would leave the call to the host's default or cached Always Allow policy.
+func (a *AntigravityHarness) ParseFailure(input []byte, err error) string {
+	var raw antigravityPayload
+	_ = json.Unmarshal(input, &raw)
+	if antigravityEvent(raw.HookEventName) != "PreToolUse" {
+		return ""
+	}
+	r := HookResponse{}
+	r.HookSpecificOutput.PermissionDecision = ActionDeny
+	r.HookSpecificOutput.PermissionDecisionReason = sanitizeBanner("yolonot: " + err.Error())
+	return a.FormatHookResponse(r)
 }
 
 func (a *AntigravityHarness) FormatHookResponse(r HookResponse) string {

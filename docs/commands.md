@@ -20,8 +20,9 @@ yolonot check <cmd>  Preview rules/judges without command execution; may call mo
 yolonot config validate [file] Validate config without rewriting it
 yolonot doctor       Check config, hook registration, host version and model/exec readiness
 yolonot effective    Show consolidated resolved policy (--harness <name>, --json)
-yolonot approve <cmd> Approve an exact command for this session/project (--session-id <id>)
-yolonot deny <cmd>   Reject an exact command for this session/project
+yolonot approve '<cmd>' Approve an exact command for this session/project (--session-id <id>)
+yolonot deny '<cmd>'   Reject an exact command for this session/project
+                       (quote the command as one argument; split words are rejected)
 yolonot reset        Clear this project's session decisions; preserve logs and learning
 yolonot learning     status|list|on|off|retention|limit|forget|clear|prune
 yolonot risk         Show/set per-harness risk tier → action policy
@@ -113,8 +114,9 @@ Customize via `~/.yolonot/config.json` (`prompt.{context,allow_hints,ask_hints,s
 
 Explicit remembered answers (mod Allow this session/Deny or CLI approve/deny)
 can become **precedents** when learning is enabled, subject to retention and
-caps. They are stored in `~/.yolonot/precedents.jsonl`, initially reconstructed
-from eligible decision logs if missing. Native one-time approvals, unanswered
+caps. They are stored in `~/.yolonot/precedents.jsonl`, reconstructed from
+decision-log entries marked eligible when they were recorded if the file is
+missing; labels that older versions inferred are not imported. Native one-time approvals, unanswered
 asks and answers recorded with learning disabled do not become precedents.
 Two things use this history:
 

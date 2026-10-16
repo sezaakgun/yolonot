@@ -75,3 +75,21 @@ func TestCmdLogHumanListsProjectAnswers(t *testing.T) {
 		t.Fatalf("output:\n%s", out)
 	}
 }
+
+func TestRebuildSkipsLegacyInferredHumanLabels(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cwd := t.TempDir()
+	os.MkdirAll(YolonotDir(), 0700)
+	legacy := `{"layer":"human","source":"ask_approved","decision":"allow","cwd":"` + cwd + `","command":"inferred-by-old-build"}` + "\n"
+	if err := os.WriteFile(decisionsPath(), []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	LogDecision(DecisionEntry{Layer: "human", Source: "ask_approved", Decision: "allow", Cwd: cwd, Command: "answered-now"})
+	if err := os.Remove(precedentsPath()); err != nil {
+		t.Fatal(err)
+	}
+	ps := loadPrecedents()
+	if len(ps) != 1 || ps[0].Command != "answered-now" {
+		t.Fatalf("rebuild trusted an unmarked legacy label: %+v", ps)
+	}
+}

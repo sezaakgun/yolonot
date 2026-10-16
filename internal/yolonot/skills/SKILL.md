@@ -89,6 +89,10 @@ yolonot deny '<exact command>' --session-id <id>
 yolonot reset --session-id <id>
 ```
 
+When you run these yourself, the hook asks the user to confirm each one; on
+hosts without an ask (Codex) it is denied, so print the command for the user
+to run instead. Pass the command as one quoted argument.
+
 Approval is scoped to the project, session and current script contents. Deny
 removes equivalent approvals. Reset clears this project's session decisions
 and replay records; logs, learned history, pause and profile pins remain.

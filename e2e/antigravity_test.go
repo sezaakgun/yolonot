@@ -52,6 +52,8 @@ func TestAntigravityCLI(t *testing.T) {
 }
 
 func TestAntigravityInteractiveAsk(t *testing.T) {
+	hostBinary(t, "agy")
+	needTmux(t)
 	for _, approve := range []bool{true, false} {
 		t.Run(map[bool]string{true: "approved", false: "rejected"}[approve], func(t *testing.T) {
 			bin, s, _ := agySandbox(t, "ask")

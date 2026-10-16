@@ -15,7 +15,6 @@ const BIN = '__YOLONOT_BIN__'
 type Entry = { decision: string; layer: string; reason: string; ms: number }
 const entries = new Map<string, Entry>()
 let sid = ''
-let cwd = ''
 
 const firstLine = (s: string) => s.split('\n')[0]
 const VARIANT_NOTE = ' The user already rejected this command this session: do not retry it through a wrapper, heredoc or variable path; ask the user instead.'
@@ -25,24 +24,30 @@ const parseBanner = (s: string) => {
   return m ? { layer: m[1], text: m[2] } : { layer: '', text: s }
 }
 
-async function judge($: any, command: string, id: string): Promise<Entry> {
+async function judge($: any, command: string, id: string, cwd: string): Promise<Entry> {
   const payload = { hook_event_name: 'PreToolUse', tool_name: 'Bash', session_id: sid, cwd, tool_use_id: id, tool_input: { command } }
   const t0 = Date.now()
   const r = await $.process.run([BIN, 'hook'], { stdin: JSON.stringify(payload), env: { YOLONOT_MOD: '1' }, timeoutMs: 65000 })
   const ms = Date.now() - t0
+  // Empty output with exit 0 is the core's pause/passthrough answer; any
+  // other unreadable answer fails closed like the classic hook's onFailure.
+  if (r.exitCode === 0 && !r.stdout.trim()) return { decision: '', layer: '', reason: '', ms }
   let decision = ''
   let banner = ''
+  let parsed = false
   try {
     const j = JSON.parse(r.stdout)
     decision = j.hookSpecificOutput?.permissionDecision ?? ''
     banner = j.hookSpecificOutput?.permissionDecisionReason || j.systemMessage || ''
+    parsed = true
   } catch {}
+  if (r.exitCode !== 0 || !parsed) return { decision: 'deny', layer: 'error', reason: 'safety check failed; this call was not approved.', ms }
   const b = parseBanner(banner)
   // the allow banner carries the command, not a reason
   return { decision, layer: b.layer, reason: decision === 'allow' ? '' : b.text, ms }
 }
 
-async function resolve($: any, verdict: string, id: string, command: string, reason: string) {
+async function resolve($: any, verdict: string, id: string, cwd: string, command: string, reason: string) {
   await $.process.run([BIN, 'mod', 'resolve'], { stdin: JSON.stringify({ session_id: sid, tool_use_id: id, cwd, command, verdict, reason }) })
 }
 
@@ -56,7 +61,6 @@ async function explain($: any, command: string, reason: string): Promise<string>
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     sid = await $.session.id()
-    cwd = await $.session.cwd()
     return next(e)
   })
 
@@ -64,9 +68,13 @@ export const register: Register = on => {
     const command = e.tool === 'Bash' ? (e as any).command : undefined
     const id = e.tool_use_id ?? ''
     if (!sid || typeof command !== 'string' || !command || !id) return next(e)
+    // The mod cannot see a subagent's or teammate's working directory, so the
+    // classic hook, which gets the real one, judges those calls alone.
+    if (e.agentId) return next(e)
+    const cwd = await $.session.cwd()
     // The Go hook owns rejection memory and current policy precedence,
     // including pause, explicit allow rules and shell-wrapped retries.
-    const h = await judge($, command, id)
+    const h = await judge($, command, id, cwd)
     entries.set(id, h)
     $.ui.invalidate('ui.render')
     if (h.decision === 'deny') {
@@ -84,7 +92,7 @@ export const register: Register = on => {
       if (!options.includes(a)) return { deny: 'yolonot: no approval answer; this call was not approved.' }
       if (a === 'Explain') { explanation = await explain($, command, h.reason); continue }
       const verdict = a === 'Allow once' ? 'allow-once' : a === 'Allow this session' ? 'allow-session' : 'deny'
-      await resolve($, verdict, id, command, h.reason)
+      await resolve($, verdict, id, cwd, command, h.reason)
       h.decision = verdict === 'deny' ? 'deny' : 'allow'
       h.layer = 'human'
       h.reason = verdict === 'deny' ? 'rejected' : verdict === 'allow-once' ? 'allowed once' : 'allowed this session'
@@ -94,7 +102,7 @@ export const register: Register = on => {
       }
       return next(e)
     }
-  })
+  }).catch(($, e, next) => next.called ? next(e) : { deny: 'yolonot: safety check failed; this call was not approved.' })
 
   const verdictLine = (Text: any, en: Entry, command: string, cols: number) => {
     const color = en.decision === 'deny' ? 'red' : en.layer === 'human' || en.decision === 'ask' ? 'yellow' : 'green'

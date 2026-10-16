@@ -72,6 +72,18 @@ func (s JudgeSpec) may(decision string) bool {
 	return false
 }
 
+// permit reports whether the judge may hand down v. A deny from a judge
+// that may ask but not deny becomes ask, in place.
+func (s JudgeSpec) permit(v *Verdict) bool {
+	if v.Decision == ActionDeny && !s.may(ActionDeny) && s.may(ActionAsk) {
+		v.Decision = ActionAsk
+		if v.Dec != nil {
+			v.Dec.Decision = ActionAsk
+		}
+	}
+	return s.may(v.Decision)
+}
+
 // remote reports whether the judge calls a network model.
 func (s JudgeSpec) remote() bool {
 	switch s.Kind() {
@@ -277,13 +289,7 @@ func RunJudges(specs []JudgeSpec, in *JudgeInput, beforeRemote func() bool) (*Ve
 			}
 			continue
 		}
-		if ok && v.Decision == ActionDeny && !spec.may(ActionDeny) && spec.may(ActionAsk) {
-			v.Decision = ActionAsk
-			if v.Dec != nil {
-				v.Dec.Decision = ActionAsk
-			}
-		}
-		if !ok || !spec.may(v.Decision) {
+		if !ok || !spec.permit(&v) {
 			continue
 		}
 		return &v, lastErr, false

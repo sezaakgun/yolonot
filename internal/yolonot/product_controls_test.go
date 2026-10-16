@@ -569,3 +569,30 @@ func TestProductExplicitProtocolsUseCustomEndpointContract(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionCommandArgsRejectsUnquotedWords(t *testing.T) {
+	if _, _, _, err := sessionCommandArgs([]string{"echo", "a; rm -rf build", "--session-id", "s"}); err == nil {
+		t.Fatal("split words were joined into a broader command")
+	}
+	command, _, _, err := sessionCommandArgs([]string{"echo \"a; rm -rf build\"", "--session-id", "s"})
+	if err != nil || command != `echo "a; rm -rf build"` {
+		t.Fatalf("quoted command: %q %v", command, err)
+	}
+}
+
+func TestLearningSubcommandsRejectStrayWords(t *testing.T) {
+	productControlHome(t)
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"learning", "forget", "rm", "-rf", "build"}, "one quoted argument"},
+		{[]string{"learning", "clear", "--all", "now"}, "Usage: yolonot learning clear"},
+		{[]string{"learning", "prune", "foo"}, "Usage: yolonot learning prune"},
+	} {
+		out, err := productCLI(t, nil, c.args...)
+		if err == nil || !strings.Contains(string(out), c.want) {
+			t.Errorf("%v: err=%v out=%s", c.args, err, out)
+		}
+	}
+}

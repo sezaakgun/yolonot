@@ -44,9 +44,10 @@ Installers pin the runtime harness. CLI session operations accept
 
 ## Claude Code CLI and desktop
 
-Current installation uses an exec-form command with literal args, a
-`Bash|PowerShell` matcher and `onFailure: "block"` for PreToolUse. The failure
-option requires Claude 2.1.295+. `CLAUDE_CONFIG_DIR` is respected, and invalid
+Installation uses an exec-form command with literal args, a
+`Bash|PowerShell` matcher and `onFailure: "block"` for PreToolUse when the
+`claude` on PATH reports 2.1.295+. For an older or unreadable version it writes
+the quoted shell-command form instead, since an older Claude ignores exec args. `CLAUDE_CONFIG_DIR` is respected, and invalid
 settings are reported without overwriting them.
 [Claude hook reference](https://code.claude.com/docs/en/hooks).
 
@@ -84,6 +85,10 @@ inspected script snapshot. A completed call cannot replay its one-time grant.
 Changed or withheld scripts cannot reuse it. The mod does
 not receive Claude's permission mode, so it also judges under skip-permissions;
 pause yolonot explicitly when intended. Headless mod asks are denied.
+The mod judges with the session's current directory and leaves subagent and
+teammate calls to the classic hook, which receives their real working
+directory; their asks use Claude's own prompt. A `yolonot hook` crash, timeout
+or unreadable answer blocks the call.
 
 The mod currently intercepts Bash calls. It is optional: classic hooks work
 without it, and skills are independent of it. Allow once grants one tool call;
@@ -195,7 +200,9 @@ uses Antigravity for supported Google CLI workflows.
 Antigravity uses a named-hook map in `~/.gemini/config/hooks.json`, matches
 `run_command`, and reads `toolCall.args.CommandLine/Cwd`. Allow maps to
 `auto_approve`, ask to `force_ask`, and deny blocks. Installed commands pin
-the phase because payloads omit the event name. Restart `agy` and inspect
+the phase because payloads omit the event name. A `run_command` the adapter
+cannot read (no command, or no `Cwd` in a multi-root workspace) is denied
+instead of left to the host. Restart `agy` and inspect
 `/hooks`. [Antigravity hooks](https://www.antigravity.google/docs/hooks/).
 
 **yolonot has retired Gemini CLI support.** This is our support decision;

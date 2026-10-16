@@ -40,7 +40,12 @@ approval can influence a future judgment as a hint, without creating a
 permanent allow rule. `Allow once` answers are excluded. Native prompt approvals with no exposed
 persistence choice are conservatively one-time: they do not become yolonot
 session grants or learned precedents. Explicit `yolonot approve` and the
-Claude mod session option provide remembered human grants. Inspect the stored
+Claude mod session option provide remembered human grants. When an agent runs
+`yolonot approve`, `deny`, `reset`, `learning`, `pause`, `resume` or
+`uninstall` itself, or changes `profile`, `risk`, `judges`, `models`,
+`escalation` or `quiet`, the hook always asks (deny on hosts without ask),
+whatever the rules or judges say, also through global flags or `sh -c`, so an
+agent cannot grant itself approval. Inspect the stored
 answers with `yolonot log --human`. Disable recording/use with `learning off`;
 configure retention/caps and remove entries with forget/clear/prune. Answers
 recorded while disabled are excluded from later log-based reconstruction.

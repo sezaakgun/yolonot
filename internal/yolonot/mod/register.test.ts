@@ -8,7 +8,7 @@ const register = new Function(source.replace('export const register', 'const reg
 
 test('a previous rejection still consults the core for pause and policy updates', async () => {
   const handlers = new Map<string, any>()
-  register(((name: string, ...args: any[]) => handlers.set(name, args.at(-1))) as any)
+  register(((name: string, ...args: any[]) => { handlers.set(name, args.at(-1)); return { catch: (h: any) => handlers.set(name + '.catch', h) } }) as any)
   let verdict: 'ask' | 'allow' | 'deny' | '' = 'ask'
   let hookCalls = 0
   let resolveCalls = 0
@@ -48,7 +48,7 @@ test('a previous rejection still consults the core for pause and policy updates'
 for (const choice of ['Allow once', 'Allow this session', 'Deny', 'Explain', 'Explain-error', 'dialog-error', 'dialog-dismissed']) {
   test(`ask dialog resolves ${choice} with the bound tool invocation`, async () => {
     const handlers = new Map<string, any>()
-    register(((name: string, ...args: any[]) => handlers.set(name, args.at(-1))) as any)
+    register(((name: string, ...args: any[]) => { handlers.set(name, args.at(-1)); return { catch: (h: any) => handlers.set(name + '.catch', h) } }) as any)
     const resolutions: any[] = []
     const dialogs: any[] = []
     let explains = 0
@@ -94,3 +94,65 @@ for (const choice of ['Allow once', 'Allow this session', 'Deny', 'Explain', 'Ex
     }
   })
 }
+
+function harness(run: (args: string[], options: any) => any, cwd: () => string = () => '/main') {
+  const handlers = new Map<string, any>()
+  register(((name: string, ...args: any[]) => { handlers.set(name, args.at(-1)); return { catch: (h: any) => handlers.set(name + '.catch', h) } }) as any)
+  const $ = {
+    session: { id: async () => 'cwd-session', cwd: async () => cwd() },
+    process: { run: async (args: string[], options: any) => run(args, options) },
+    ui: { invalidate: () => {}, ask: async () => 'Deny' },
+  }
+  return { $, handlers }
+}
+
+test('subagent calls are left to the classic hook, which sees their real cwd', async () => {
+  let hookCalls = 0
+  const { $, handlers } = harness(() => { hookCalls++; return { stdout: '', stderr: '', exitCode: 0 } })
+  await handlers.get('session.start')($, {}, async (event: any) => event)
+  const result = await handlers.get('tool.call')($, { tool: 'Bash', command: 'ls', tool_use_id: 'sub-1', agentId: 'agent-7' }, async () => ({ continued: true }))
+  expect(result).toEqual({ continued: true })
+  expect(hookCalls).toBe(0)
+})
+
+test('each call is judged with the session cwd at call time', async () => {
+  const seen: string[] = []
+  let dir = '/first'
+  const { $, handlers } = harness((args, options) => {
+    if (args[1] === 'hook') seen.push(JSON.parse(options.stdin).cwd)
+    return { stdout: '', stderr: '', exitCode: 0 }
+  }, () => dir)
+  await handlers.get('session.start')($, {}, async (event: any) => event)
+  const next = async () => ({ continued: true })
+  await handlers.get('tool.call')($, { tool: 'Bash', command: 'ls', tool_use_id: 'c-1' }, next)
+  dir = '/second'
+  await handlers.get('tool.call')($, { tool: 'Bash', command: 'ls', tool_use_id: 'c-2' }, next)
+  expect(seen).toEqual(['/first', '/second'])
+})
+
+for (const [name, reply, blocked] of [
+  ['crash', { stdout: '', stderr: 'panic', exitCode: 2 }, true],
+  ['garbage', { stdout: 'not json', stderr: '', exitCode: 0 }, true],
+  ['passthrough banner', { stdout: JSON.stringify({ systemMessage: 'yolonot: provider down; failure policy → passthrough' }), stderr: '', exitCode: 0 }, false],
+] as const) {
+  test(`a hook ${name} ${blocked ? 'fails closed' : 'passes through'}`, async () => {
+    let executions = 0
+    const { $, handlers } = harness(() => reply)
+    await handlers.get('session.start')($, {}, async (event: any) => event)
+    const result = await handlers.get('tool.call')($, { tool: 'Bash', command: 'ls', tool_use_id: 'f-1' }, async () => { executions++; return { continued: true } })
+    expect(executions).toBe(blocked ? 0 : 1)
+    if (blocked) expect(result.deny).toContain('not approved')
+  })
+}
+
+test('a process.run rejection is denied unless the call already ran', async () => {
+  const { $, handlers } = harness(() => { throw new Error('spawn ENOENT') })
+  await handlers.get('session.start')($, {}, async (event: any) => event)
+  const call = { tool: 'Bash', command: 'ls', tool_use_id: 'r-1' }
+  await expect(handlers.get('tool.call')($, call, async () => ({ continued: true }))).rejects.toThrow('ENOENT')
+  const recover = handlers.get('tool.call.catch')
+  const notRun: any = async () => ({ continued: true }); notRun.called = false
+  expect((await recover($, call, notRun)).deny).toContain('not approved')
+  const ran: any = async () => ({ continued: true }); ran.called = true
+  expect(await recover($, call, ran)).toEqual({ continued: true })
+})

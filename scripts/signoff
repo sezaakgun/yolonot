@@ -51,8 +51,12 @@ bin() { # host binary, honouring the same YOLONOT_E2E_<NAME> override as the tes
 	eval "echo \${$var:-$1}"
 }
 
-version() {
-	"$(bin "$1")" --version 2>/dev/null | head -1 | tr -s ' ' | cut -c1-60
+version() { # in a throwaway HOME: some hosts write config on any run
+	vhome=$(mktemp -d)
+	HOME=$vhome XDG_CONFIG_HOME=$vhome/.config XDG_DATA_HOME=$vhome/.local/share \
+		XDG_CACHE_HOME=$vhome/.cache XDG_STATE_HOME=$vhome/.local/state \
+		"$(bin "$1")" --version 2>/dev/null | head -1 | tr -s ' ' | cut -c1-60
+	rm -rf "$vhome"
 }
 
 post() { # context state description
@@ -108,12 +112,17 @@ check() { # file item → status of one Check item from MANUAL.md
 }
 
 restore() { # harness usual-binary tmp workspace → put the usual build back
-	if [ -n "$2" ]; then
-		"$2" install --harness "$1" >/dev/null && echo "Restored $2 into your $1 hooks." >/dev/tty
+	trap - EXIT INT TERM
+	if [ -n "$2" ] && "$2" install --harness "$1" >/dev/null; then
+		echo "Restored $2 into your $1 hooks." >/dev/tty
+		rm -rf "$3"
+	elif [ -z "$2" ] && "$3/yolonot" uninstall --harness "$1" >/dev/null; then
+		echo "No yolonot on PATH; removed the candidate from your $1 hooks. Reinstall your usual build yourself." >/dev/tty
+		rm -rf "$3"
 	else
-		echo "No yolonot on PATH; reinstall your usual build into $1 yourself." >/dev/tty
+		echo "Could not restore your $1 hooks; they still use the candidate kept in $3. Reinstall your usual build, then delete it." >/dev/tty
 	fi
-	rm -rf "$3" "$4"
+	rm -rf "$4"
 }
 
 # manual walks one MANUAL.md section: build the candidate, set up a
@@ -137,13 +146,13 @@ manual() { # context harness heading
 	# shellcheck disable=SC2064 # expand the paths now, they are local to this run
 	trap "restore '$harness' '$usual' '$tmp' '$ws'" EXIT
 	trap 'exit 130' INT TERM
-	(cd "$ws" && "$cand" install --harness "$harness") >/dev/null || return 1
+	(cd "$ws" && "$cand" install --harness "$harness") >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws"; return 1; }
 	if [ "$harness" = cursor ]; then
 		# Native ask is opt-in by env; a wrapper sets it for the hook only.
 		wrap="$tmp/yolonot-cursor-native-ask"
 		printf '#!/bin/sh\nYOLONOT_CURSOR_NATIVE_ASK=1 exec "%s" "$@"\n' "$cand" >"$wrap"
 		chmod +x "$wrap"
-		sed -i '' "s|$cand hook|$wrap hook|g" "$HOME/.cursor/hooks.json"
+		sed -i '' "s|'$cand' hook|'$wrap' hook|g" "$HOME/.cursor/hooks.json"
 	fi
 	printf '%s\n' "$section" | awk '/^Before:/ { on = 1 } /^\|/ { on = 0 } on' >/dev/tty
 	case "$harness" in
@@ -164,7 +173,7 @@ manual() { # context harness heading
 	else
 		ask "$app.app not found in /Applications; app version: "
 		ver=$reply
-		[ -n "$ver" ] || { echo "version required" >&2; return 1; }
+		[ -n "$ver" ] || { echo "version required" >&2; restore "$harness" "$usual" "$tmp" "$ws"; return 1; }
 	fi
 
 	failed="" n=0
@@ -221,7 +230,6 @@ $rows
 EOF
 
 	restore "$harness" "$usual" "$tmp" "$ws"
-	trap - EXIT INT TERM
 	if [ -n "$failed" ]; then
 		post "$ctx" failure "$ver: rows$failed failed"
 		return 1

@@ -76,7 +76,7 @@ func emitFailure(cfg Config, p HookPayload, command, cwd, sessionID, project, ki
 	if action == ActionPassthrough {
 		r := HookResponse{}
 		r.HookSpecificOutput.HookEventName = p.HookEventName
-		r.SystemMessage = "yolonot: " + reason
+		r.SystemMessage = "yolonot: " + sanitizeBanner(reason)
 		emitHook(activeHarnessFormat(r))
 		return
 	}

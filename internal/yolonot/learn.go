@@ -56,8 +56,9 @@ func recordPrecedent(e DecisionEntry) {
 	})
 }
 
-// rebuildPrecedents scans the decision log once, for installs that logged
-// human answers before the precedent file existed.
+// rebuildPrecedents scans the decision log when the precedent file is
+// missing. Older builds labelled inferred completions as human answers, so
+// only entries marked eligible when they were written are trusted.
 func rebuildPrecedents() {
 	f, err := os.Open(decisionsPath())
 	if err != nil {
@@ -73,7 +74,7 @@ func rebuildPrecedents() {
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		var e DecisionEntry
-		if json.Unmarshal(sc.Bytes(), &e) != nil || !isPrecedent(e) {
+		if json.Unmarshal(sc.Bytes(), &e) != nil || !e.Precedent || !isPrecedent(e) {
 			continue
 		}
 		b, _ := json.Marshal(precedent{Ts: e.Timestamp, Cwd: e.Cwd, Command: e.Command, Decision: e.Decision})

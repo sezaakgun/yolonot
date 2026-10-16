@@ -184,9 +184,16 @@ func TestHookCommandQuotesInstallationPath(t *testing.T) {
 	}
 }
 
+func stubClaudeExecHooks(t *testing.T, ok bool) {
+	old := claudeSupportsExecHooks
+	claudeSupportsExecHooks = func() bool { return ok }
+	t.Cleanup(func() { claudeSupportsExecHooks = old })
+}
+
 func TestClaudeCurrentExecFormBlocksHookFailures(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	stubClaudeExecHooks(t, true)
 	h := &ClaudeHarness{}
 	const binary = "/example/a path with 'quotes' and $expansion/yolonot"
 	if err := h.Install(binary); err != nil {
@@ -205,5 +212,33 @@ func TestClaudeCurrentExecFormBlocksHookFailures(t *testing.T) {
 	}
 	if pre["matcher"] != "Bash|PowerShell" {
 		t.Fatal(pre)
+	}
+}
+
+func TestClaudeOlderOrUnknownVersionGetsShellForm(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	stubClaudeExecHooks(t, false)
+	h := &ClaudeHarness{}
+	const binary = "/example/a path/yolonot"
+	if err := h.Install(binary); err != nil {
+		t.Fatal(err)
+	}
+	hooks := h.loadSettings()["hooks"].(map[string]interface{})
+	pre := hooks["PreToolUse"].([]interface{})[0].(map[string]interface{})
+	handler := pre["hooks"].([]interface{})[0].(map[string]interface{})
+	if handler["command"] != shellHookCommand(binary, "claude") || handler["args"] != nil || handler["onFailure"] != "block" {
+		t.Fatalf("fallback hook: %+v", handler)
+	}
+	if !h.IsInstalled() {
+		t.Fatal("shell-form install not detected")
+	}
+}
+
+func TestVersionAtLeast(t *testing.T) {
+	for s, want := range map[string]bool{"2.1.300 (Claude Code)": true, "2.1.295": true, "2.1.294": false, "2.0.999": false, "3.0.0": true, "version unavailable": false} {
+		if got := versionAtLeast(s, [3]int{2, 1, 295}); got != want {
+			t.Errorf("%q: got %v", s, got)
+		}
 	}
 }

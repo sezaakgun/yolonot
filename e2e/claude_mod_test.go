@@ -23,11 +23,16 @@ func startTmux(t *testing.T, s *sandbox, argv ...string) *tmux {
 	return startTmuxIn(t, s.Work, s.Env, argv...)
 }
 
-func startTmuxIn(t *testing.T, dir string, env []string, argv ...string) *tmux {
+func needTmux(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
+}
+
+func startTmuxIn(t *testing.T, dir string, env []string, argv ...string) *tmux {
+	t.Helper()
+	needTmux(t)
 	x := &tmux{t: t, socket: fmt.Sprintf("yolonot-e2e-%d", time.Now().UnixNano()), session: "e2e"}
 	args := []string{"-L", x.socket, "-f", "/dev/null", "new-session", "-d", "-s", x.session, "-x", "200", "-y", "50", "-c", dir, "env", "-i"}
 	args = append(args, env...)
@@ -123,6 +128,7 @@ func (x *tmux) dialog() {
 // must show the chat model's answer and return to the choices.
 func TestClaudeModDialog(t *testing.T) {
 	hostBinary(t, "claude")
+	needTmux(t)
 	for _, c := range []struct {
 		name, choice, repeat string
 		abs                  bool
@@ -195,6 +201,7 @@ func TestClaudeModDialog(t *testing.T) {
 // dialog, and allow/deny rules still decide.
 func TestClaudeModAutoMode(t *testing.T) {
 	hostBinary(t, "claude")
+	needTmux(t)
 	for _, c := range []struct {
 		policy, decision string
 		marker           bool

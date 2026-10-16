@@ -1,6 +1,7 @@
 package yolonot
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -974,7 +975,13 @@ func runEditor(path string) error {
 	}
 	cmd := exec.Command(parts[0], append(parts[1:], path)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
+	err := cmd.Run()
+	// A full-screen editor leaves the alternate screen on exit; the page
+	// would otherwise draw over (and clear) the user's shell screen.
+	if tuiInPage {
+		fmt.Print("\x1b[?1049h")
+	}
+	return err
 }
 
 // stdinIsTerminal is a real isatty check: /dev/null is a character device
@@ -1002,11 +1009,13 @@ func cmdConfigTUI() {
 	defer func() {
 		tuiInPage = false
 		tuiRuleDrafts = nil
+		tuiConfigSnapshot = nil
 		fmt.Print("\x1b[?1049l")
 		if tuiExitMsg != "" {
 			fmt.Println(tuiExitMsg)
 		}
 	}()
+	tuiConfigSnapshot, _ = readConfigSnapshot()
 	cfg := LoadConfig()
 	orig, _ := json.Marshal(cfg)
 	cur := 0
@@ -1051,6 +1060,26 @@ func cmdConfigTUI() {
 // screen, where a plain Println would vanish.
 var tuiExitMsg string
 
+// configSnapshot is config.json as the settings page read it; saving
+// refuses to replace a file another verb rewrote while the page was open.
+type configSnapshot struct {
+	data    []byte
+	existed bool
+}
+
+var tuiConfigSnapshot *configSnapshot
+
+func readConfigSnapshot() (*configSnapshot, error) {
+	data, err := os.ReadFile(configPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return &configSnapshot{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &configSnapshot{data: data, existed: true}, nil
+}
+
 func saveConfigWithBackup(cfg Config) bool {
 	if err := ValidateConfig(cfg); err != nil {
 		tuiNote("Not saved", err.Error())
@@ -1063,6 +1092,17 @@ func saveConfigWithBackup(cfg Config) bool {
 	for _, spec := range cfg.Judges {
 		if err := validateJudgeSpec(cfg, spec); err != nil {
 			tuiNote("Not saved", err.Error())
+			return false
+		}
+	}
+	if tuiConfigSnapshot != nil {
+		now, err := readConfigSnapshot()
+		if err != nil {
+			tuiNote("Not saved", err.Error())
+			return false
+		}
+		if now.existed != tuiConfigSnapshot.existed || !bytes.Equal(now.data, tuiConfigSnapshot.data) {
+			tuiNote("Not saved", "config changed outside settings; reopen settings before saving: "+configPath())
 			return false
 		}
 	}

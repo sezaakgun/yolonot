@@ -81,6 +81,11 @@ func sessionCommandArgs(args []string) (command, sid, cwd string, err error) {
 			words = append(words, a)
 		}
 	}
+	if len(words) > 1 {
+		// Joining words would drop the shell quoting and store a broader command.
+		err = fmt.Errorf("pass the command as one quoted argument: '<exact command>'")
+		return
+	}
 	command = strings.Join(words, " ")
 	if absolute, e := filepath.Abs(cwd); e != nil {
 		err = e

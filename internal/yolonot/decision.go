@@ -346,7 +346,7 @@ func decisionPost(cfg LLMConfig, userPrompt string) (map[string]decisionAnswer, 
 		return nil, fmt.Errorf("invalid JSON response: %w", err)
 	}
 	if out.Error != nil || out.Detail != nil || (out.Success != nil && !*out.Success) || len(out.Errors) > 0 {
-		return nil, fmt.Errorf("decision error (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return nil, fmt.Errorf("decision error (HTTP %d): %s", resp.StatusCode, truncateStr(strings.TrimSpace(string(raw)), 300))
 	}
 	if len(out.Answers) == 0 && len(out.Result) > 0 {
 		var inner struct {

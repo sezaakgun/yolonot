@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -129,12 +131,20 @@ func (c *ClaudeHarness) Install(binaryPath string) error {
 		s["hooks"] = hooks
 	}
 
-	// Current Claude supports direct exec-form handlers. This keeps paths
-	// literal on Bash and PowerShell hosts and blocks if the safety gate
-	// cannot start, crashes, times out, or emits malformed output.
-	args := []string{"hook", "--harness", "claude"}
-	preHook := map[string]interface{}{"type": "command", "command": binaryPath, "args": args, "timeout": 60.0, "onFailure": "block"}
-	postHook := map[string]interface{}{"type": "command", "command": binaryPath, "args": args, "timeout": 60.0}
+	// Claude 2.1.295+ runs exec-form handlers, which keep paths literal on
+	// Bash and PowerShell hosts and block if the safety gate cannot start,
+	// crashes, times out, or emits malformed output. An older Claude ignores
+	// args and would run bare yolonot, which prints status and allows.
+	preHook := map[string]interface{}{"type": "command", "timeout": 60.0, "onFailure": "block"}
+	postHook := map[string]interface{}{"type": "command", "timeout": 60.0}
+	execForm := claudeSupportsExecHooks()
+	for _, h := range []map[string]interface{}{preHook, postHook} {
+		if execForm {
+			h["command"], h["args"] = binaryPath, []string{"hook", "--harness", "claude"}
+		} else {
+			h["command"] = shellHookCommand(binaryPath, "claude")
+		}
+	}
 
 	addHookToEvent(hooks, "PreToolUse", "Bash|PowerShell", preHook)
 	addHookToEvent(hooks, "PostToolUse", "Bash|PowerShell", postHook)
@@ -243,6 +253,29 @@ func (c *ClaudeHarness) removeHooks() error {
 	}
 
 	return c.saveSettings(s)
+}
+
+var claudeSupportsExecHooks = func() bool {
+	path, err := harnessBinary("claude")
+	if err != nil {
+		return false
+	}
+	return versionAtLeast(harnessVersion("claude", path), [3]int{2, 1, 295})
+}
+
+// versionAtLeast reads the first dotted version in s ("2.1.300 (Claude Code)").
+func versionAtLeast(s string, want [3]int) bool {
+	m := regexp.MustCompile(`(\d+)\.(\d+)\.(\d+)`).FindStringSubmatch(s)
+	if m == nil {
+		return false
+	}
+	for i, w := range want {
+		n, _ := strconv.Atoi(m[i+1])
+		if n != w {
+			return n > w
+		}
+	}
+	return true
 }
 
 // Command hooks are shell strings. Quote paths so spaces, quotes and shell
