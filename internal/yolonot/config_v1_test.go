@@ -134,3 +134,18 @@ func TestModelKey(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeDropsPartialLegacyProviders(t *testing.T) {
+	c := Config{
+		Provider:   ProviderConfig{Model: "only-model"},
+		Decision:   ProviderConfig{URL: "https://only-url.example.com"},
+		Escalation: &EscalationConfig{Provider: ProviderConfig{Model: "big-model"}, Disabled: true},
+	}
+	c.normalize()
+	if len(c.Models) != 0 {
+		t.Fatalf("partial v0 blocks must not become catalog models: %+v", c.Models)
+	}
+	if err := ValidateConfig(c); err != nil {
+		t.Fatalf("normalized partial config must validate: %v", err)
+	}
+}

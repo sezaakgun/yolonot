@@ -67,7 +67,7 @@ func Run() {
 	if len(os.Args) > 1 {
 		verb = os.Args[1]
 	}
-	inspectInvalid := verb == "doctor" || verb == "validate" || (verb == "config" && len(os.Args) > 2 && os.Args[2] == "validate") || verb == "hook" || verb == "version" || verb == "uninstall" || verb == "install" || verb == "migrate"
+	inspectInvalid := verb == "doctor" || verb == "validate" || (verb == "config" && len(os.Args) > 2 && os.Args[2] == "validate") || verb == "hook" || verb == "version" || verb == "uninstall" || verb == "install" || verb == "migrate" || verb == "pause" || verb == "resume" || verb == "upgrade" || verb == "mod"
 	if !inspectInvalid {
 		if cfg := LoadConfig(); cfg.LoadError != nil {
 			fmt.Fprintln(os.Stderr, "yolonot:", cfg.LoadError)

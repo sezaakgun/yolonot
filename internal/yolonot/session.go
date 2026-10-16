@@ -96,6 +96,7 @@ func ReadLines(sessionID, suffix string) []string {
 	seen := make(map[string]struct{})
 	var lines []string
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*maxHookInputBytes)
 	for scanner.Scan() {
 		line := decodeSessionLine(suffix, strings.TrimSpace(scanner.Text()))
 		if line == "" {
@@ -119,8 +120,7 @@ func ContainsLine(sessionID, suffix, line string) bool {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024) // handle long lines
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*maxHookInputBytes)
 	for scanner.Scan() {
 		if decodeSessionLine(suffix, strings.TrimSpace(scanner.Text())) == line {
 			return true

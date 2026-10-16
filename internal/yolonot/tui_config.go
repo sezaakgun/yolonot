@@ -650,13 +650,7 @@ func pickEscalationModel(cfg *Config) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	name := modelKey(sel)
-	if existing, exists := cfg.Models[name]; exists && (existing.URL != sel.URL || existing.Model != sel.Model) {
-		name = cfg.addModel(sel)
-	} else {
-		cfg.putModel(name, sel)
-	}
-	return name, true
+	return cfg.addModel(sel), true
 }
 
 // setEscalationModel is shared with `yolonot escalation setup`.
@@ -752,6 +746,10 @@ func editProfileCreate(cfg *Config) {
 	if name == "" {
 		return
 	}
+	if _, exists := cfg.Policy.Profiles[name]; exists {
+		tuiNote("Not created", "profile "+name+" exists")
+		return
+	}
 	profiles, items, cur := profileItems(*cfg)
 	base := tuiSelect("Start from", items, cur)
 	if base < 0 {
@@ -799,6 +797,9 @@ func editTier(tier string) func(*Config) {
 		if p.Builtin {
 			target = tuiInput("Built-in profiles are read-only. Save as", prof+"-custom", prof+"-custom")
 			if target == "" {
+				return
+			}
+			if _, exists := cfg.Policy.Profiles[target]; exists && !tuiConfirm("Replace existing profile "+target+"?") {
 				return
 			}
 		}

@@ -83,6 +83,10 @@ func replaySnapshotFromCollected(command, cwd string, attached []attachedScript,
 	identity, token := nativeExecutableIdentity(command, cwd)
 	if identity != "" {
 		hashes = append(hashes, executableApprovalPrefix(command)+identity)
+	} else if inner := UnwrapCommand(command, SessionWrappers()); inner != "" {
+		if identity, token = nativeExecutableIdentity(inner, cwd); identity != "" {
+			hashes = append(hashes, executableApprovalPrefix(inner)+identity)
+		}
 	}
 	for _, w := range withheld {
 		// A native executable's identity is pinned independently from prompt
@@ -319,7 +323,10 @@ func modInstall(bin string) (string, error) {
 			return "", err
 		}
 	}
-	s := loadSettings()
+	s, err := claudeAdapter().readSettings()
+	if err != nil {
+		return "", err
+	}
 	env, _ := s["env"].(map[string]interface{})
 	if env == nil {
 		env = map[string]interface{}{}
@@ -333,7 +340,9 @@ func modInstall(bin string) (string, error) {
 	}
 	env[pluginDirsKey] = cur
 	s["env"] = env
-	saveSettings(s)
+	if err := claudeAdapter().saveSettings(s); err != nil {
+		return "", err
+	}
 	return dir, nil
 }
 

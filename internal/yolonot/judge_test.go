@@ -202,3 +202,17 @@ func TestCmdJudgesListing(t *testing.T) {
 		}
 	}
 }
+
+func TestIntegration_Judges_DenyOutsideMayBecomesAsk(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	isolateEscalationEnv(t)
+	llm := mockLLMRisk("deny", "critical", "custom prompt said deny", nil)
+	defer llm.Close()
+	SaveConfig(Config{Provider: ProviderConfig{URL: llm.URL, Model: "chat", Timeout: 5}, Judges: []JudgeSpec{{Use: "llm"}}})
+
+	out := runHookWithStruct(t, makePrePayload("judges-5", "some-novel-tool --flag", t.TempDir()))
+	if got := parseResponse(t, out).HookSpecificOutput.PermissionDecision; got != "ask" {
+		t.Fatalf("deny from a judge that may ask must not pass through, got %q (%s)", got, out)
+	}
+}

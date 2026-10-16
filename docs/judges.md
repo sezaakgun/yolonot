@@ -26,7 +26,8 @@ An entry can be an object to narrow what the judge may decide:
 "judges": ["fast_allow", {"use": "jev", "may": ["allow"]}, "gemini"]
 ```
 
-A verdict outside `may` is dropped and the next judge runs. `"may": ["allow"]`
+A verdict outside `may` is dropped and the next judge runs, except a `deny`
+from a judge that may `ask`: it becomes `ask`, never a pass-through. `"may": ["allow"]`
 on a typed model lets it clear the obvious cases and hand everything else to
 the chat model.
 

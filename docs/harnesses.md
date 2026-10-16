@@ -126,7 +126,9 @@ PermissionRequest hook returns `decision.behavior: allow|deny` for an actual
 host approval request; ask leaves that request for the configured host reviewer.
 With `approvals_reviewer = "auto_review"`, a reviewer agent can approve it
 without a human dialog. Use the app's Ask for approval mode for human review;
-PreToolUse alone still cannot force a prompt on every command. Current rules
+PreToolUse alone still cannot force a prompt on every command. Because Codex
+may run a deferred ask without a human, a completed call after an ask is not
+logged as a human approval. Current rules
 are checked again. A paired PermissionRequest is not mistaken for a rejected
 retry.
 

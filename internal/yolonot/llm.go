@@ -438,7 +438,7 @@ func (cfg LLMConfig) credentialError() error {
 		if name == "" {
 			name = cfg.Model
 		}
-		return fmt.Errorf("model %q: missing API key (%s is unavailable in this process); desktop apps and hooks may not load .zshrc; provide the variable to the host process and restart it", name, cfg.APIKeyEnv)
+		return credentialFailure(fmt.Sprintf("model %q: missing API key (%s is unavailable in this process); desktop apps and hooks may not load .zshrc; provide the variable to the host process and restart it", name, cfg.APIKeyEnv))
 	}
 	return nil
 }
@@ -448,8 +448,14 @@ func (cfg LLMConfig) authenticationError(status int) error {
 	if name == "" {
 		name = cfg.Model
 	}
-	return fmt.Errorf("model %q: authentication failed (HTTP %d); check the supplied API key and provider permissions", name, status)
+	return credentialFailure(fmt.Sprintf("model %q: authentication failed (HTTP %d); check the supplied API key and provider permissions", name, status))
 }
+
+// credentialFailure marks a missing or rejected key: the model is unavailable,
+// not answering badly.
+type credentialFailure string
+
+func (e credentialFailure) Error() string { return string(e) }
 
 func (cfg LLMConfig) requestContext() context.Context {
 	if cfg.Context != nil {

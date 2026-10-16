@@ -452,7 +452,8 @@ func callDecision(cfg LLMConfig, userPrompt string) (string, error) {
 	answers, err := decisionPost(cfg, userPrompt)
 	if err != nil {
 		var transport interface{ Timeout() bool }
-		if !errors.As(err, &transport) && !strings.HasPrefix(err.Error(), "decision error (HTTP") {
+		var cred credentialFailure
+		if !errors.As(err, &transport) && !errors.As(err, &cred) && !strings.HasPrefix(err.Error(), "decision error (HTTP") {
 			return "", fmt.Errorf("%w: %v", errDecisionResponse, err)
 		}
 		return "", err

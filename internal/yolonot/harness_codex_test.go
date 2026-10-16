@@ -387,3 +387,43 @@ func TestCodexHarnessGeneratedConfigLoadsInInstalledCodex(t *testing.T) {
 		t.Fatalf("installed Codex rejects generated config: %v\n%s", err, output)
 	}
 }
+
+func TestRemoveHooksWithoutHooksKey(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	os.WriteFile(filepath.Join(dir, "hooks.json"), []byte(`{}`), 0644)
+	os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"theme":"dark"}`), 0644)
+	if err := (&CodexHarness{}).removeHooks(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ClaudeHarness{}).removeHooks(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCodexPostAfterAskCannotInventHumanApproval(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Setenv("YOLONOT_HARNESS", "codex")
+	t.Setenv("YOLONOT_MOD", "")
+	writeGlobalRules(t, home, "ask-cmd touch *ASK*\n")
+	cwd := t.TempDir()
+	sid, command := "codex-deferred-ask", "touch ASK.marker"
+	runHookWithStruct(t, makePrePayload(sid, command, cwd))
+	project := ProjectSessionID(sid, cwd)
+	if !ContainsLine(project, "asked", command) {
+		t.Fatal("ask was not recorded as pending")
+	}
+	post := makePostPayloadStruct(sid, command)
+	post.Cwd = cwd
+	runHookWithStruct(t, post)
+	if ContainsLine(project, "asked", command) {
+		t.Fatal("pending ask survived the completed call")
+	}
+	for _, entry := range ReadRecentDecisions(100) {
+		if entry.SessionID == sid && entry.Layer == "human" {
+			t.Fatalf("invented human verdict: %+v", entry)
+		}
+	}
+}

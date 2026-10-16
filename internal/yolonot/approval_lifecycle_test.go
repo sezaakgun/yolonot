@@ -194,3 +194,30 @@ func TestCompletedModCallCannotReuseOneTimeGrant(t *testing.T) {
 		t.Fatalf("completed tool ID replayed: %s", got)
 	}
 }
+
+func TestNativeExecutableApprovalInvalidationThroughWrapper(t *testing.T) {
+	securityHookHome(t)
+	target := filepath.Join(t.TempDir(), "native")
+	copyNativeFixture(t, target)
+	cwd := t.TempDir()
+	plain := target + " marker"
+	wrapped := "timeout 5 " + plain
+	for _, approved := range []string{plain, wrapped} {
+		_, hashes := modCommandSnapshot(approved, cwd)
+		saveApprovedSnapshot("native-wrapped", approved, hashes)
+	}
+	if !sessionContentOK("native-wrapped", wrapped, cwd) {
+		t.Fatal("unchanged wrapped native snapshot rejected")
+	}
+	b, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b[len(b)-1] ^= 1
+	if err := os.WriteFile(target, b, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if sessionContentOK("native-wrapped", wrapped, cwd) {
+		t.Fatal("changed executable retained approval through a wrapper")
+	}
+}

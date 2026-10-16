@@ -397,9 +397,11 @@ func cmdHook() {
 					dropLineOrVariant(projSessionID, "approved", command)
 					// Cursor CLI also emits afterShellExecution after Skip,
 					// indistinguishable from an empty-output successful call.
+					// Codex defers asks to its own approval policy, which may run
+					// the command with no human involved.
 					// Clear the pending ask so a later call can ask again,
 					// but never fabricate a human approval from this event.
-					if harness.Name() != "cursor" {
+					if harness.Name() != "cursor" && harness.Name() != "codex" {
 						LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "human", Decision: "allow", Source: "allow_once"})
 					}
 				}
@@ -931,6 +933,23 @@ func saveApprovedSnapshot(projSessionID, command string, hashes []string) {
 // (script edited since approval, or approval predates hashing) makes the
 // session layer fall through so the cache/LLM re-judge the new contents.
 func sessionContentOK(projSessionID, command, cwd string) bool {
+	inner := UnwrapCommand(command, SessionWrappers())
+	for _, form := range []string{command, inner} {
+		if form != "" && !nativeSnapshotOK(projSessionID, form, cwd) {
+			return false
+		}
+	}
+	h := scriptHash(command, cwd)
+	if h == "" && inner != "" {
+		h = scriptHash(inner, cwd)
+	}
+	if h == "" {
+		return true
+	}
+	return ContainsLine(projSessionID, "approvedhash", h)
+}
+
+func nativeSnapshotOK(projSessionID, command, cwd string) bool {
 	identity, _ := nativeExecutableIdentity(command, cwd)
 	prefix := executableApprovalPrefix(command)
 	hadNativeSnapshot := false
@@ -940,21 +959,10 @@ func sessionContentOK(projSessionID, command, cwd string) bool {
 			break
 		}
 	}
-	if identity != "" || hadNativeSnapshot {
-		if identity == "" || !ContainsLine(projSessionID, "approvedhash", prefix+identity) {
-			return false
-		}
-	}
-	h := scriptHash(command, cwd)
-	if h == "" {
-		if inner := UnwrapCommand(command, SessionWrappers()); inner != "" {
-			h = scriptHash(inner, cwd)
-		}
-	}
-	if h == "" {
+	if identity == "" && !hadNativeSnapshot {
 		return true
 	}
-	return ContainsLine(projSessionID, "approvedhash", h)
+	return identity != "" && ContainsLine(projSessionID, "approvedhash", prefix+identity)
 }
 
 func checkCache(command, cwd string) *Decision {

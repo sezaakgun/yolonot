@@ -114,7 +114,7 @@ func TestPrintClassifierEffectiveEndToEnd(t *testing.T) {
 		t.Fatalf("mkdir home/.yolonot: %v", err)
 	}
 	cfgJSON := `{
-  "provider": {"name": "openai", "model": "gpt-5.4-mini"},
+  "provider": {"name": "openai", "url": "https://api.openai.com/v1", "model": "gpt-5.4-mini"},
   "classifier": {
     "impl": "llm",
     "context": ["$defaults", "config: trusted github.com/yourorg/*"],

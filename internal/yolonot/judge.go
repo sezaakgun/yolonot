@@ -277,6 +277,12 @@ func RunJudges(specs []JudgeSpec, in *JudgeInput, beforeRemote func() bool) (*Ve
 			}
 			continue
 		}
+		if ok && v.Decision == ActionDeny && !spec.may(ActionDeny) && spec.may(ActionAsk) {
+			v.Decision = ActionAsk
+			if v.Dec != nil {
+				v.Dec.Decision = ActionAsk
+			}
+		}
 		if !ok || !spec.may(v.Decision) {
 			continue
 		}

@@ -186,7 +186,10 @@ func offerMigration(cfg Config) {
 
 func migrateConfig(cfg Config) {
 	if data, err := os.ReadFile(configPath()); err == nil {
-		os.WriteFile(configPath()+".bak", data, 0600)
+		if err := atomicWriteFile(configPath()+".bak", data, 0600); err != nil {
+			fmt.Fprintln(os.Stderr, "yolonot: backup failed, config left unchanged:", err)
+			os.Exit(1)
+		}
 	}
 	mustSaveConfig(cfg)
 	os.Remove(migrateDeclinedPath())
@@ -202,6 +205,11 @@ func printMigrationSummary(cfg Config) {
 	}
 	if cfg.Policy.Profile != "" {
 		fmt.Println("  policy.profile: " + cfg.Policy.Profile)
+	}
+	for _, name := range cfg.ModelNames() {
+		if m := cfg.Models[name]; m.APIKey != "" && m.EnvKey == "" {
+			fmt.Printf("  warning: model %s has an inline api_key, which v1 does not keep; set env_key\n", name)
+		}
 	}
 }
 
@@ -231,7 +239,9 @@ func cmdMigrate(args []string) {
 			return
 		}
 		cfg.ConfigVersion = 1
-		out, _ := json.MarshalIndent(cfg, "", "  ")
+		shown := cfg
+		shown.Models = withoutAPIKeys(cfg.Models)
+		out, _ := json.MarshalIndent(shown, "", "  ")
 		fmt.Println(string(out))
 		fmt.Println()
 		printMigrationSummary(cfg)

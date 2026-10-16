@@ -271,14 +271,7 @@ func saveConfig(c Config) error {
 	// default — a same-user process (backup agent, cloud sync, snooper)
 	// could read it. Scrub on a copy: Models is a shared map and the
 	// caller may still need the key for a connection test.
-	if len(c.Models) > 0 {
-		scrubbed := make(map[string]ModelConfig, len(c.Models))
-		for k, m := range c.Models {
-			m.APIKey = ""
-			scrubbed[k] = m
-		}
-		c.Models = scrubbed
-	}
+	c.Models = withoutAPIKeys(c.Models)
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
@@ -290,6 +283,18 @@ func saveConfig(c Config) error {
 	}
 	Verbosef("wrote %s (%d bytes)", configPath(), len(data)+1)
 	return nil
+}
+
+func withoutAPIKeys(models map[string]ModelConfig) map[string]ModelConfig {
+	if len(models) == 0 {
+		return models
+	}
+	scrubbed := make(map[string]ModelConfig, len(models))
+	for k, m := range models {
+		m.APIKey = ""
+		scrubbed[k] = m
+	}
+	return scrubbed
 }
 
 // parseHarnessFlag scans os.Args[2:] for "--harness <name>", "--harness=<name>",

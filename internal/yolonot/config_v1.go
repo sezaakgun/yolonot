@@ -220,13 +220,19 @@ func (c *Config) addModel(m ModelConfig) string {
 func (c *Config) normalize() {
 	moved := false
 	chat, typed := "", ""
+	// v0 blocks missing url or model never ran; dropping them keeps a partial
+	// block from becoming an invalid catalog model that denies every command.
 	if c.Provider.URL != "" || c.Provider.Model != "" {
-		chat = c.addModel(c.Provider)
+		if c.Provider.URL != "" && c.Provider.Model != "" {
+			chat = c.addModel(c.Provider)
+		}
 		c.Provider = ProviderConfig{}
 		moved = true
 	}
 	if c.Decision.URL != "" || c.Decision.Model != "" {
-		typed = c.addModel(c.Decision)
+		if c.Decision.URL != "" && c.Decision.Model != "" {
+			typed = c.addModel(c.Decision)
+		}
 		c.Decision = ProviderConfig{}
 		moved = true
 	}
@@ -244,7 +250,9 @@ func (c *Config) normalize() {
 			}
 		}
 		esc := *c.Escalation
-		esc.Model = c.addModel(p)
+		if p.URL != "" && p.Model != "" {
+			esc.Model = c.addModel(p)
+		}
 		esc.Provider = ProviderConfig{}
 		c.Escalation = &esc
 		moved = true

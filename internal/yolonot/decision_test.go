@@ -2,6 +2,7 @@ package yolonot
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -217,5 +218,12 @@ func TestDecisionHints(t *testing.T) {
 	}
 	if strings.Contains(got, "- \n") {
 		t.Errorf("blank entry rendered: %q", got)
+	}
+}
+
+func TestCallDecisionMissingKeyIsNotParseError(t *testing.T) {
+	_, err := callDecision(LLMConfig{URL: "https://decisions.example.com/v1/systemone", Model: "jev-latest", APIKeyEnv: "TYPESAFE_API_KEY"}, "ls")
+	if err == nil || errors.Is(err, errDecisionResponse) {
+		t.Fatalf("missing key must surface as unavailable, not a parse error: %v", err)
 	}
 }

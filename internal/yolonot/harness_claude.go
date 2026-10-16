@@ -235,7 +235,11 @@ func (c *ClaudeHarness) removeHooks() error {
 				newEntries = append(newEntries, e)
 			}
 		}
-		hooks[event] = newEntries
+		if len(newEntries) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = newEntries
+		}
 	}
 
 	return c.saveSettings(s)
