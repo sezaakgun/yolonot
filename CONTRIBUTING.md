@@ -105,8 +105,29 @@ configuration, lifecycle and security regression coverage. Bun is needed for
 the OpenCode plugin and Claude mod middleware tests. Model-provider live
 probes are separate and opt-in.
 
-A passing adapter fixture is not proof of a host approval dialog. For native
-checks, prefer isolated HOME/XDG directories, install the candidate there, use a
+A passing adapter fixture is not proof of a host approval dialog. The `e2e/`
+package drives real hosts against a freshly built binary:
+
+```bash
+go test -tags e2e ./e2e/ -v                     # Claude CLI, Claude mod (tmux), Codex, OpenCode V2, Antigravity, Cursor CLI
+YOLONOT_E2E_AUTH=1 go test -tags e2e ./e2e/ -v  # also live Cursor CLI checks (logged-in account, real model)
+```
+
+Hosts that allow it point at a scripted local model (base URL settings).
+Cursor CLI has no such setting, so `cursor_test.go` fakes the slice of
+Cursor's backend a run needs (`CURSOR_API_ENDPOINT`, plus the CLI's
+`AGENT_CLI_E2E` switch that skips sign-in). Its hand-encoded messages follow
+the schema strings embedded in the CLI and may need updating when a new CLI
+version changes them; the live checks below catch that.
+
+The auth tier keeps the host's real HOME for its login and starts the host
+with `YOLONOT_DISABLED=1`, so a globally installed yolonot neither decides
+nor records the test commands.
+
+Missing hosts are skipped; `YOLONOT_E2E_<NAME>` (for example
+`YOLONOT_E2E_CURSOR_AGENT`) points at a binary outside `PATH`, and
+`YOLONOT_E2E_DEBUG=1` prints each scripted model request. Desktop apps stay
+manual: follow [e2e/MANUAL.md](e2e/MANUAL.md). For new native checks, prefer isolated HOME/XDG directories, install the candidate there, use a
 scripted local model or native tool API, and assert harmless marker execution
 for allow/deny/ask/reject. Codex also needs trusted hook hashes and a
 PermissionRequest client; verify untrusted hooks are skipped. Never change
@@ -117,3 +138,25 @@ settings, record that scope and never copy credentials into fixtures or logs.
 Record exact versions, expected host deferrals and untested UI surfaces in
 [the compatibility guide](docs/harnesses.md#verification-scope). Keep raw account
 metadata and machine-specific test captures out of version control.
+
+### Merge sign-off
+
+`main` requires one commit status per harness, posted by a maintainer after
+running the checks locally on the PR's final commit:
+
+```bash
+scripts/signoff all                    # every check below
+scripts/signoff codex opencode         # selected checks
+scripts/signoff --skip "docs only" claude-desktop codex-desktop cursor-ide
+scripts/signoff --dry-run codex        # run without posting
+```
+
+| Status | Source |
+|--------|--------|
+| `e2e/claude-cli`, `e2e/claude-mod`, `e2e/codex`, `e2e/opencode`, `e2e/agy`, `e2e/cursor-cli` | e2e tests, no account |
+| `manual/claude-desktop`, `manual/codex-desktop`, `manual/cursor-ide` | guided run of [e2e/MANUAL.md](e2e/MANUAL.md): you act in the app, the script checks markers and the decision log |
+
+The script refuses a working tree that differs from `HEAD` and fails a check
+whose tests were skipped. A status belongs to one commit: a new push needs a
+new sign-off, so sign off last. `--skip` posts success with the reason shown
+on the PR. Unit tests run in CI (`test` workflow).
