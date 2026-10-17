@@ -846,8 +846,10 @@ func pickProvider(config Config, escalation bool) (ProviderConfig, bool) {
 		}
 
 		timeout := 10
-		if strings.Contains(p.URL, "localhost") || strings.Contains(p.URL, "openrouter") || p.URL == "claude-cli" {
+		if strings.Contains(p.URL, "localhost") || p.URL == "claude-cli" || (escalation && strings.Contains(p.URL, "openrouter")) {
 			timeout = 30
+		} else if strings.Contains(p.URL, "openrouter") {
+			timeout = 15
 		}
 
 		selected = ProviderConfig{Name: p.Name, URL: p.URL, Model: model, EnvKey: p.EnvKey, Timeout: timeout}
@@ -1143,6 +1145,9 @@ func cmdStatus() {
 	denied := ReadLines(projSessionID, "denied")
 
 	fmt.Printf("yolonot session: %s (project: %s)\n", sessionID, filepath.Base(cwd))
+	if isPaused(sessionID) {
+		fmt.Printf("  ⚠ Session %s is PAUSED (all commands bypass yolonot; run: yolonot resume)\n", sessionID)
+	}
 	fmt.Printf("  %d approved · %d asked · %d denied\n\n", len(approved), len(asked), len(denied))
 
 	if len(approved) > 0 {
@@ -1309,6 +1314,33 @@ func extractSubcommandVerb(args []string) string {
 	return strings.Join(verbs, " ")
 }
 
+// evolveContextLine summarises one logged decision for the suggest
+// prompt: what the judges said and what they could not see.
+func evolveContextLine(e DecisionEntry) string {
+	parts := []string{"decision=" + e.Decision}
+	if e.Risk != "" {
+		parts = append(parts, "risk="+e.Risk)
+	}
+	if e.Escalated {
+		switch {
+		case e.EscalationError != "":
+			parts = append(parts, "escalation="+e.EscalationError)
+		case e.EscalationDecision != "":
+			parts = append(parts, "escalation="+e.EscalationDecision+"/"+e.EscalationRisk+" ("+e.EscalationOutcome+")")
+		}
+	}
+	if len(e.Withheld) > 0 {
+		parts = append(parts, "not shown: "+strings.Join(e.Withheld, "; "))
+	}
+	if isAgentEntry(e) {
+		parts = append(parts, "from a subagent")
+	}
+	if e.Reasoning != "" {
+		parts = append(parts, "reason: "+truncateStr(e.Reasoning, 120))
+	}
+	return strings.Join(parts, ", ")
+}
+
 // timeWeight returns a weight for a decision based on how recent it is.
 // Today's entries count full (1.0), last week 0.75, last month 0.5,
 // older entries 0.25.
@@ -1338,6 +1370,7 @@ type evolveFinding struct {
 	Weighted float64
 	Desc     string
 	Examples []string
+	Context  []string // one line per example: verdicts, risk, escalation, withheld scripts
 }
 
 // evolveChange holds a rule chosen by the user during cmdEvolve.
@@ -1356,43 +1389,52 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 		weighted float64
 		count    int
 		examples []string
+		context  []string
 	}
 
 	askBuckets := map[string]*bucket{}
 	allowBuckets := map[string]*bucket{}
+	timeoutBuckets := map[string]*bucket{}
+	withheldBuckets := map[string]*bucket{}
+	add := func(buckets map[string]*bucket, pat string, e DecisionEntry, w float64) {
+		b, ok := buckets[pat]
+		if !ok {
+			b = &bucket{}
+			buckets[pat] = b
+		}
+		b.weighted += w
+		b.count++
+		if len(b.examples) < maxExamples {
+			b.examples = append(b.examples, e.Command)
+			b.context = append(b.context, evolveContextLine(e))
+		}
+	}
 
 	for _, e := range entries {
 		if e.Command == "" {
 			continue
 		}
-		pat := normalizeCommand(e.Command)
+		pat := askShape(e.Command)
 		if pat == "" {
 			continue
 		}
 		w := timeWeight(e.Timestamp)
 
-		if e.Decision == "ask" && isModelLayer(e.Layer) {
-			b, ok := askBuckets[pat]
-			if !ok {
-				b = &bucket{}
-				askBuckets[pat] = b
+		switch {
+		case e.Decision == "ask" && isModelLayer(e.Layer) && len(e.Withheld) > 0:
+			// Keyed by the script the judge could not see: the fix is a hint
+			// about that script, whatever command shape invoked it.
+			path := e.Withheld[0]
+			if i := strings.Index(path, ": "); i > 0 {
+				path = path[:i]
 			}
-			b.weighted += w
-			b.count++
-			if len(b.examples) < maxExamples {
-				b.examples = append(b.examples, e.Command)
-			}
-		} else if e.Decision == "allow" && isModelLayer(e.Layer) && e.Confidence > 0 && e.Confidence < 0.8 {
-			b, ok := allowBuckets[pat]
-			if !ok {
-				b = &bucket{}
-				allowBuckets[pat] = b
-			}
-			b.weighted += w
-			b.count++
-			if len(b.examples) < maxExamples {
-				b.examples = append(b.examples, e.Command)
-			}
+			add(withheldBuckets, path, e, w)
+		case e.Decision == "ask" && isModelLayer(e.Layer) && e.EscalationError == "timeout":
+			add(timeoutBuckets, pat, e, w)
+		case e.Decision == "ask" && isModelLayer(e.Layer):
+			add(askBuckets, pat, e, w)
+		case e.Decision == "allow" && isModelLayer(e.Layer) && e.Confidence > 0 && e.Confidence < 0.8:
+			add(allowBuckets, pat, e, w)
 		}
 	}
 
@@ -1415,10 +1457,13 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 				Weighted: b.weighted,
 				Desc:     fmt.Sprintf(descFmt, b.count, b.weighted),
 				Examples: b.examples,
+				Context:  b.context,
 			})
 		}
 	}
 
+	addFindings(withheldBuckets, "SCRIPT NOT SHOWN", "asked %dx with this script unseen by the judge (weighted: %.1f)")
+	addFindings(timeoutBuckets, "ESCALATION TIMEOUT", "asked %dx because the second model timed out (weighted: %.1f)")
 	addFindings(askBuckets, "REPEATED ASK", "asked %dx (weighted: %.1f)")
 	addFindings(allowBuckets, "RISKY ALLOW", "allowed %dx at low confidence (weighted: %.1f)")
 
@@ -1758,7 +1803,7 @@ func cmdRisk(args []string) {
 		return
 	}
 
-	if args[1] == "reset" {
+	if args[1] == "reset" || (len(args) == 3 && args[2] == "reset") {
 		cfg := LoadConfig()
 		if !requireV1(&cfg) {
 			return
@@ -1772,6 +1817,13 @@ func cmdRisk(args []string) {
 			return
 		}
 		tier := args[2]
+		if args[2] == "reset" {
+			tier = args[1]
+		}
+		if !isValidRisk(tier) {
+			fmt.Fprintf(os.Stderr, "Invalid tier %q. Valid: %s\n", tier, strings.Join(allRiskTiers, ", "))
+			return
+		}
 		hp := cfg.harnessPolicy(h.Name())
 		delete(hp.RiskMap, tier)
 		if len(hp.RiskMap) == 0 {
@@ -1787,13 +1839,17 @@ func cmdRisk(args []string) {
 		fmt.Fprintln(os.Stderr, "Usage: yolonot risk <harness> <tier> <action>")
 		return
 	}
-	tier, action := args[1], args[2]
+	tier, action := args[1], normalizeRiskAction(args[2])
 	if !isValidRisk(tier) {
 		fmt.Fprintf(os.Stderr, "Invalid tier %q. Valid: %s\n", tier, strings.Join(allRiskTiers, ", "))
 		return
 	}
-	if !isValidAction(action) {
-		fmt.Fprintf(os.Stderr, "Invalid action %q. Valid: allow, ask, deny, passthrough\n", action)
+	if action == ActionForceAllow && tier == RiskCritical {
+		fmt.Fprintln(os.Stderr, "Invalid action: force_allow cannot be used on the critical tier.")
+		return
+	}
+	if !isValidActionForTier(tier, action) {
+		fmt.Fprintf(os.Stderr, "Invalid action %q. Valid: allow, force_allow, ask, deny, passthrough\n", args[2])
 		return
 	}
 	cfg := LoadConfig()

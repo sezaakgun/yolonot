@@ -565,7 +565,7 @@ func TestStatsAndLogEscalationSurfacing(t *testing.T) {
 	LogDecision(DecisionEntry{Command: "cmd-c", Decision: "allow", Layer: "cache",
 		Escalated: true}) // replay: provenance only, no outcome → not a fire
 
-	out := captureStdout(cmdStats)
+	out := captureStdout(func() { cmdStats() })
 	if !strings.Contains(out, "Escalation:") {
 		t.Fatalf("stats missing escalation section:\n%s", out)
 	}

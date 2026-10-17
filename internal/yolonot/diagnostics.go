@@ -160,7 +160,56 @@ func doctorChecks(cfg Config, targets []Harness, probe bool) []diagnosticCheck {
 	if len(cfg.Judges) == 0 {
 		checks = append(checks, diagnosticCheck{Name: "judge_chain", Status: "warning", Detail: "Empty chain: rules/session policy still apply, otherwise host permissions decide."})
 	}
+	if esc := GetEscalationConfig(); esc.Model != "" {
+		if c, ok := escalationLatencyCheck(ReadRecentDecisions(500), resolveTimeoutSeconds(esc, 10)); ok {
+			checks = append(checks, c)
+		}
+	}
+	checks = append(checks, ruleLintChecks(LoadRules())...)
+	if paused := pausedSessions(); len(paused) > 0 {
+		checks = append(checks, diagnosticCheck{Name: "paused_sessions", Status: "warning", Detail: fmt.Sprintf("%d paused session(s): %s (run: yolonot resume --session-id <id>)", len(paused), strings.Join(paused, ", "))})
+	}
 	checks = append(checks, diagnosticCheck{Name: "live_enforcement", Status: "info", Detail: "Registration and version checks do not prove host execution. Run the documented harmless host smoke test after restarting."})
+	return checks
+}
+
+// escalationLatencyCheck reports how the second model's answer times
+// compare with its timeout, both in milliseconds.
+func escalationLatencyCheck(entries []DecisionEntry, timeoutSeconds int) (diagnosticCheck, bool) {
+	es := collectEscalationStats(entries)
+	if es.fired == 0 {
+		return diagnosticCheck{}, false
+	}
+	detail := fmt.Sprintf("%d fired, %d timed out, p50 %dms, p90 %dms, timeout %ds",
+		es.fired, es.timeouts, percentile(es.latencies, 50), percentile(es.latencies, 90), timeoutSeconds)
+	c := diagnosticCheck{Name: "escalation_latency", Status: "ok", Detail: detail}
+	if warn := escalationLatencyWarning(es, timeoutSeconds); warn != "" {
+		c.Status, c.Detail = "warning", warn+"; "+detail+". Raise the model's timeout (yolonot models) or pick a faster one."
+	}
+	return c, true
+}
+
+// ruleLintChecks flags deny/ask command globs that match far more than
+// they read as: a pattern ending in `/*` matches every absolute path.
+func ruleLintChecks(rules []Rule) []diagnosticCheck {
+	var checks []diagnosticCheck
+	for _, r := range rules {
+		if r.Type != "cmd" || (r.Action != "deny" && r.Action != "ask") {
+			continue
+		}
+		if !strings.HasSuffix(r.Pattern, "/*") {
+			continue
+		}
+		stem := strings.TrimSuffix(r.Pattern, "/*")
+		probe := strings.TrimPrefix(stem, "*") + "/tmp/probe"
+		fields := strings.Fields(probe)
+		if len(fields) == 0 || !matchCmd(r.Pattern, probe, fields[0]) {
+			continue
+		}
+		checks = append(checks, diagnosticCheck{Name: "rule_pattern", Status: "warning",
+			Detail: fmt.Sprintf("%s-cmd %s also matches %q; for the literal `/` or `/*` argument alone use `%s-cmd %s/` and `%s-cmd %s/?`",
+				r.Action, r.Pattern, probe, r.Action, stem, r.Action, stem)})
+	}
 	return checks
 }
 

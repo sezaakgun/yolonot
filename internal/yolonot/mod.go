@@ -236,13 +236,13 @@ func cmdMod(args []string) {
 		case "allow-once":
 			dropLine(proj, "asked", r.Command)
 			AppendLine(proj, "once", r.Command)
-			LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "allow", Source: "allow_once"})
+			LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "allow", Source: "allow_once", ToolUseID: r.ToolUseID})
 			entry.Decision, entry.Reason = "allow", "allowed once"
 		case "allow-session":
 			entry.Decision, entry.Reason = "allow", "allowed for this session"
 		case "deny":
 			AppendLine(proj, "denied", r.Command)
-			LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "deny", Source: "ask_rejected"})
+			LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "deny", Source: "ask_rejected", ToolUseID: r.ToolUseID})
 			entry.Decision, entry.Reason = "deny", "rejected by the user"
 		default:
 			fmt.Fprintln(os.Stderr, "yolonot mod resolve: verdict must be allow-once, allow-session or deny")

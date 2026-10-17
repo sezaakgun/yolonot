@@ -20,17 +20,33 @@ func executableApprovalPrefix(command string) string {
 }
 
 func nativeExecutableIdentity(command, cwd string) (identity, token string) {
-	if !isInertCommand(command) {
+	dir := ""
+	if isInertCommand(command) {
+		words := strings.Fields(command)
+		if len(words) > 0 && strings.Contains(words[0], "/") {
+			token = words[0]
+		}
+	} else {
+		for _, hit := range provenScriptTokens(command) {
+			if strings.Contains(hit.token, "/") {
+				token, dir = hit.token, hit.dir
+				break
+			}
+		}
+	}
+	if token == "" {
 		return "", ""
 	}
-	words := strings.Fields(command)
-	if len(words) == 0 || !strings.Contains(words[0], "/") {
-		return "", ""
-	}
-	token = words[0]
 	path := token
 	if !filepath.IsAbs(path) {
-		path = cwd + string(filepath.Separator) + path
+		base := cwd
+		if dir != "" {
+			base = dir
+			if !filepath.IsAbs(base) {
+				base = cwd + string(filepath.Separator) + base
+			}
+		}
+		path = base + string(filepath.Separator) + path
 	}
 	if isSensitivePath(path) {
 		return "", token

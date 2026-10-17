@@ -457,3 +457,129 @@ func (m *modelServer) gemini(w http.ResponseWriter, body obj) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	fmt.Fprintf(w, "data: %s\n\n", b)
 }
+
+func TestCrossHarnessBinaryE2E(t *testing.T) {
+	harnesses := []struct {
+		name      string
+		wantAllow string
+	}{
+		{"claude", `"permissionDecision":"allow"`},
+		{"codex", `"behavior":"allow"`},
+		{"opencode", `"permissionDecision":"allow"`},
+		{"antigravity", `"decision":"auto_approve"`},
+		{"cursor", `"permission":"allow"`},
+	}
+
+	for _, h := range harnesses {
+		t.Run(h.name, func(t *testing.T) {
+			s := newSandbox(t, "")
+			mainRepo := filepath.Join(s.Work, "main")
+			s.mkdir(filepath.Join(mainRepo, ".git", "worktrees", "wt1"))
+			s.write(filepath.Join(s.Work, ".yolonot"), `context "E2E-WORK-PARENT"`+"\n")
+			s.write(filepath.Join(mainRepo, ".yolonot"), `allow-hint "E2E-MAIN-HINT"`+"\n")
+
+			wt1 := filepath.Join(s.Home, "wt1")
+			s.mkdir(filepath.Join(wt1, "scripts"))
+			s.write(filepath.Join(wt1, ".git"), "gitdir: "+filepath.Join(mainRepo, ".git", "worktrees", "wt1")+"\n")
+			s.write(filepath.Join(wt1, "scripts", "gate.sh"), "echo E2E-WT-SCRIPT-BODY\n")
+
+			var gotSys, gotUser string
+			primarySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body obj
+				json.NewDecoder(r.Body).Decode(&body)
+				if sys, ok := body["system"].(string); ok {
+					gotSys = sys
+				}
+				if msgs, ok := body["messages"].([]any); ok {
+					for _, m := range msgs {
+						mm, _ := m.(obj)
+						if mm["role"] == "user" {
+							gotUser, _ = mm["content"].(string)
+						}
+					}
+				}
+				// Verify Anthropic request omits temperature (Bug #4a).
+				if _, hasTemp := body["temperature"]; hasTemp {
+					t.Errorf("%s anthropic request included temperature", h.name)
+				}
+				json.NewEncoder(w).Encode(obj{
+					"content": []obj{{"type": "text", "text": `{"decision":"ask","risk":"moderate","reasoning":"unsure"}`}},
+				})
+			}))
+			defer primarySrv.Close()
+
+			escSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(obj{
+					"choices": []obj{{"message": obj{"content": `{"decision":"allow","risk":"moderate","reasoning":"rescued"}`}}},
+				})
+			}))
+			defer escSrv.Close()
+
+			cfgJSON, _ := json.Marshal(obj{
+				"config_version": 1,
+				"models": obj{
+					"primary": obj{"url": primarySrv.URL + "/v1/messages", "model": "claude-haiku-5-5", "protocol": "anthropic"},
+					"esc":     obj{"url": escSrv.URL + "/v1/chat/completions", "model": "gpt-5.4", "protocol": "chat"},
+				},
+				"judges":     []string{"primary"},
+				"escalation": obj{"model": "esc"},
+				"policy":     obj{"profile": "fast"},
+			})
+			s.write(".yolonot/config.json", string(cfgJSON))
+
+			command := "chmod +x ./scripts/gate.sh && ./scripts/gate.sh"
+			args := []string{"hook", "--harness", h.name}
+			var payload []byte
+			switch h.name {
+			case "antigravity":
+				args = append(args, "--phase", "pre")
+				payload, _ = json.Marshal(obj{
+					"conversationId": "e2e-sess-" + h.name,
+					"toolCall":       obj{"name": "run_command", "args": obj{"CommandLine": command, "Cwd": wt1}},
+				})
+			case "cursor":
+				payload, _ = json.Marshal(obj{
+					"conversation_id": "e2e-sess-" + h.name,
+					"hook_event_name": "beforeShellExecution",
+					"command":         command,
+					"cwd":             wt1,
+				})
+			case "codex":
+				payload, _ = json.Marshal(obj{
+					"hook_event_name": "PermissionRequest",
+					"tool_name":       "Bash",
+					"session_id":      "e2e-sess-" + h.name,
+					"cwd":             wt1,
+					"tool_input":      obj{"command": command},
+				})
+			default:
+				payload, _ = json.Marshal(obj{
+					"hook_event_name": "PreToolUse",
+					"tool_name":       "Bash",
+					"session_id":      "e2e-sess-" + h.name,
+					"cwd":             wt1,
+					"tool_input":      obj{"command": command},
+				})
+			}
+
+			cmd := exec.Command(yolonotBin, args...)
+			cmd.Dir, cmd.Env = wt1, s.Env
+			cmd.Stdin = strings.NewReader(string(payload))
+			outBytes, err := cmd.CombinedOutput()
+			out := string(outBytes)
+			if err != nil {
+				t.Fatalf("%s hook failed: %v\n%s", h.name, err, out)
+			}
+			if !strings.Contains(out, h.wantAllow) {
+				t.Fatalf("%s output missing %s:\n%s", h.name, h.wantAllow, out)
+			}
+			if !strings.Contains(gotSys, "E2E-MAIN-HINT") || !strings.Contains(gotSys, "E2E-WORK-PARENT") {
+				t.Errorf("%s system prompt missing worktree/parent hints:\n%s", h.name, gotSys)
+			}
+			if !strings.Contains(gotUser, "E2E-WT-SCRIPT-BODY") {
+				t.Errorf("%s user prompt missing attached script:\n%s", h.name, gotUser)
+			}
+		})
+	}
+}
+

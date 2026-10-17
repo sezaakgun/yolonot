@@ -11,23 +11,28 @@ import (
 )
 
 type DecisionEntry struct {
-	Timestamp        string  `json:"ts"`
-	SessionID        string  `json:"session_id"`
-	Command          string  `json:"command"`
-	Cwd              string  `json:"cwd"`
-	Project          string  `json:"project"`
-	Harness          string  `json:"harness,omitempty"`         // claude | codex | opencode | gemini
-	PermissionMode   string  `json:"permission_mode,omitempty"` // Claude Code only
-	Layer            string  `json:"layer"`
-	Decision         string  `json:"decision"`
-	Risk             string  `json:"risk,omitempty"` // safe | low | moderate | high | critical
-	Confidence       float64 `json:"confidence,omitempty"`
-	Short            string  `json:"short,omitempty"` // compact banner label (from LLM)
-	Reasoning        string  `json:"reasoning,omitempty"`
-	Source           string  `json:"source,omitempty"`
-	LearningExcluded bool    `json:"learning_excluded,omitempty"`
-	Precedent        bool    `json:"precedent,omitempty"`   // eligible when written; rebuilds trust only these
-	DurationMs       int64   `json:"duration_ms,omitempty"` // primary LLM call only; escalation time is escalation_ms
+	Timestamp        string   `json:"ts"`
+	SessionID        string   `json:"session_id"`
+	Command          string   `json:"command"`
+	Cwd              string   `json:"cwd"`
+	Project          string   `json:"project"`
+	Harness          string   `json:"harness,omitempty"`         // claude | codex | opencode | gemini
+	PermissionMode   string   `json:"permission_mode,omitempty"` // Claude Code only
+	AgentID          string   `json:"agent_id,omitempty"`        // subagent or teammate the call came from
+	AgentType        string   `json:"agent_type,omitempty"`
+	ToolUseID        string   `json:"tool_use_id,omitempty"` // joins an ask to the human answer that followed
+	Attached         []string `json:"attached,omitempty"`    // scripts the judge saw
+	Withheld         []string `json:"withheld,omitempty"`    // scripts referenced but not shown, with the reason
+	Layer            string   `json:"layer"`
+	Decision         string   `json:"decision"`
+	Risk             string   `json:"risk,omitempty"` // safe | low | moderate | high | critical
+	Confidence       float64  `json:"confidence,omitempty"`
+	Short            string   `json:"short,omitempty"` // compact banner label (from LLM)
+	Reasoning        string   `json:"reasoning,omitempty"`
+	Source           string   `json:"source,omitempty"`
+	LearningExcluded bool     `json:"learning_excluded,omitempty"`
+	Precedent        bool     `json:"precedent,omitempty"`   // eligible when written; rebuilds trust only these
+	DurationMs       int64    `json:"duration_ms,omitempty"` // primary LLM call only; escalation time is escalation_ms
 
 	// Escalation fields — set only when the escalation layer was configured
 	// and consulted (or deliberately skipped). Unattended runs have no
@@ -66,6 +71,15 @@ func LogDecision(entry DecisionEntry) {
 	}
 	if entry.PermissionMode == "" {
 		entry.PermissionMode = currentPermissionMode
+	}
+	if entry.AgentID == "" {
+		entry.AgentID = currentAgentID
+	}
+	if entry.AgentType == "" {
+		entry.AgentType = currentAgentType
+	}
+	if entry.ToolUseID == "" {
+		entry.ToolUseID = currentToolUseID
 	}
 	if !learningEnabled(LoadConfig()) {
 		entry.LearningExcluded = true
@@ -133,8 +147,18 @@ func ReadRecentDecisions(n int) []DecisionEntry {
 }
 
 // cmdLog shows recent decisions.
-func cmdLog(n int) {
-	entries := ReadRecentDecisions(n)
+// cmdLog shows the last n decisions, optionally only one session's
+// (session is an id or an id prefix).
+func cmdLog(n int, session ...string) {
+	var entries []DecisionEntry
+	if len(session) > 0 && session[0] != "" {
+		entries = filterDecisions(ReadRecentDecisions(1000000), statsFilter{session: session[0]})
+		if len(entries) > n {
+			entries = entries[len(entries)-n:]
+		}
+	} else {
+		entries = ReadRecentDecisions(n)
+	}
 	if len(entries) == 0 {
 		fmt.Println("No decision log found.")
 		return
@@ -174,6 +198,17 @@ func cmdLog(n int) {
 			if e.EscalationMs > 0 {
 				esc = fmt.Sprintf("  ⤴esc %dms", e.EscalationMs)
 			}
+			switch {
+			case e.EscalationError != "":
+				esc += " " + e.EscalationError
+			case e.EscalationOutcome != "":
+				esc += " " + e.EscalationOutcome
+			}
+		}
+		if e.AgentType != "" {
+			esc += "  [" + e.AgentType + "]"
+		} else if e.AgentID != "" {
+			esc += "  [subagent]"
 		}
 		cmd := strings.ReplaceAll(e.Command, "\n", " ⏎ ")
 		if len(cmd) > 60 {

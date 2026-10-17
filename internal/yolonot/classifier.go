@@ -64,12 +64,13 @@ func ResolveRiskMap(h Harness) map[string]string {
 	if overrides := cfg.harnessPolicy(h.Name()).RiskMap; len(overrides) > 0 {
 		{
 			for tier, action := range overrides {
+				action = normalizeRiskAction(action)
 				if !isValidRisk(tier) {
 					Verbosef("ResolveRiskMap: unknown tier %q in config for %s, ignored", tier, h.Name())
 					continue
 				}
-				if !isValidAction(action) {
-					Verbosef("ResolveRiskMap: unknown action %q for %s/%s, ignored", action, h.Name(), tier)
+				if !isValidActionForTier(tier, action) {
+					Verbosef("ResolveRiskMap: invalid action %q for %s/%s, ignored", action, h.Name(), tier)
 					continue
 				}
 				out[tier] = action
@@ -80,9 +81,9 @@ func ResolveRiskMap(h Harness) map[string]string {
 	for _, tier := range allRiskTiers {
 		envKey := "YOLONOT_" + upperName + "_RISK_" + strings.ToUpper(tier)
 		if v := os.Getenv(envKey); v != "" {
-			v = strings.ToLower(strings.TrimSpace(v))
-			if !isValidAction(v) {
-				Verbosef("ResolveRiskMap: env %s=%q unknown action, ignored", envKey, v)
+			v = normalizeRiskAction(strings.ToLower(strings.TrimSpace(v)))
+			if !isValidActionForTier(tier, v) {
+				Verbosef("ResolveRiskMap: env %s=%q invalid action, ignored", envKey, v)
 				continue
 			}
 			out[tier] = v
@@ -108,11 +109,26 @@ func abstainAction(h Harness) string {
 	return ActionAsk
 }
 
+func normalizeRiskAction(s string) string {
+	if s == "override_allow" {
+		return ActionForceAllow
+	}
+	return s
+}
+
 // isValidAction reports whether a risk-map value is a known action.
 func isValidAction(s string) bool {
-	switch s {
-	case ActionAllow, ActionAsk, ActionDeny, ActionPassthrough:
+	switch normalizeRiskAction(s) {
+	case ActionAllow, ActionForceAllow, ActionAsk, ActionDeny, ActionPassthrough:
 		return true
 	}
 	return false
+}
+
+func isValidActionForTier(tier, s string) bool {
+	s = normalizeRiskAction(s)
+	if s == ActionForceAllow && tier == RiskCritical {
+		return false
+	}
+	return isValidAction(s)
 }

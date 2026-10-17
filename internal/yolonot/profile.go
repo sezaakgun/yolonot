@@ -144,9 +144,10 @@ func LookupProfile(cfg Config, name string) *RiskProfile {
 			cp[tier] = fallback[tier]
 			continue
 		}
-		// Custom profiles use canonical {allow, ask, deny} only — passthrough
+		v = normalizeRiskAction(v)
+		// Custom profiles use canonical {allow, force_allow, ask, deny} only — passthrough
 		// is a per-harness translation result, not a profile-author concept.
-		if v != ActionAllow && v != ActionAsk && v != ActionDeny {
+		if (v != ActionAllow && v != ActionForceAllow && v != ActionAsk && v != ActionDeny) || (v == ActionForceAllow && tier == RiskCritical) {
 			Verbosef("LookupProfile: custom profile %q tier %q has invalid action %q, using %s default", name, tier, v, DefaultProfileName)
 			cp[tier] = fallback[tier]
 			continue
@@ -336,7 +337,7 @@ var validProfileName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
 // ValidateCustomProfile enforces structural invariants for a user-defined
 // profile: legal name, no built-in collision, all 5 tiers present, all
-// values in {allow, ask, deny}. Returns a user-facing error message.
+// values in {allow, force_allow, ask, deny} (critical cannot be force_allow).
 func ValidateCustomProfile(name string, m map[string]string) error {
 	if !validProfileName.MatchString(name) {
 		return fmt.Errorf("invalid profile name %q: must match [a-z][a-z0-9_-]{0,31}", name)
@@ -352,8 +353,12 @@ func ValidateCustomProfile(name string, m map[string]string) error {
 		if !ok {
 			return fmt.Errorf("profile missing tier %q", tier)
 		}
-		if v != ActionAllow && v != ActionAsk && v != ActionDeny {
-			return fmt.Errorf("tier %q action %q invalid: must be allow|ask|deny", tier, v)
+		nv := normalizeRiskAction(v)
+		if nv == ActionForceAllow && tier == RiskCritical {
+			return fmt.Errorf("tier %q action %q invalid: critical cannot use force_allow", tier, v)
+		}
+		if nv != ActionAllow && nv != ActionForceAllow && nv != ActionAsk && nv != ActionDeny {
+			return fmt.Errorf("tier %q action %q invalid: must be allow|force_allow|ask|deny", tier, v)
 		}
 	}
 	return nil

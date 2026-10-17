@@ -24,6 +24,8 @@ type HookPayload struct {
 	ToolInput      map[string]interface{} `json:"tool_input"`
 	ToolUseID      string                 `json:"tool_use_id,omitempty"`
 	PermissionMode string                 `json:"permission_mode,omitempty"` // Claude Code only
+	AgentID        string                 `json:"agent_id,omitempty"`        // Claude Code, subagent and teammate calls
+	AgentType      string                 `json:"agent_type,omitempty"`
 }
 
 // HookResponse is the JSON returned to Claude Code.
@@ -49,6 +51,10 @@ var quietOnAllow bool
 // currentPermissionMode mirrors HookPayload.PermissionMode for the active
 // hook invocation. Claude Code only — empty on other harnesses.
 var currentPermissionMode string
+
+// currentAgentID, currentAgentType and currentToolUseID mirror the same
+// payload fields into every decision logged by this invocation.
+var currentAgentID, currentAgentType, currentToolUseID string
 
 // PermissionRequest is a second policy phase in Codex: it can approve a
 // host permission request, unlike PreToolUse's deny-only enforcement.
@@ -176,6 +182,11 @@ func applyRiskMap(h Harness, origDecision, risk string) (final string, passthrou
 		return origDecision, false
 	case ActionAllow:
 		return origDecision, false
+	case ActionForceAllow:
+		if risk != RiskCritical && origDecision != "deny" {
+			return "allow", false
+		}
+		return origDecision, false
 	}
 	return origDecision, false
 }
@@ -297,6 +308,7 @@ func cmdHook() {
 		return
 	}
 	currentPermissionMode = payload.PermissionMode
+	currentAgentID, currentAgentType, currentToolUseID = payload.AgentID, payload.AgentType, payload.ToolUseID
 	currentHookEventName = payload.HookEventName
 	modRun = os.Getenv("YOLONOT_MOD") == "1"
 	modSessionID, modToolUseID, modStart = payload.SessionID, payload.ToolUseID, hookStart
@@ -663,7 +675,7 @@ func cmdHook() {
 		SessionID: sessionID, Command: command, Cwd: cwd, Layer: strings.TrimSuffix(v.Layer, "+esc"),
 		Decision: finalDecision, Risk: d.Risk, Confidence: d.Confidence, Short: d.Short,
 		Reasoning:  fmt.Sprintf("orig=%s → %s %s", d.Decision, finalDecision, d.Reasoning),
-		DurationMs: ms,
+		DurationMs: ms, Attached: v.Attached, Withheld: v.Withheld,
 	}
 	escalationLogFields(&entry, escOut)
 	if unresolvedReason != "" {
@@ -736,7 +748,7 @@ func hookMemoryLookup(ctx context.Context, command, cwd, sessionID, projSessionI
 	}
 
 	// Script cache.
-	cached := checkCache(command, cwd)
+	cached, seen, notSeen := checkCacheWithScripts(command, cwd)
 	if cached == nil {
 		return false
 	}
@@ -751,7 +763,7 @@ func hookMemoryLookup(ctx context.Context, command, cwd, sessionID, projSessionI
 		// A cache hit on a big-model-earned verdict must keep its
 		// provenance — otherwise every replay looks like a plain
 		// primary decision in the audit trail.
-		Escalated: cached.Escalated,
+		Escalated: cached.Escalated, Attached: seen, Withheld: notSeen,
 	})
 	if passthrough {
 		emitHook("")
@@ -983,23 +995,33 @@ func nativeSnapshotOK(projSessionID, command, cwd string) bool {
 }
 
 func checkCache(command, cwd string) *Decision {
-	hash := scriptHash(command, cwd)
+	d, _, _ := checkCacheWithScripts(command, cwd)
+	return d
+}
+
+// checkCacheWithScripts returns the cached decision for the command's
+// current script snapshot, plus the attached and withheld script lists of
+// that snapshot so a replay logs the same provenance as a live judge call.
+func checkCacheWithScripts(command, cwd string) (*Decision, []string, []string) {
+	attached, withheld := collectScripts(command, cwd)
+	hash := hashCollected(command, attached, withheld)
 	if hash == "" {
-		return nil
+		return nil, nil, nil
 	}
+	seen, notSeen := describeCollected(attached, withheld)
 	path := filepath.Join(cacheDir(), hash+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return nil, nil, nil
 	}
 	var entry cachedDecision
 	if err := json.Unmarshal(data, &entry); err != nil {
-		return nil
+		return nil, nil, nil
 	}
 	if entry.Context == "" || entry.Context != currentCacheContext(command, cwd) {
-		return nil
+		return nil, nil, nil
 	}
-	return &entry.Decision
+	return &entry.Decision, seen, notSeen
 }
 
 // runPreCheck invokes an external hook binary with the same JSON stdin

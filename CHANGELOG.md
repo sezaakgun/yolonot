@@ -17,6 +17,35 @@ reader stays through 1.x and goes away in 2.0. Full table in
 [docs/upgrading.md](docs/upgrading.md).
 
 ### Added
+- **Script attachment across command lists.** The positional proof now runs per
+  simple command, follows one literal `cd <dir>`, ignores redirect targets and
+  stops at anything it cannot track, so a gate script run as
+  `cd ~/work/repo && .local-ci/run-gates.sh 2>&1 | tail` is judged on its
+  contents instead of asked about. `yolonot check [--cwd <dir>]` prints which
+  scripts the judge saw and why the rest were withheld; the decision log keeps
+  the same lists (`attached`, `withheld`).
+- **Self-diagnosis of a noisy session.** `yolonot stats --session <id|current>`,
+  `--since today|24h|7d` and `--project <name>`; escalation errors split by kind
+  with the p50/p90 of answered calls against the configured timeout; asks by
+  main thread vs subagent; commands asked twice in one session; commands the
+  second model answered differently; asks whose script the judge could not see;
+  what you did with each ask (exact `tool_use_id` join, else same command shape
+  within ten minutes, reporting only); the sessions with the most asks. `yolonot
+  log --session <id>` and an escalation outcome column; `yolonot doctor` reports
+  escalation latency against its timeout and flags deny/ask globs ending in `/*`
+  that match every absolute path; the bare `yolonot` prints one line when today
+  crossed 10 asks or 5 escalation timeouts. `yolonot escalation` counts timeouts.
+- **Learning candidates.** `yolonot log --human` ends with the commands this
+  project asked about at least twice and you allowed each time, with the
+  `yolonot approve` line that turns each into a precedent. `yolonot suggest`
+  buckets asks whose script was unseen and asks lost to an escalation timeout
+  separately and tells the model what the judges saw for each example.
+- The decision log records `agent_id`, `agent_type` and `tool_use_id` when the
+  host sends them (Claude Code subagent and teammate calls).
+- Two default ask hints: bypassing hooks, signing or verification
+  (`--no-verify`, `core.hooksPath`, `--no-gpg-sign`) and launching another
+  coding agent non-interactively (`claude -p`, `codex exec`, …). Changing the
+  defaults invalidates the script cache once.
 - Strict config validation, JSON Schema and ready-to-edit examples; configurable
   failure actions, shared hook deadline and explicit provider protocols.
 - Project-scoped CLI approve/deny/reset, native skills for all five supported adapters,

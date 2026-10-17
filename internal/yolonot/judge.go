@@ -124,6 +124,8 @@ type Verdict struct {
 	ApprovalHashes []string // session approvals use that same snapshot
 	Prompt         string   // user prompt the classifier saw; escalation reuses it
 	Sys            string
+	Attached       []string // script paths shown to the judge
+	Withheld       []string // script paths referenced but not shown, with the reason
 	Esc            escalationOutcome
 	CacheOK        bool
 	Override       bool // custom system_prompt override active (parse-error banner)
@@ -228,9 +230,10 @@ func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 	if d == nil {
 		return Verdict{}, false, &judgeError{Kind: judgeErrParse, Msg: "parse error", Override: override, Verdict: Verdict{Ms: ms}}
 	}
+	seen, notSeen := describeCollected(attached, withheld)
 	return Verdict{
 		Decision: d.Decision, Risk: d.Risk, Short: d.Short, Reason: d.Reasoning,
-		Layer: spec.Use, Ms: ms, Dec: d,
+		Layer: spec.Use, Ms: ms, Dec: d, Attached: seen, Withheld: notSeen,
 		CacheKey:       hashCollected(in.Command, attached, withheld),
 		CacheContext:   classifierContextFingerprint(in.Config, hints, in.Cwd),
 		ReplayBinding:  replayBinding,

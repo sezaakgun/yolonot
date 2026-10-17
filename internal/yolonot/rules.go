@@ -207,15 +207,14 @@ func yolonotConfigSearchPaths(directory ...string) []string {
 	}
 	if err == nil {
 		home, _ := os.UserHomeDir()
-		cur, _ := filepath.Abs(cwd)
+		if home != "" {
+			home = canonicalDirectory(home)
+		}
+		cur := canonicalDirectory(cwd)
 		repoRoot := findRepoRoot(cur) // empty string if not in a repo
 		seen := map[string]bool{}
-		for {
-			if seen[cur] {
-				break
-			}
-			seen[cur] = true
-			candidate := filepath.Join(cur, ".yolonot")
+		addCandidate := func(dir string) {
+			candidate := filepath.Join(dir, ".yolonot")
 			// os.Lstat so we can reject symlinks: an attacker who earlier
 			// got `ln -s` approved could point .yolonot at /tmp/evil-rules
 			// (containing `allow-cmd *`) and laundry every later command.
@@ -223,14 +222,17 @@ func yolonotConfigSearchPaths(directory ...string) []string {
 			if err == nil && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 				paths = append(paths, candidate)
 			}
-			// Stop conditions, in order of precedence:
-			//   1. $HOME — so ~/.yolonot isn't double-loaded below.
-			//   2. Git repo root — trust boundary.
-			//   3. Not in a git repo — don't walk out of cwd at all.
-			//   4. Filesystem root — belt-and-suspenders.
+		}
+
+		for {
+			if seen[cur] {
+				break
+			}
+			seen[cur] = true
 			if home != "" && cur == home {
 				break
 			}
+			addCandidate(cur)
 			if repoRoot == "" || cur == repoRoot {
 				break
 			}
@@ -239,6 +241,29 @@ func yolonotConfigSearchPaths(directory ...string) []string {
 				break
 			}
 			cur = parent
+		}
+
+		if repoRoot != "" {
+			walkBase := repoRoot
+			if mainRoot := resolveWorktreeMainRoot(repoRoot); mainRoot != "" {
+				if !seen[mainRoot] && (home == "" || mainRoot != home) {
+					seen[mainRoot] = true
+					addCandidate(mainRoot)
+				}
+				walkBase = mainRoot
+			}
+			if home != "" {
+				anc := filepath.Dir(walkBase)
+				for anc != walkBase && isStrictTrustedHomeSubdir(anc, home) {
+					if seen[anc] {
+						break
+					}
+					seen[anc] = true
+					addCandidate(anc)
+					walkBase = anc
+					anc = filepath.Dir(walkBase)
+				}
+			}
 		}
 	}
 
@@ -250,10 +275,11 @@ func yolonotConfigSearchPaths(directory ...string) []string {
 	globalFile := filepath.Join(home, ".yolonot")
 	info, err := os.Stat(globalFile)
 	if err == nil && !info.IsDir() {
+		canonGlobal := canonicalDirectory(globalFile)
 		// Avoid duplicating if we already loaded it during the walk-up.
 		alreadyLoaded := false
 		for _, p := range paths {
-			if p == globalFile {
+			if p == globalFile || canonicalDirectory(p) == canonGlobal {
 				alreadyLoaded = true
 				break
 			}
@@ -264,6 +290,65 @@ func yolonotConfigSearchPaths(directory ...string) []string {
 	}
 
 	return paths
+}
+
+// isStrictTrustedHomeSubdir reports whether dir is strictly under home (not
+// home itself and not outside home) and not inside an untrusted download/temp
+// subtree under home.
+func isStrictTrustedHomeSubdir(dir, home string) bool {
+	if dir == "" || home == "" {
+		return false
+	}
+	rel, err := filepath.Rel(home, dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	top := strings.SplitN(rel, string(filepath.Separator), 2)[0]
+	switch strings.ToLower(top) {
+	case "downloads", "tmp", "temp", "untrusted":
+		return false
+	}
+	return true
+}
+
+// resolveWorktreeMainRoot returns the main repository root when repoRoot is a
+// linked git worktree (where .git is a file pointing at <main>/.git/worktrees/<name>),
+// or "" if repoRoot is a normal repository or not a worktree.
+func resolveWorktreeMainRoot(repoRoot string) string {
+	if repoRoot == "" {
+		return ""
+	}
+	dotGit := filepath.Join(repoRoot, ".git")
+	info, err := os.Lstat(dotGit)
+	if err != nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ""
+	}
+	data, err := os.ReadFile(dotGit)
+	if err != nil {
+		return ""
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(line, "gitdir:") {
+		return ""
+	}
+	gitdir := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+	if gitdir == "" {
+		return ""
+	}
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(repoRoot, gitdir)
+	}
+	gitdir = filepath.Clean(gitdir)
+
+	worktreesDir := filepath.Dir(gitdir)
+	mainDotGit := filepath.Dir(worktreesDir)
+	if filepath.Base(worktreesDir) == "worktrees" && filepath.Base(mainDotGit) == ".git" {
+		mainRoot := filepath.Dir(mainDotGit)
+		if st, err := os.Stat(mainDotGit); err == nil && st.IsDir() {
+			return canonicalDirectory(mainRoot)
+		}
+	}
+	return ""
 }
 
 // findRepoRoot walks up from start looking for a `.git` entry (directory

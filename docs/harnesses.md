@@ -179,7 +179,12 @@ unchanged. PostToolUse follows successful execution only; temporary verdict
 state is cleaned up.
 
 V2 subprocesses set `YOLONOT_OPENCODE_API=2`. Moderate risk can ask; high and
-critical retain their hard-deny floor. Read-only diagnostics infer the marker
+critical retain their hard-deny floor. The human's answer to a native ask is
+not yet recorded: the 2.0.28 SDK publishes `permission.asked` (with the shell
+call's `tool.callID`) and `permission.replied` (`once`, `always`, `reject`),
+which is enough to log `ask_approved` / `ask_rejected` once the plugin can
+subscribe to them; until then only `yolonot approve` / `deny` record an answer
+on OpenCode. Read-only diagnostics infer the marker
 from the installed V2 CLI. V1 keeps its legacy named/server exports and its
 older host-deferred ask behavior.
 
@@ -199,7 +204,11 @@ uses Antigravity for supported Google CLI workflows.
 
 Antigravity uses a named-hook map in `~/.gemini/config/hooks.json`, matches
 `run_command`, and reads `toolCall.args.CommandLine/Cwd`. Allow maps to
-`auto_approve`, ask to `force_ask`, and deny blocks. Installed commands pin
+`auto_approve`, ask to `force_ask`, and deny blocks. When yolonot is active,
+`auto_approve` also satisfies Antigravity's `BypassSandbox: true` gate for
+allowed commands; when a session is paused (`yolonot pause`), yolonot emits
+an empty passthrough (`{}`) and Antigravity falls back to its native manual
+approval prompt on `BypassSandbox: true`. Installed commands pin
 the phase because payloads omit the event name. A `run_command` the adapter
 cannot read (no command, or no `Cwd` in a multi-root workspace) is denied
 instead of left to the host. Restart `agy` and inspect

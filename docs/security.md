@@ -33,6 +33,12 @@ identify safely. The attachment boundary is the project root by default;
 `attach_outside_root` explicitly widens it. Sensitive home directories are
 always withheld. Script credential redaction is best effort; commands may
 themselves contain secrets. See [script attachment](how-it-works.md#script-attachment).
+Each logged decision records which scripts the judge saw (`attached`) and
+which it did not (`withheld`, with the reason), plus the host's `agent_id`,
+`agent_type` and `tool_use_id` when it sends them, so `yolonot stats` can
+attribute asks to subagents and join an ask to the answer that followed it.
+That join is reporting only: precedents still come from explicit human
+answers, never from a time-window match.
 
 Prompt hints and nearby human precedents in the same project also reach the
 configured model judges. Precedents persist across sessions: an ordinary

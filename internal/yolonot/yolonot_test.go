@@ -747,9 +747,12 @@ func TestCallLLMAnthropicFormat(t *testing.T) {
 
 		var body map[string]interface{}
 		json.NewDecoder(r.Body).Decode(&body)
-		// Anthropic format: system is top-level, not in messages
+		// Anthropic format: system is top-level, not in messages, and temperature is omitted.
 		if body["system"] == nil {
 			t.Error("Anthropic format should have top-level system field")
+		}
+		if _, hasTemp := body["temperature"]; hasTemp {
+			t.Error("Anthropic format must not send temperature")
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -3195,8 +3198,10 @@ func TestBuildAnalyzePromptCdPrefix(t *testing.T) {
 	if strings.Contains(prompt, "print('DECOY')") {
 		t.Error("must not attach a cwd-level decoy for a cd-relative script")
 	}
-	if !strings.Contains(prompt, "not provably") {
-		t.Error("cd-relative script should carry an unproven-position withhold note")
+	// A single literal cd moves the base directory: the file that actually
+	// runs attaches, with the executed label.
+	if !strings.Contains(prompt, "print('etl')") || !strings.Contains(prompt, "Contents of the file this command executes: etl.py") {
+		t.Error("the script under the cd target should attach as the executed file")
 	}
 }
 
@@ -3316,11 +3321,10 @@ func TestBuildAnalyzePromptCompoundRelativeWithheld(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "b.py"), []byte("print('bbb')\n"), 0644)
 
 	prompt := BuildAnalyzePrompt("python3 a.py && python3 b.py", dir)
-	if strings.Contains(prompt, "print('aaa')") || strings.Contains(prompt, "print('bbb')") {
-		t.Error("relative scripts in a compound command must be withheld, not attached")
-	}
-	if !strings.Contains(prompt, "not provably") {
-		t.Error("withheld relative scripts should carry an unproven-position note")
+	// Each simple command is proven on its own; nothing between them can
+	// change the directory, so both attach.
+	if !strings.Contains(prompt, "print('aaa')") || !strings.Contains(prompt, "print('bbb')") {
+		t.Error("relative scripts in a list of plain commands should both attach")
 	}
 }
 
@@ -3649,8 +3653,8 @@ func TestBuildAnalyzePromptNewlineCd(t *testing.T) {
 	if strings.Contains(prompt, "print('DECOY')") {
 		t.Error("newline cd must not attach a cwd-level decoy")
 	}
-	if !strings.Contains(prompt, "not provably") {
-		t.Error("newline-cd relative script should carry an unproven-position note")
+	if !strings.Contains(prompt, "print('newline etl')") {
+		t.Error("newline cd should rebase like `cd &&`")
 	}
 }
 
@@ -3665,8 +3669,8 @@ func TestBuildAnalyzePromptBackgrounded(t *testing.T) {
 		t.Error("backgrounding & glued to an absolute token should not defeat extraction")
 	}
 	os.WriteFile(filepath.Join(dir, "rel.sh"), []byte("echo rel\n"), 0644)
-	if strings.Contains(BuildAnalyzePrompt("bash rel.sh&", dir), "echo rel") {
-		t.Error("a relative token in a backgrounded (compound) command must be withheld")
+	if !strings.Contains(BuildAnalyzePrompt("bash rel.sh&", dir), "echo rel") {
+		t.Error("a backgrounded simple command still runs from the session cwd and should attach")
 	}
 }
 

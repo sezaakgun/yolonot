@@ -596,3 +596,175 @@ func TestLearningSubcommandsRejectStrayWords(t *testing.T) {
 		}
 	}
 }
+
+func harnessHookCall(t *testing.T, harness, command, cwd, session string) (decision string, raw string) {
+	t.Helper()
+	var payload []byte
+	args := []string{"hook", "--harness", harness}
+	switch harness {
+	case "antigravity":
+		args = append(args, "--phase", "pre")
+		payload, _ = json.Marshal(map[string]interface{}{
+			"conversationId": session,
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": command, "Cwd": cwd},
+			},
+		})
+	case "cursor":
+		payload, _ = json.Marshal(map[string]interface{}{
+			"conversation_id": session,
+			"hook_event_name": "beforeShellExecution",
+			"command":         command,
+			"cwd":             cwd,
+		})
+	case "codex":
+		payload, _ = json.Marshal(map[string]interface{}{
+			"hook_event_name": "PermissionRequest",
+			"tool_name":       "Bash",
+			"session_id":      session,
+			"cwd":             cwd,
+			"tool_input":      map[string]interface{}{"command": command},
+		})
+	default: // claude, opencode
+		payload = productHookInput(t, command, cwd, session)
+	}
+	out, err := productCLI(t, payload, args...)
+	if err != nil {
+		t.Fatalf("%s hook failed: %s (%v)", harness, out, err)
+	}
+	raw = strings.TrimSpace(string(out))
+	if raw == "" {
+		return "", raw
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("%s invalid json: %s (%v)", harness, raw, err)
+	}
+	switch harness {
+	case "antigravity":
+		decision, _ = m["decision"].(string)
+	case "cursor":
+		decision, _ = m["permission"].(string)
+	case "codex":
+		if hso, ok := m["hookSpecificOutput"].(map[string]interface{}); ok {
+			if dec, ok := hso["decision"].(map[string]interface{}); ok {
+				decision, _ = dec["behavior"].(string)
+			}
+		}
+	default: // claude, opencode
+		decision = productPermission(t, out)
+	}
+	return decision, raw
+}
+
+func TestCrossHarnessBugFixesEndToEnd(t *testing.T) {
+	harnesses := []struct {
+		name      string
+		wantAllow string
+	}{
+		{"claude", "allow"},
+		{"codex", "allow"},
+		{"opencode", "allow"},
+		{"antigravity", "auto_approve"},
+		{"cursor", "allow"},
+	}
+
+	for _, h := range harnesses {
+		t.Run(h.name, func(t *testing.T) {
+			home := productControlHome(t)
+			workDir := filepath.Join(home, "work")
+			mainRepo := filepath.Join(workDir, "main")
+			os.MkdirAll(filepath.Join(mainRepo, ".git", "worktrees", "wt1"), 0755)
+			os.WriteFile(filepath.Join(workDir, ".yolonot"), []byte(`context "HOME-PARENT-CONTEXT"`+"\n"), 0644)
+			os.WriteFile(filepath.Join(mainRepo, ".yolonot"), []byte(`allow-hint "MAIN-REPO-HINT"`+"\n"), 0644)
+
+			wt1 := filepath.Join(t.TempDir(), "wt1")
+			os.MkdirAll(filepath.Join(wt1, "scripts"), 0755)
+			os.WriteFile(filepath.Join(wt1, ".git"), []byte("gitdir: "+filepath.Join(mainRepo, ".git", "worktrees", "wt1")+"\n"), 0644)
+			os.WriteFile(filepath.Join(wt1, "scripts", "gate.sh"), []byte("echo WT-GATE-BODY-MARKER\n"), 0755)
+
+			var primaryCalls, escCalls int
+			var lastSys, lastUser string
+			primarySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				primaryCalls++
+				var body struct {
+					Messages []struct {
+						Role    string `json:"role"`
+						Content string `json:"content"`
+					} `json:"messages"`
+				}
+				json.NewDecoder(r.Body).Decode(&body)
+				for _, m := range body.Messages {
+					if m.Role == "system" {
+						lastSys = m.Content
+					} else if m.Role == "user" {
+						lastUser = m.Content
+					}
+				}
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"choices": []map[string]interface{}{
+						{"message": map[string]string{"content": `{"decision":"ask","risk":"moderate","reasoning":"primary unsure"}`}},
+					},
+				})
+			}))
+			defer primarySrv.Close()
+
+			escSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				escCalls++
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"choices": []map[string]interface{}{
+						{"message": map[string]string{"content": `{"decision":"allow","risk":"moderate","reasoning":"escalation rescued moderate"}`}},
+					},
+				})
+			}))
+			defer escSrv.Close()
+
+			// 1. Under fast profile (moderate -> allow), primary ask/moderate escalates and is rescued by allow/moderate.
+			cfg := Config{
+				Models: map[string]ModelConfig{
+					"primary": {URL: primarySrv.URL, Model: "small", Protocol: "chat"},
+					"esc":     {URL: escSrv.URL, Model: "big", Protocol: "chat"},
+				},
+				Judges:     JudgeList{{Use: "primary"}},
+				Escalation: &EscalationConfig{Model: "esc"},
+				Policy:     PolicyConfig{Profile: "fast"},
+			}
+			if err := SaveConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd1 := "chmod +x ./scripts/gate.sh && ./scripts/gate.sh"
+			dec1, raw1 := harnessHookCall(t, h.name, cmd1, wt1, "sess-esc-"+h.name)
+			if dec1 != h.wantAllow {
+				t.Fatalf("%s escalation rescue: got decision=%q (raw=%s), want %q", h.name, dec1, raw1, h.wantAllow)
+			}
+			if primaryCalls != 1 || escCalls != 1 {
+				t.Fatalf("%s expected 1 primary and 1 escalation call, got primary=%d esc=%d", h.name, primaryCalls, escCalls)
+			}
+			if !strings.Contains(lastSys, "MAIN-REPO-HINT") || !strings.Contains(lastSys, "HOME-PARENT-CONTEXT") {
+				t.Errorf("%s system prompt missing worktree/home-parent walkup hints:\n%s", h.name, lastSys)
+			}
+			if !strings.Contains(lastUser, "WT-GATE-BODY-MARKER") {
+				t.Errorf("%s user prompt missing attached script body after chmod:\n%s", h.name, lastUser)
+			}
+
+			// 2. With force_allow on moderate, primary ask/moderate is overridden to allow directly without escalation.
+			cfg.Policy.Harness = map[string]HarnessPolicy{
+				h.name: {RiskMap: map[string]string{RiskModerate: ActionForceAllow}},
+			}
+			if err := SaveConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+			cmd2 := "git status && ./scripts/gate.sh --second"
+			dec2, raw2 := harnessHookCall(t, h.name, cmd2, wt1, "sess-force-"+h.name)
+			if dec2 != h.wantAllow {
+				t.Fatalf("%s force_allow: got decision=%q (raw=%s), want %q", h.name, dec2, raw2, h.wantAllow)
+			}
+			if escCalls != 1 {
+				t.Errorf("%s force_allow should not trigger escalation, escCalls=%d", h.name, escCalls)
+			}
+		})
+	}
+}
+

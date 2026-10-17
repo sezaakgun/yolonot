@@ -55,12 +55,12 @@ func (o escalationOutcome) summary() string {
 	return o.Decision + "/" + o.Risk
 }
 
-// adoptableTiers returns the subset of {safe, low} that the active risk
-// map resolves to a real allow. Under strict/paranoid profiles this
+// adoptableTiers returns the subset of non-critical tiers that the active
+// risk map resolves to a real allow. Under strict/paranoid profiles this
 // shrinks or empties — and with it the escalation rescue window.
 func adoptableTiers(h Harness) map[string]bool {
 	out := map[string]bool{}
-	for _, t := range []string{RiskSafe, RiskLow} {
+	for _, t := range []string{RiskSafe, RiskLow, RiskModerate, RiskHigh} {
 		if final, pass := applyRiskMap(h, "allow", t); !pass && final == "allow" {
 			out[t] = true
 		}
@@ -200,7 +200,7 @@ func escalationTrigger(h Harness, d *Decision) (fire bool, skip string) {
 		return false, ""
 	}
 	wouldBe, wouldPass := applyRiskMap(h, d.Decision, d.Risk)
-	uncertain := d.Decision == "ask" || (!wouldPass && wouldBe == "ask")
+	uncertain := (!wouldPass && wouldBe == "ask") || (d.Decision == "ask" && wouldBe != "allow")
 	if !uncertain {
 		return false, ""
 	}
@@ -383,7 +383,8 @@ func printEscalationStatus(cfg Config) {
 	}
 
 	fired, rescued, hardened := 0, 0, 0
-	for _, e := range ReadRecentDecisions(200) {
+	recent := ReadRecentDecisions(200)
+	for _, e := range recent {
 		// Cache replays carry Escalated without an outcome — live fires
 		// only, same filter as `yolonot stats`.
 		if e.Escalated && e.EscalationOutcome != "" {
@@ -397,7 +398,11 @@ func printEscalationStatus(cfg Config) {
 		}
 	}
 	if fired > 0 {
-		fmt.Printf("  Recent:     %d fired, %d rescued, %d hardened (last 200 decisions)\n", fired, rescued, hardened)
+		es := collectEscalationStats(recent)
+		fmt.Printf("  Recent:     %d fired, %d rescued, %d hardened, %d timed out (last 200 decisions)\n", fired, rescued, hardened, es.timeouts)
+		if warn := escalationLatencyWarning(es, resolveTimeoutSeconds(esc, 10)); warn != "" {
+			fmt.Printf("  ⚠ %s\n", warn)
+		}
 	}
 	fmt.Println()
 	fmt.Println("Usage: yolonot escalation [on|off|setup|test]")

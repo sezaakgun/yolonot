@@ -229,7 +229,7 @@ func ValidateConfig(cfg Config) error {
 			add("harness %q has unknown profile %q", name, hp.Profile)
 		}
 		for tier, act := range hp.RiskMap {
-			if !isValidRisk(tier) || (act != ActionAllow && act != ActionAsk && act != ActionDeny && act != ActionPassthrough) {
+			if !isValidRisk(tier) || !isValidActionForTier(tier, act) {
 				add("invalid risk map cell %s.%s", name, tier)
 			}
 		}

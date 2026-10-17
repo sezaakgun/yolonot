@@ -40,11 +40,13 @@ See [configuration.md](configuration.md) and [harnesses.md](harnesses.md).
 
 When a command references a script file, yolonot reads it and embeds the contents in the classifier prompt so the model judges actual code instead of guessing from a filename. Contents are attached only when it is **provable which file bash will execute**:
 
-- the script is a leading path in a plain command — `./run.sh`, `scripts/x.sh --flag`
+- the script is a leading path in a simple command — `./run.sh`, `scripts/x.sh --flag`
 - or it directly follows a known interpreter with nothing in between — `python foo.py`, `bash scripts/x.sh`, `node server.js`, `uv run python test.py`
 - absolute paths inside the project always attach, in any command shape
 
-Everything else gets a "contents withheld" note instead of an attachment: compound commands (`cd x && python foo.py`), any flag between the interpreter and the script (`python -u foo.py`), wrapper/runner tools whose operand is not a file path (`bun run`, `npm run`, `go run` package form, `sudo`, `env`), bare names without a slash (`foo.sh` — resolved via PATH, not the current directory), and files over 64 KB or not valid UTF-8 (never truncated — a benign prefix could mask a malicious tail).
+The proof is applied to each simple command of a list in turn (`&&`, `||`, `;`, `|`, `&`, newline), so `./a.sh && python b.py 2>&1 | tail` attaches both. A literal `cd <dir>` as the first simple command, terminated by `&&`, `;` or a newline, moves the base directory for what follows (`cd ~/work/repo && .local-ci/run.sh` attaches the script under that repo, never a same-named file at the session directory); a relative operand is not followed while `CDPATH` is set. The walk stops, and nothing after that point is proven, at the first segment that contains quotes, substitutions, globs, braces or a heredoc, at any later `cd`, at a `cd` followed by `|`, `||` or `&`, and at the builtins that change the directory or how later words resolve (`source`, `.`, `eval`, `exec`, `pushd`, `popd`, `builtin`, `command`, `alias`, `shopt`, `export`, `set`, `declare`, `unset`, `trap`, `hash` and their siblings). A token written after `>` or `>>` is the file being overwritten and never attaches.
+
+Everything else gets a "contents withheld" note instead of an attachment: any flag between the interpreter and the script (`python -u foo.py`), wrapper/runner tools whose operand is not a file path (`bun run`, `npm run`, `go run` package form, `sudo`, `env`), bare names without a slash (`foo.sh` — resolved via PATH, not the current directory), `cd` with flags or a computed target (`cd -- x`, `cd "$d"`), and files over 64 KB or not valid UTF-8 (never truncated — a benign prefix could mask a malicious tail). `yolonot check '<command>'` prints which scripts were shown and why the others were not; the decision log records the same under `attached` and `withheld`.
 
 Withholding can require further review or prevent mod replay; it is not a
 guarantee of only one extra prompt. Attaching the wrong file would let a benign

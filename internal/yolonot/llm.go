@@ -194,6 +194,8 @@ var (
 		"Irreversibly destroying files that existed before this session (rm/mv/git rm of source files the user did not create in this conversation; git checkout -- on dirty tracked files; git reset --hard) requires confirmation. Cleaning up build artifacts, caches, node_modules, __pycache__, .pytest_cache, dist/, target/, and similar generated paths does not.",
 		"Force-pushing (git push --force, --force-with-lease against a branch the user does not currently own) requires confirmation even on feature branches; lost commits are not recoverable from yolonot's vantage point.",
 		"Downloading and executing code in a single step (curl ... | sh, wget ... | bash, eval \"$(curl ...)\", source <(curl ...), iex (irm ...), pipx run from non-PyPI URLs) requires confirmation; the script's contents are not visible to the user before execution.",
+		"Disabling or bypassing a repository's hooks, signing or verification (git commit/push --no-verify, --no-gpg-sign, git config core.hooksPath or commit.gpgsign, moving a hooks directory aside) requires confirmation even in a temporary or test setup; those gates exist to catch exactly the changes an agent makes.",
+		"Launching another coding agent non-interactively from a command (claude -p, codex exec, opencode run, cursor-agent -p, gemini -p) requires confirmation; the nested agent runs its own commands under whatever permissions it inherits, outside this review.",
 	}
 )
 
@@ -560,11 +562,10 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 	var body map[string]interface{}
 	if isAnthropic {
 		body = map[string]interface{}{
-			"model":       cfg.Model,
-			"system":      systemPrompt,
-			"messages":    []map[string]string{{"role": "user", "content": userPrompt}},
-			tokenKey:      maxTokens,
-			"temperature": 0,
+			"model":    cfg.Model,
+			"system":   systemPrompt,
+			"messages": []map[string]string{{"role": "user", "content": userPrompt}},
+			tokenKey:   maxTokens,
 		}
 	} else {
 		body = map[string]interface{}{
@@ -618,6 +619,9 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			return "", cfg.authenticationError(resp.StatusCode)
+		}
+		if detail := sanitizeBanner(strings.TrimSpace(string(respBytes))); detail != "" {
+			return "", fmt.Errorf("API error: HTTP %d: %s", resp.StatusCode, truncateStr(detail, 200))
 		}
 		return "", fmt.Errorf("API error: HTTP %d", resp.StatusCode)
 	}
@@ -842,26 +846,169 @@ func isInertCommand(command string) bool {
 //     non-dash X proves the cwd is unchanged and the rule recurses once
 //     into X. uv is the only launcher verified to hold this property.
 func provenScriptToken(command string) string {
-	if !isInertCommand(command) {
-		return ""
+	_, exp := provenScriptWords(strings.Fields(command), nil)
+	return exp
+}
+
+var varRefRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+func expandKnownVars(s string, vars map[string]string) string {
+	if len(vars) == 0 || !strings.Contains(s, "$") {
+		return s
 	}
-	t := strings.Fields(command)
-	if len(t) >= 3 && t[0] == "uv" && t[1] == "run" && !strings.HasPrefix(t[2], "-") {
-		t = t[2:]
-	}
-	if len(t) == 0 {
-		return ""
+	return varRefRe.ReplaceAllStringFunc(s, func(m string) string {
+		name := strings.TrimPrefix(m, "$")
+		name = strings.TrimPrefix(name, "{")
+		name = strings.TrimSuffix(name, "}")
+		if v, ok := vars[name]; ok {
+			return v
+		}
+		return m
+	})
+}
+
+func expandHomeVarOnly(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
 	}
 	switch {
-	case isInterpreterWord(t[0]):
-		if len(t) < 2 || strings.HasPrefix(t[1], "-") {
-			return ""
-		}
-		return t[1]
-	case strings.Contains(t[0], "/"):
-		return t[0]
+	case p == "$HOME" || p == "${HOME}":
+		return home
+	case strings.HasPrefix(p, "$HOME/"):
+		return filepath.Join(home, p[len("$HOME/"):])
+	case strings.HasPrefix(p, "${HOME}/"):
+		return filepath.Join(home, p[len("${HOME}/"):])
 	}
-	return ""
+	return p
+}
+
+// expandWord resolves a single whitespace-delimited shell word into its raw
+// token (without outer quotes) and its expanded path value, honoring bash
+// quoting rules:
+//   - 'literal': no ~ or $ expansion
+//   - "double":  $HOME and known $VAR expand; ~ does not
+//   - unquoted:  ~, $HOME, and known $VAR expand
+//
+// Returns ok=false if the word contains any non-inert byte after expansion.
+func expandWord(w string, vars map[string]string) (raw string, expanded string, ok bool) {
+	if len(w) >= 2 && w[0] == '\'' && w[len(w)-1] == '\'' {
+		inner := w[1 : len(w)-1]
+		if strings.ContainsRune(inner, '\'') || !isInertCommand(inner) {
+			return "", "", false
+		}
+		return inner, inner, true
+	}
+	if len(w) >= 2 && w[0] == '"' && w[len(w)-1] == '"' {
+		inner := w[1 : len(w)-1]
+		if strings.ContainsAny(inner, `"\\`) {
+			return "", "", false
+		}
+		exp := expandHomeVarOnly(inner)
+		exp = expandKnownVars(exp, vars)
+		if !isInertCommand(exp) {
+			return "", "", false
+		}
+		return inner, exp, true
+	}
+	exp := expandUserPath(w)
+	exp = expandKnownVars(exp, vars)
+	if !isInertCommand(exp) {
+		return "", "", false
+	}
+	return w, exp, true
+}
+
+func provenScriptWords(rawFields []string, vars map[string]string) (rawTok, expTok string) {
+	if len(rawFields) == 0 {
+		return "", ""
+	}
+	raws := make([]string, len(rawFields))
+	exps := make([]string, len(rawFields))
+	for i, f := range rawFields {
+		r, e, ok := expandWord(f, vars)
+		if !ok {
+			return "", ""
+		}
+		raws[i] = r
+		exps[i] = e
+	}
+	if len(exps) >= 3 && exps[0] == "uv" && exps[1] == "run" && !strings.HasPrefix(exps[2], "-") && !strings.HasPrefix(exps[2], "+") {
+		raws = raws[2:]
+		exps = exps[2:]
+	}
+	if len(exps) == 0 {
+		return "", ""
+	}
+	switch {
+	case isInterpreterWord(exps[0]):
+		if len(exps) < 2 || strings.HasPrefix(exps[1], "-") || strings.HasPrefix(exps[1], "+") {
+			return "", ""
+		}
+		return raws[1], exps[1]
+	case strings.Contains(exps[0], "/"):
+		return raws[0], exps[0]
+	}
+	return "", ""
+}
+
+var heredocStartRe = regexp.MustCompile(`<<(-?)\s*(?:'([^']*)'|"([^"]*)"|\\?([A-Za-z0-9_.-]+))`)
+
+// stripHeredocs removes heredoc operators (`<<EOF`, `<<'EOF'`, `<<-EOF`) and
+// their bodies while preserving commands on the header line and lines after the
+// closing delimiter. If a heredoc is unclosed or malformed, truncates at `<<`.
+func stripHeredocs(command string) string {
+	if !strings.Contains(command, "<<") {
+		return command
+	}
+	lines := strings.Split(command, "\n")
+	var out []string
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		searchLine := strings.ReplaceAll(line, "<<<", "   ")
+		idx := strings.Index(searchLine, "<<")
+		if idx < 0 {
+			out = append(out, line)
+			continue
+		}
+		m := heredocStartRe.FindStringSubmatchIndex(searchLine[idx:])
+		if m == nil || m[0] != 0 {
+			out = append(out, line[:idx])
+			return strings.Join(out, "\n")
+		}
+		stripTabs := m[2] != m[3] && searchLine[idx+m[2]:idx+m[3]] == "-"
+		var delim string
+		switch {
+		case m[4] != -1:
+			delim = line[idx+m[4] : idx+m[5]]
+		case m[6] != -1:
+			delim = line[idx+m[6] : idx+m[7]]
+		case m[8] != -1:
+			delim = line[idx+m[8] : idx+m[9]]
+		}
+		if delim == "" {
+			out = append(out, line[:idx])
+			return strings.Join(out, "\n")
+		}
+		header := line[:idx] + " " + line[idx+m[1]:]
+		out = append(out, header)
+		closed := false
+		for i+1 < len(lines) {
+			i++
+			check := lines[i]
+			if stripTabs {
+				check = strings.TrimLeft(check, "\t")
+			}
+			if check == delim {
+				closed = true
+				break
+			}
+		}
+		if !closed {
+			return strings.Join(out, "\n")
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // blankCodeQuotes blanks every quoted region that contains whitespace —
@@ -929,7 +1076,24 @@ func blankCodeQuotes(command string) string {
 // withheld with a note. Whitespace-bearing quoted regions are blanked
 // first so a `-c` code body does not spray tokens into the notes.
 func extractScriptRefs(command string) []scriptRef {
-	sanitized := blankCodeQuotes(command)
+	return extractScriptRefsWithVars(command, nil)
+}
+
+func extractScriptRefsWithVars(command string, vars map[string]string) []scriptRef {
+	sanitized := blankCodeQuotes(stripHeredocs(command))
+	// A token written after `>` / `>>` / `&>` / `>|` is the file being
+	// overwritten, not a script the command runs; its current contents
+	// would mislead the judge.
+	redirectTargets := map[string]bool{}
+	for _, m := range redirectTargetRe.FindAllStringSubmatch(sanitized, -1) {
+		t := strings.TrimFunc(m[1], func(r rune) bool {
+			return strings.ContainsRune(`"'();,`, r)
+		})
+		redirectTargets[t] = true
+		if len(vars) > 0 {
+			redirectTargets[expandKnownVars(t, vars)] = true
+		}
+	}
 	// Break tokens on shell separators/redirects too, so a glued form
 	// (`python x.py;echo`, `bash /a/x.sh&`) still yields its path token.
 	// Enrichment-only: mis-splitting can at worst mislabel a withheld note,
@@ -946,12 +1110,290 @@ func extractScriptRefs(command string) []scriptRef {
 		cand := strings.TrimFunc(tok, func(r rune) bool {
 			return strings.ContainsRune(`"'();,`, r)
 		})
-		if !scriptExtRe.MatchString(cand) || strings.Contains(cand, "://") {
+		expCand := expandKnownVars(cand, vars)
+		if !scriptExtRe.MatchString(cand) || strings.Contains(cand, "://") || redirectTargets[cand] || redirectTargets[expCand] {
 			continue
 		}
-		refs = append(refs, scriptRef{raw: cand, abs: resolveScriptPath(cand)})
+		refs = append(refs, scriptRef{raw: cand, abs: resolveScriptPath(expCand)})
 	}
 	return refs
+}
+
+// redirectTargetRe captures the operand of an output redirect, glued or
+// spaced (`>x.sh`, `2>> x.sh`, `&> x.sh`, `>| x.sh`), on the quote-blanked command.
+var redirectTargetRe = regexp.MustCompile(`&?>>?\|?\s*([^\s;|&<>()]+)`)
+
+// provenHit is one proven script token and the directory it resolves
+// against: "" for the session cwd, otherwise the operand of the literal
+// `cd` that ran before it.
+type provenHit struct {
+	raw   string
+	token string
+	dir   string
+}
+
+// shellKeywords may precede a simple command without changing what runs.
+var shellKeywords = map[string]bool{"if": true, "then": true, "else": true, "elif": true, "while": true, "until": true, "do": true, "time": true}
+
+// cwdBuiltins is the closed set of bash builtins that can change the
+// shell's own working directory, run text yolonot cannot see, or change
+// how later words resolve (aliases, options, variables such as CDPATH).
+// External programs cannot change the parent shell's cwd, so a segment
+// whose command word is anything else leaves the directory known.
+var cwdBuiltins = map[string]bool{
+	"cd": true, "pushd": true, "popd": true, "source": true, ".": true, "eval": true, "builtin": true, "command": true, "exec": true,
+	"alias": true, "unalias": true, "shopt": true, "enable": true, "export": true, "set": true, "declare": true, "typeset": true,
+	"readonly": true, "local": true, "unset": true, "trap": true, "hash": true,
+}
+
+// fileMutatingCmds are external commands that can overwrite, move, or link
+// over a script file on disk before a later segment in the same list executes
+// it (`cp evil.py benign.py && python3 benign.py`).
+var fileMutatingCmds = map[string]bool{
+	"cp": true, "mv": true, "rm": true, "ln": true, "install": true, "dd": true, "tee": true,
+	"truncate": true, "patch": true, "sed": true, "awk": true, "perl": true, "ruby": true,
+	"rsync": true, "tar": true, "unzip": true, "gunzip": true, "bunzip2": true, "xz": true,
+	"curl": true, "wget": true, "git": true, "chmod": true, "chown": true, "touch": true,
+}
+
+// targetMutatingCmds are file-mutating commands whose effects are confined to
+// the path operands named on their command line.
+var targetMutatingCmds = map[string]bool{
+	"cp": true, "mv": true, "rm": true, "ln": true, "install": true, "tee": true, "truncate": true,
+}
+
+// metadataOnlyCmds are commands in fileMutatingCmds that only touch file mode,
+// ownership, or timestamps without altering script contents.
+var metadataOnlyCmds = map[string]bool{
+	"chmod": true, "chown": true, "touch": true,
+}
+
+// readOnlyGitSubcmds are git subcommands that never modify working-tree files.
+var readOnlyGitSubcmds = map[string]bool{
+	"status": true, "diff": true, "log": true, "show": true, "rev-parse": true,
+	"branch": true, "tag": true, "remote": true, "describe": true, "ls-files": true,
+	"ls-tree": true, "cat-file": true, "for-each-ref": true, "shortlog": true,
+	"blame": true, "grep": true, "reflog": true, "config": true, "version": true, "help": true,
+}
+
+func isReadOnlyGitCommand(words []string) bool {
+	for i := 1; i < len(words); i++ {
+		w := words[i]
+		if w == "-C" || w == "-c" || w == "--git-dir" || w == "--work-tree" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(w, "-") {
+			continue
+		}
+		return readOnlyGitSubcmds[w]
+	}
+	return false
+}
+
+var dangerousEnvVars = map[string]bool{
+	"HOME": true, "CDPATH": true, "PATH": true, "IFS": true, "ENV": true, "BASH_ENV": true,
+	"LD_PRELOAD": true, "DYLD_INSERT_LIBRARIES": true, "PYTHONPATH": true, "NODE_OPTIONS": true,
+	"RUBYOPT": true, "PERL5OPT": true,
+}
+
+var envAssignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+func isTaintedScript(cand string, tainted []string) bool {
+	if cand == "" || len(tainted) == 0 {
+		return false
+	}
+	candClean := filepath.Clean(cand)
+	candBase := filepath.Base(candClean)
+	for _, t := range tainted {
+		tClean := filepath.Clean(t)
+		if candClean == tClean || candBase == filepath.Base(tClean) {
+			return true
+		}
+		if tClean == "." || strings.HasPrefix(candClean, tClean+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func provenScriptTokens(command string) []provenHit {
+	hits, _, _ := provenScriptTokensAndTaint(command)
+	return hits
+}
+
+// provenScriptTokensAndTaint extends provenScriptToken's proof across a list of
+// simple commands, tracking target-specific file taint and simple literal
+// variable assignments across segments.
+func provenScriptTokensAndTaint(command string) ([]provenHit, []string, map[string]string) {
+	command = stripHeredocs(command)
+	// Duplicating redirects (`2>&1`, `&>log`) are not separators.
+	command = strings.NewReplacer(">&1", " ", ">&2", " ", "<&0", " ", ">&", "> ", "&>", " >", "<&", "< ").Replace(command)
+	var hits []provenHit
+	var tainted []string
+	vars := map[string]string{}
+	dir := ""
+	for i, seg := range splitSimpleCommands(command) {
+		head := seg.text
+		hasFileRedirect := strings.Contains(head, ">")
+		var segRedirectTargets []string
+		if hasFileRedirect {
+			for _, m := range redirectTargetRe.FindAllStringSubmatch(head, -1) {
+				_, expTarget, ok := expandWord(m[1], vars)
+				if !ok || expTarget == "" {
+					return hits, tainted, vars
+				}
+				segRedirectTargets = append(segRedirectTargets, expTarget)
+			}
+			if len(segRedirectTargets) == 0 {
+				return hits, tainted, vars
+			}
+		}
+		if idx := strings.IndexAny(head, "<>"); idx >= 0 {
+			head = head[:idx]
+		}
+		words := strings.Fields(head)
+		bare := len(words) > 0 && words[0] == "cd"
+		hasKeyword := false
+		for len(words) > 0 && shellKeywords[words[0]] {
+			hasKeyword = true
+			words = words[1:]
+		}
+		var segAssigns [][2]string
+		for len(words) > 0 && envAssignRe.MatchString(words[0]) {
+			eq := strings.IndexByte(words[0], '=')
+			name, val := words[0][:eq], words[0][eq+1:]
+			if dangerousEnvVars[name] {
+				return hits, tainted, vars
+			}
+			segAssigns = append(segAssigns, [2]string{name, val})
+			words = words[1:]
+		}
+		if len(words) > 0 && words[0] == "cd" {
+			// `if cd x; then … else …` runs the else branch from the old
+			// directory, so only a bare, leading cd rebases.
+			target, ok := literalCdTarget(words, vars)
+			if !ok || !bare || i != 0 || hasFileRedirect || (seg.term != "&&" && seg.term != ";" && seg.term != "\n") {
+				return hits, tainted, vars
+			}
+			dir = target
+			continue
+		}
+		if len(words) == 0 {
+			if hasFileRedirect || hasKeyword || (seg.term != "&&" && seg.term != ";" && seg.term != "\n" && seg.term != "") {
+				return hits, tainted, vars
+			}
+			for _, kv := range segAssigns {
+				_, expVal, ok := expandWord(kv[1], vars)
+				if !ok {
+					return hits, tainted, vars
+				}
+				vars[kv[0]] = expVal
+			}
+			continue
+		}
+		expWords := make([]string, len(words))
+		for wi, w := range words {
+			_, ew, ok := expandWord(w, vars)
+			if !ok {
+				return hits, tainted, vars
+			}
+			expWords[wi] = ew
+		}
+		cmdWord := expWords[0]
+		if cwdBuiltins[cmdWord] {
+			return hits, tainted, vars
+		}
+		if fileMutatingCmds[cmdWord] {
+			switch {
+			case metadataOnlyCmds[cmdWord]:
+				// chmod/chown/touch do not alter file contents.
+			case cmdWord == "git" && isReadOnlyGitCommand(expWords):
+				// Read-only git subcommand.
+			case targetMutatingCmds[cmdWord]:
+				added := 0
+				for _, arg := range expWords[1:] {
+					if strings.HasPrefix(arg, "-") {
+						continue
+					}
+					tainted = append(tainted, arg)
+					added++
+				}
+				if added == 0 {
+					return hits, tainted, vars
+				}
+			default:
+				return hits, tainted, vars
+			}
+			tainted = append(tainted, segRedirectTargets...)
+			continue
+		}
+		rawTok, expTok := provenScriptWords(words, vars)
+		if expTok != "" {
+			if isTaintedScript(expTok, tainted) || isTaintedScript(rawTok, tainted) {
+				tainted = append(tainted, expTok)
+				return hits, tainted, vars
+			}
+			hits = append(hits, provenHit{raw: rawTok, token: expTok, dir: dir})
+		} else if isInterpreterWord(cmdWord) {
+			// An interpreter invoked with flags (`python3 -m pkg`) can run
+			// arbitrary code that rewrites files before the next segment.
+			return hits, tainted, vars
+		}
+		tainted = append(tainted, segRedirectTargets...)
+	}
+	return hits, tainted, vars
+}
+
+// literalCdTarget accepts `cd <one operand>` whose operand is a literal
+// path (only `~`, `$HOME`, and known literal vars expand); flags, globs,
+// multi-word quotes and substitutions forfeit the rebase.
+func literalCdTarget(words []string, vars map[string]string) (string, bool) {
+	if len(words) != 2 || strings.HasPrefix(words[1], "-") {
+		return "", false
+	}
+	_, target, ok := expandWord(words[1], vars)
+	if !ok {
+		return "", false
+	}
+	// With CDPATH set, bash may resolve a relative operand somewhere else.
+	if !filepath.IsAbs(target) && os.Getenv("CDPATH") != "" {
+		return "", false
+	}
+	return target, true
+}
+
+type simpleCommand struct {
+	text string
+	term string // separator that ended it: "&&", "||", ";", "|", "&", "\n" or ""
+}
+
+// splitSimpleCommands cuts a command at the shell list and pipeline
+// operators. Quoted operators mis-split, but a quote makes its segment
+// non-inert and the walk stops there, so nothing after it is examined.
+func splitSimpleCommands(command string) []simpleCommand {
+	var out []simpleCommand
+	start := 0
+	for i := 0; i < len(command); i++ {
+		term := ""
+		switch {
+		case strings.HasPrefix(command[i:], "&&"):
+			term = "&&"
+		case strings.HasPrefix(command[i:], "||"):
+			term = "||"
+		case command[i] == ';', command[i] == '|', command[i] == '&':
+			term = command[i : i+1]
+		case command[i] == '\n':
+			term = "\n"
+		}
+		if term == "" {
+			continue
+		}
+		out = append(out, simpleCommand{text: command[start:i], term: term})
+		i += len(term) - 1
+		start = i + 1
+	}
+	return append(out, simpleCommand{text: command[start:]})
 }
 
 // expandUserPath expands the common home-relative spellings agents emit.
@@ -963,7 +1405,7 @@ func expandUserPath(p string) string {
 		return p
 	}
 	switch {
-	case p == "~":
+	case p == "~" || p == "$HOME" || p == "${HOME}":
 		return home
 	case strings.HasPrefix(p, "~/"):
 		return filepath.Join(home, p[2:])
@@ -1032,7 +1474,7 @@ var withholdReasonText = map[int]string{
 	whReasonUnreadable: "file not readable",
 	whReasonTooLarge:   "file exceeds the attach size limit; a truncated view is never attached",
 	whReasonNotText:    "binary or non-UTF-8 file",
-	whReasonUnproven:   "not provably the file this command executes (only `<interpreter> <script>` or a leading path in a plain command attaches)",
+	whReasonUnproven:   "not provably the file this command executes (only `<interpreter> <script>` or a path as the command word attaches, and only while the working directory is known)",
 	whReasonUnresolved: "path could not be resolved",
 }
 
@@ -1109,19 +1551,6 @@ func readScriptForPrompt(path string) (content []byte, digest [32]byte, err erro
 // into the set attached to the LLM prompt and the set withheld (each with a
 // reason). The provenScriptToken ref (the file the command provably
 // executes) is first and outranks enrichment refs for the attach cap.
-// Guards, in order:
-//  1. Path must resolve inside the attach root (git repo root of the session
-//     cwd, else the cwd itself) — unless Config.AttachOutsideRoot widens the
-//     boundary — AND never under a sensitive home dotfile dir (unconditional
-//     floor) — prevents `python3 ~/.ssh/id_rsa.py` from exfiltrating secrets.
-//  2. Must be a readable, regular, UTF-8 text file no larger than
-//     maxAttachBytes (non-blocking, symlink-refusing read).
-//
-// Refs are deduped by absolute path. The withheld list is NOT capped here
-// (BuildAnalyzePrompt renders a bounded, priority-ordered subset plus an
-// aggregate count) so a flood of decoy refs cannot starve a real script's
-// note. scriptHash consumes the same attached+withheld split, keeping the
-// cache keyed to exactly what the classifier was shown.
 func collectScripts(command, cwd string) ([]attachedScript, []withheldScript) {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
@@ -1129,22 +1558,41 @@ func collectScripts(command, cwd string) ([]attachedScript, []withheldScript) {
 	root := attachRoot(cwd)
 
 	var refs []scriptRef
-	proven := provenScriptToken(command)
-	if proven != "" {
-		abs := proven
+	proven := map[string]bool{}
+	hits, tainted, vars := provenScriptTokensAndTaint(command)
+	for _, hit := range hits {
+		abs := expandUserPath(hit.token)
 		if !filepath.IsAbs(abs) {
 			// Raw concatenation, deliberately NOT filepath.Join/Clean: lexical
 			// ".." cleaning can pick a different file than the kernel's
 			// physical resolution when a cwd component is a symlink. Leaving
 			// the path as written makes open() resolve it exactly the way the
-			// kernel will for bash.
-			abs = cwd + string(filepath.Separator) + proven
+			// kernel will for bash. A leading literal cd rebases the same way;
+			// the attach root stays the session's, so a worktree elsewhere is
+			// still "outside" unless attach_outside_root is on.
+			base := cwd
+			if hit.dir != "" {
+				base = hit.dir
+				if !filepath.IsAbs(base) {
+					base = cwd + string(filepath.Separator) + base
+				}
+			}
+			abs = base + string(filepath.Separator) + abs
 		}
-		refs = append(refs, scriptRef{raw: proven, abs: abs, executed: true})
+		raw := hit.raw
+		if raw == "" {
+			raw = hit.token
+		}
+		refs = append(refs, scriptRef{raw: raw, abs: abs, executed: true})
+		proven[raw] = true
+		proven[hit.token] = true
 	}
-	for _, r := range extractScriptRefs(command) {
-		if r.raw == proven {
+	for _, r := range extractScriptRefsWithVars(command, vars) {
+		if proven[r.raw] {
 			continue // already covered by the proven ref
+		}
+		if isTaintedScript(r.raw, tainted) || isTaintedScript(r.abs, tainted) {
+			r.abs = ""
 		}
 		refs = append(refs, r)
 	}
@@ -1177,7 +1625,7 @@ func collectScripts(command, cwd string) ([]attachedScript, []withheldScript) {
 			}
 			continue
 		}
-		inside := isPathInside(ref.abs, root)
+		inside := isWithinAttachBoundary(ref.abs, root)
 		if !inside && !attachOutsideRoot {
 			seen[ref.abs] = true
 			withhold(ref, whReasonOutside)
@@ -1204,6 +1652,18 @@ func collectScripts(command, cwd string) ([]attachedScript, []withheldScript) {
 		attached = append(attached, attachedScript{ref: ref, content: content, digest: digest, outside: !inside})
 	}
 	return attached, withheld
+}
+
+// describeCollected names what the judge saw and what it did not, for the
+// decision log and `yolonot check`.
+func describeCollected(attached []attachedScript, withheld []withheldScript) (seen, notSeen []string) {
+	for _, a := range attached {
+		seen = append(seen, a.ref.raw)
+	}
+	for _, w := range withheld {
+		notSeen = append(notSeen, w.ref.raw+": "+withholdReasonText[w.reason])
+	}
+	return seen, notSeen
 }
 
 // unresolvedReason distinguishes the two causes of an empty abs: a
@@ -1336,6 +1796,30 @@ func isPathInside(abs, root string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// isWithinAttachBoundary reports whether abs is inside root or belongs to the
+// same git repository family (a linked worktree and its main repository, or
+// sibling worktrees of the same main repository).
+func isWithinAttachBoundary(abs, root string) bool {
+	if isPathInside(abs, root) {
+		return true
+	}
+	mainRoot := resolveWorktreeMainRoot(root)
+	if mainRoot == "" {
+		mainRoot = root
+	}
+	if mainRoot != root && isPathInside(abs, mainRoot) {
+		return true
+	}
+	if scriptRepo := findRepoRoot(filepath.Dir(abs)); scriptRepo != "" {
+		if scriptMain := resolveWorktreeMainRoot(scriptRepo); scriptMain != "" {
+			if isPathInside(scriptMain, mainRoot) && isPathInside(mainRoot, scriptMain) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var secretLineRe = regexp.MustCompile(`(?i)(sk-[a-z0-9]{20,}|sk-ant-[a-z0-9-]{20,}|AKIA[A-Z0-9]{16}|ghp_[a-z0-9]{36}|xox[abprs]-[a-z0-9-]{10,}|BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY|(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*['"]?[a-z0-9_\-/+=]{8,})`)

@@ -44,14 +44,25 @@ func canonicalDirectory(dir string) string {
 	return filepath.Clean(dir)
 }
 
-// gitRoot returns the git repository root for the given directory, or empty string.
+// gitRoot returns the git repository root (or main repo root for linked worktrees)
+// for the given directory, or empty string.
 func gitRoot(dir string) string {
+	if root := findRepoRoot(dir); root != "" {
+		if main := resolveWorktreeMainRoot(root); main != "" {
+			return main
+		}
+		return canonicalDirectory(root)
+	}
 	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	top := strings.TrimSpace(string(out))
+	if main := resolveWorktreeMainRoot(top); main != "" {
+		return main
+	}
+	return top
 }
 
 func SessionDir() string {

@@ -13,12 +13,12 @@ yolonot judges       Judge chain: list | add <entry> | remove <n|entry> | move <
                      (entry = fast_allow, exec:<path to hook>, or a model name)
 yolonot rules        Show active rules + sensitive patterns (--trace includes sources)
 yolonot status       Show session state (approved/asked/denied)
-yolonot log [n]      Show the last n decisions with model timing (default 20; `-n <n>` also works; `--human` lists your answers to asks in this project)
+yolonot log [n]      Show the last n decisions with model timing (default 20; `-n <n>` also works; `--session <id|current>` narrows to one session; `--human` lists your answers to asks in this project and the commands worth a precedent)
 yolonot suggest      Analyze history, suggest permanent rules
-yolonot stats        Show analytics from decision history
-yolonot check <cmd>  Preview rules/judges without command execution; may call models
+yolonot stats        Show analytics from decision history (--session <id|current>, --since today|24h|7d, --project <name>)
+yolonot check [--cwd <dir>] <cmd>  Preview rules/judges without command execution; may call models; prints which scripts the judge saw
 yolonot config validate [file] Validate config without rewriting it
-yolonot doctor       Check config, hook registration, host version and model/exec readiness
+yolonot doctor       Check config, hook registration, host version, model/exec readiness, escalation latency and over-broad rule globs
 yolonot effective    Show consolidated resolved policy (--harness <name>, --json)
 yolonot approve '<cmd>' Approve an exact command for this session/project (--session-id <id>)
 yolonot deny '<cmd>'   Reject an exact command for this session/project

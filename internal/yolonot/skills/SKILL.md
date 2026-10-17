@@ -60,9 +60,18 @@ chat. Pass `--session-id <id>` explicitly to mutations and session profile pins.
 - `yolonot check '<exact command>'`: classify without executing it. This can
   contact configured models. It excludes session memory and skips exec judges;
   it does not reproduce an entire live host approval flow.
-- `yolonot log [n]`: recent decisions; `yolonot log --human`: durable human
-  answers in this project, excluding allow-once answers.
-- `yolonot stats`: aggregate decision and latency analytics.
+- `yolonot log [n]`: recent decisions; `yolonot log --session <id|current>`:
+  one session's; `yolonot log --human`: durable human answers in this project,
+  excluding allow-once answers, followed by learning candidates.
+- `yolonot stats`: aggregate decision and latency analytics;
+  `--session <id|current>`, `--since today|24h|7d`, `--project <name>`.
+- Too many asks: run `yolonot stats --session <id>` (or `--since today` when
+  the session is unknown; the unfiltered output ranks sessions by asks), then
+  `yolonot log --session <id>` for the individual decisions and
+  `yolonot doctor` for escalation latency. Read the sections on escalation
+  timeouts, repeated asks, inconsistent escalation verdicts and scripts not
+  shown to the judge; report the counts and the commands. Do not parse
+  `decisions.jsonl` by hand.
 - `yolonot rules --trace`: active rules with their sources.
 - `yolonot profile`, `profile list`, `profile show <name>`: inspect profiles.
 - `yolonot risk {{HARNESS}}`: inspect tier-to-action mapping.
@@ -141,9 +150,13 @@ trailing quoted explanation. `allow-redirect` permits literal redirect targets
 for the fast allow judge. Use `rules --trace` to inspect discovered sources.
 
 `context`, `allow-hint`, `ask-hint` are model context, not deterministic rules.
-For a learn request, inspect `log --human` and existing project hints, propose
-specific patterns backed by repeated consistent answers, and apply only the
-hints the user authorizes. Do not generalize a wrapper or command prefix into
+For a learn request, inspect `log --human` (its last section lists commands
+asked repeatedly and allowed each time, with the `yolonot approve` line that
+records a precedent) and existing project hints, propose specific patterns
+backed by repeated consistent answers, and apply only the hints the user
+authorizes. A script the judge could not see (`stats` reports these) is a
+case for an `allow-hint` describing the script, since allow rules never match
+chained commands. Do not generalize a wrapper or command prefix into
 unrestricted approval. Omit secrets and contradictory examples. Do not treat
 allow-once answers as training evidence. Confirm project/global scope if unclear.
 

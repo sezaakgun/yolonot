@@ -6,6 +6,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var Version = "dev"
@@ -103,21 +104,35 @@ func Run() {
 	case "status":
 		cmdStatus()
 	case "log":
-		n := 20
-		if len(os.Args) > 2 {
-			arg := os.Args[2]
-			if arg == "--human" {
+		n, session := 20, ""
+		args := os.Args[2:]
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
+			switch {
+			case arg == "--human":
 				cmdLogHuman()
 				return
-			}
-			if arg == "-n" && len(os.Args) > 3 {
-				arg = os.Args[3]
-			}
-			if v, err := strconv.Atoi(arg); err == nil && v > 0 {
-				n = v
+			case arg == "--session" && i+1 < len(args):
+				i++
+				session = args[i]
+				if session == "current" {
+					session = FindSessionID()
+					if session == "" {
+						fmt.Fprintln(os.Stderr, "yolonot log: no current session found")
+						os.Exit(2)
+					}
+				}
+			case arg == "-n" && i+1 < len(args):
+				i++
+				arg = args[i]
+				fallthrough
+			default:
+				if v, err := strconv.Atoi(arg); err == nil && v > 0 {
+					n = v
+				}
 			}
 		}
-		cmdLog(n)
+		cmdLog(n, session)
 	case "suggest":
 		cmdEvolve(os.Args[2:])
 	case "uninstall":
@@ -127,7 +142,7 @@ func Run() {
 	case "resume":
 		cmdResume(os.Args[2:])
 	case "stats":
-		cmdStats()
+		cmdStats(os.Args[2:]...)
 	case "threshold":
 		fmt.Fprintln(os.Stderr, "yolonot: `threshold` was removed. Use `yolonot risk` to configure per-harness tier→action policy.")
 		os.Exit(2)
@@ -170,11 +185,16 @@ func Run() {
 		fmt.Fprintln(os.Stderr, "  status:  yolonot judges")
 		os.Exit(2)
 	case "check":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: yolonot check <command>")
+		args, cwd, err := parseCheckArgs(os.Args[2:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		if len(args) == 0 {
+			fmt.Fprintln(os.Stderr, "Usage: yolonot check [--cwd <dir>] <command>")
 			os.Exit(1)
 		}
-		cmdCheck(strings.Join(os.Args[2:], " "))
+		cmdCheckIn(strings.Join(args, " "), cwd)
 	case "upgrade":
 		cmdUpgrade()
 	case "version":
@@ -288,6 +308,10 @@ func cmdDefault() {
 		}
 	}
 
+	if line := todayAnomaly(ReadRecentDecisions(2000), time.Now()); line != "" {
+		fmt.Printf("  ⚠ %s\n", line)
+	}
+
 	if os.Getenv("YOLONOT_DISABLED") == "1" {
 		fmt.Println("  ⚠ Disabled via YOLONOT_DISABLED=1 env var")
 	}
@@ -300,9 +324,9 @@ func cmdDefault() {
 	fmt.Println("  judges      The judge chain: list, add, remove, move")
 	fmt.Println("  rules       Show active rules + sensitive patterns")
 	fmt.Println("  status      Show session state (approved/asked/denied)")
-	fmt.Println("  log         Show recent decisions")
-	fmt.Println("  stats       Show analytics from decision history")
-	fmt.Println("  check       Dry-run: test what the pipeline would decide for a command")
+	fmt.Println("  log         Show recent decisions ([n], --session <id|current>, --human)")
+	fmt.Println("  stats       Show analytics (--session <id|current>, --since today|24h|7d, --project <name>)")
+	fmt.Println("  check       Dry-run: test what the pipeline would decide ([--cwd <dir>] <command>)")
 	fmt.Println("  suggest     Analyze history, suggest permanent rules")
 	fmt.Println("  profile     Pick a named risk policy (fast/balanced/strict/paranoid + custom)")
 	fmt.Println("  risk        Show/set per-harness risk tier → action policy")

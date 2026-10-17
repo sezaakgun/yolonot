@@ -70,6 +70,26 @@ func hasConfirmBypass(args []string) bool {
 	return os.Getenv("YOLONOT_CONFIRM_BYPASS") == "1"
 }
 
+// pausedSessions returns the sorted list of session IDs that currently have a
+// .paused marker file in SessionDir().
+func pausedSessions() []string {
+	entries, err := os.ReadDir(SessionDir())
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".paused") {
+			continue
+		}
+		sid := strings.TrimSuffix(e.Name(), ".paused")
+		if IsValidSessionID(sid) {
+			out = append(out, sid)
+		}
+	}
+	return out
+}
+
 func cmdPause(args []string) {
 	sid := resolveSessionID(args)
 	if sid == "" {
@@ -96,15 +116,19 @@ func cmdPause(args []string) {
 		return
 	}
 
+	cwd, _ := os.Getwd()
+	if cwd == "" {
+		cwd = "."
+	}
 	// Log pause activation so audits can spot agents disabling the safety
 	// layer. DecisionEntry.Layer="pause" makes this grep-able alongside
 	// regular decisions.
 	LogDecision(DecisionEntry{
-		SessionID: sid, Command: "yolonot pause", Cwd: ".", Layer: "pause",
+		SessionID: sid, Command: "yolonot pause", Cwd: cwd, Layer: "pause",
 		Decision: "bypass_enabled", Reasoning: "session paused via --confirm-bypass",
 	})
 
-	fmt.Printf("yolonot paused for session %s\n", sid)
+	fmt.Printf("yolonot paused for session %s (project: %s)\n", sid, filepath.Base(cwd))
 	fmt.Println("All commands bypass yolonot (no rules, no LLM, no session memory).")
 	fmt.Println("Run 'yolonot resume' to re-enable.")
 }

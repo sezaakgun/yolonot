@@ -136,7 +136,7 @@ func projectPrecedents(cwd string) []precedent {
 	for i := len(all) - 1; i >= 0; i-- {
 		p := all[i]
 		pcwd := canonicalDirectory(p.Cwd)
-		if pcwd != root && !strings.HasPrefix(pcwd, root+string(os.PathSeparator)) {
+		if pcwd != root && !strings.HasPrefix(pcwd, root+string(os.PathSeparator)) && projectRoot(pcwd) != root {
 			continue
 		}
 		if seen[p.Command] {
@@ -238,5 +238,60 @@ func cmdLogHuman() {
 			day = day[:10]
 		}
 		fmt.Printf("  %s  %-5s %s\n", day, p.Decision, p.Command)
+	}
+	printLearningCandidates(cwd, ReadRecentDecisions(20000))
+}
+
+// printLearningCandidates lists commands this project keeps asking about
+// and the human keeps allowing, one-time grants included. They are not
+// precedents yet: the line shows the command that makes them one.
+func printLearningCandidates(cwd string, entries []DecisionEntry) {
+	root := projectRoot(cwd)
+	if root == "" {
+		return
+	}
+	type tally struct {
+		asks, allows, denies int
+	}
+	byCommand := map[string]*tally{}
+	var order []string
+	for _, e := range entries {
+		if e.Cwd == "" || projectRoot(e.Cwd) != root {
+			continue
+		}
+		t, ok := byCommand[e.Command]
+		if !ok {
+			t = &tally{}
+			byCommand[e.Command] = t
+			order = append(order, e.Command)
+		}
+		switch {
+		case e.Layer == "human" && e.Decision == "allow":
+			t.allows++
+		case e.Layer == "human" && e.Decision == "deny":
+			t.denies++
+		case e.Layer == "human":
+		case e.Decision == "ask":
+			t.asks++
+		}
+	}
+	precedent := map[string]bool{}
+	for _, p := range projectPrecedents(cwd) {
+		precedent[p.Command] = true
+	}
+	var candidates []string
+	for _, c := range order {
+		t := byCommand[c]
+		if t.asks >= 2 && t.allows >= 2 && t.denies == 0 && !precedent[c] {
+			candidates = append(candidates, c)
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	fmt.Printf("\nAsked at least twice and allowed each time, not yet a precedent:\n\n")
+	for _, c := range candidates {
+		t := byCommand[c]
+		fmt.Printf("  %dx asked, %dx allowed:  yolonot approve %s\n", t.asks, t.allows, strconv.Quote(c))
 	}
 }

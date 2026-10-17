@@ -79,6 +79,7 @@ type Harness interface {
 // harness implementations don't have to re-declare them.
 const (
 	ActionAllow       = "allow"
+	ActionForceAllow  = "force_allow" // override even a classifier "ask" to "allow" (non-critical tiers only)
 	ActionAsk         = "ask"
 	ActionDeny        = "deny"
 	ActionPassthrough = "passthrough" // emit empty response, defer to host's native permission engine

@@ -10,14 +10,42 @@ import (
 	"github.com/sezaakgun/yolonot/internal/glob"
 )
 
+// parseCheckArgs extracts leading check flags (--cwd, --) and rejects unknown
+// leading flags so typos like --session-id are not silently treated as the
+// command to classify.
+func parseCheckArgs(args []string) (rest []string, cwd string, err error) {
+	for len(args) > 0 {
+		a := args[0]
+		switch {
+		case a == "--":
+			return args[1:], cwd, nil
+		case a == "--cwd":
+			if len(args) < 2 {
+				return nil, "", fmt.Errorf("yolonot check: --cwd requires a directory")
+			}
+			cwd, args = args[1], args[2:]
+		case strings.HasPrefix(a, "--cwd="):
+			cwd, args = strings.TrimPrefix(a, "--cwd="), args[1:]
+		case strings.HasPrefix(a, "-"):
+			return nil, "", fmt.Errorf("yolonot check: unknown flag %s (usage: yolonot check [--cwd <dir>] <command>)", a)
+		default:
+			return args, cwd, nil
+		}
+	}
+	return nil, cwd, nil
+}
+
 // cmdCheck simulates the hook pipeline for a command and prints
 // human-readable output showing what each layer would decide.
-func cmdCheck(command string) {
+func cmdCheck(command string) { cmdCheckIn(command, "") }
+
+// cmdCheckIn previews command as if it ran in cwd ("" = this process's).
+func cmdCheckIn(command, cwd string) {
 	defer prepareHarnessCapabilities(ActiveHarness())()
 	fmt.Printf("Command: %s\n\n", command)
 
-	rules := LoadRules()
-	sensitive := LoadSensitivePatterns()
+	rules := LoadRules(cwd)
+	sensitive := LoadSensitivePatterns(cwd)
 
 	step := 1
 
@@ -109,7 +137,9 @@ func cmdCheck(command string) {
 	// exec judges are never invoked here (they may have side effects).
 	specs := checkCfg.JudgeSpecs()
 	fmt.Printf("  [%d] Judges:\n", step)
-	cwd, _ := os.Getwd()
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
 	in := &JudgeInput{Command: command, Cwd: cwd, Rules: rules, Config: checkCfg, Harness: ActiveHarness(), HookStart: time.Now(), DryRun: true}
 	var adopted *Verdict
 	var lastErr *judgeError
@@ -143,6 +173,12 @@ func cmdCheck(command string) {
 			fmt.Printf("      ✓ %s — %s (risk: %s, %dms)\n", spec.Use, strings.ToUpper(v.Decision), riskOrDash(v.Risk), v.Ms)
 			if v.Reason != "" {
 				fmt.Printf("        Reasoning: %s\n", v.Reason)
+			}
+			for _, a := range v.Attached {
+				fmt.Printf("        Script shown: %s\n", a)
+			}
+			for _, w := range v.Withheld {
+				fmt.Printf("        Script not shown: %s\n", w)
 			}
 		} else {
 			fmt.Printf("      ✓ %s — %s (%s)\n", spec.Use, strings.ToUpper(v.Decision), v.Reason)
