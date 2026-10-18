@@ -104,6 +104,11 @@ session-wide bypass marker. Run `yolonot resume --session-id <id>` to re-enable.
 Stale markers are eligible for cleanup after 24 hours; closing a chat is not an
 immediate cleanup signal.
 
+**Global** — `yolonot pause --global --confirm-bypass` creates `~/.yolonot/paused`
+and bypasses yolonot across all sessions until `yolonot resume --global` (or 24h
+expiry). Agents cannot call `pause --global` or `resume --global`; the hook
+hard-denies them.
+
 **Pre-launch (env var)** — `YOLONOT_DISABLED=1 claude`. Disables yolonot for the entire session at launch. Useful for CI / automation.
 
 When paused, yolonot is **completely transparent** — no deny rules, no LLM, no session memory. The host CLI's native permissions handle everything as if yolonot weren't installed.

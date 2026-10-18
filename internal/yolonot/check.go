@@ -72,9 +72,10 @@ func cmdCheckIn(command, cwd string) {
 
 	// Self-policy guard (same as hook.go step 0b): mutating yolonot
 	// subcommands always require confirmation (or deny on ask-less hosts).
+	// Global pause/resume (--global) is hard-denied for agents on all hosts.
 	if verb := selfPolicyVerb(command); verb != "" {
 		decision := "ask"
-		if !harnessSupportsAsk(ActiveHarness()) {
+		if !harnessSupportsAsk(ActiveHarness()) || strings.HasSuffix(verb, "--global") {
 			decision = "deny"
 		}
 		fmt.Printf("  [%d] Self-policy:     %s — yolonot %s changes gate policy\n", step, strings.ToUpper(decision), verb)

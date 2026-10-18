@@ -375,6 +375,18 @@ func cmdHook() {
 	// Clean old sessions (background, non-blocking)
 	go CleanOldSessions()
 
+	// An agent or skill may never execute `yolonot pause --global` or
+	// `yolonot resume --global`, even when the current session is paused or
+	// running under bypassPermissions.
+	if payload.HookEventName != "PostToolUse" && command != "" {
+		if verb := selfPolicyVerb(command); strings.HasSuffix(verb, "--global") {
+			reason := fmt.Sprintf("yolonot %s affects all sessions globally and cannot be run by an agent; run it directly in your terminal", verb)
+			LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "self", Decision: ActionDeny, Reasoning: reason})
+			emitHook(hookResponse(ActionDeny, "self", reason, command))
+			return
+		}
+	}
+
 	// Claude Code --dangerously-skip-permissions — total bypass, same shape
 	// as YOLONOT_DISABLED. User asked the host to skip its own permission
 	// engine; yolonot honors that and stays out of the way. Post writes are
@@ -384,13 +396,11 @@ func cmdHook() {
 		return
 	}
 
-	// Paused for this session — total bypass (same: Post writes are gated
-	// too, so unpausing doesn't reveal a pile of "pre-approved" commands
-	// that yolonot never actually vetted).
-	if sessionID != "" {
-		if _, err := os.Stat(filepath.Join(YolonotDir(), "sessions", sessionID+".paused")); err == nil {
-			return
-		}
+	// Paused globally or for this session — total bypass (same: Post writes
+	// are gated too, so unpausing doesn't reveal a pile of "pre-approved"
+	// commands that yolonot never actually vetted).
+	if isPaused(sessionID) {
+		return
 	}
 
 	// Load config once — used by pre-check, risk-map resolution, quiet-on-
@@ -524,13 +534,17 @@ func cmdHook() {
 
 	// Step 0.3: an agent changing yolonot's own grants. These verbs record
 	// human answers and session grants, so the user must see each call;
-	// allow rules, session memory and judges never clear it.
+	// allow rules, session memory and judges never clear it. Global pause
+	// (--global) is hard-denied so an agent or skill can never execute it.
 	if verb := selfPolicyVerb(command); verb != "" {
 		action := ActionAsk
-		if !harnessSupportsAsk(harness) {
+		reason := fmt.Sprintf("yolonot %s changes yolonot's own approvals; the user must run or confirm it", verb)
+		if !harnessSupportsAsk(harness) || strings.HasSuffix(verb, "--global") {
 			action = ActionDeny
 		}
-		reason := fmt.Sprintf("yolonot %s changes yolonot's own approvals; the user must run or confirm it", verb)
+		if strings.HasSuffix(verb, "--global") {
+			reason = fmt.Sprintf("yolonot %s affects all sessions globally and cannot be run by an agent; run it directly in your terminal", verb)
+		}
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "self", Decision: action, Reasoning: reason})
 		emitHook(hookResponse(action, "self", reason, command))
 		return

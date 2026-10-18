@@ -285,6 +285,9 @@ func CleanOldSessions() {
 			}
 		}
 	}
+	if info, err := os.Stat(globalPauseFile()); err == nil && info.ModTime().Before(cutoff) {
+		os.Remove(globalPauseFile())
+	}
 }
 
 // FindSessionID returns the most recent base session ID from session files.

@@ -1186,7 +1186,11 @@ func cmdStatus() {
 		sessionID = FindSessionID()
 	}
 	if sessionID == "" {
-		fmt.Println("No active session found.")
+		if isGloballyPaused() {
+			fmt.Println("  ⚠ Globally PAUSED across all sessions (all commands bypass yolonot; run: yolonot resume --global)")
+		} else {
+			fmt.Println("No active session found.")
+		}
 		if showAll || explicitHarness {
 			fmt.Println()
 			cmdEffective(args)
@@ -1209,7 +1213,9 @@ func cmdStatus() {
 		projName = filepath.Base(cwd)
 	}
 	fmt.Printf("yolonot session: %s (project: %s)\n", sessionID, projName)
-	if isPaused(sessionID) {
+	if isGloballyPaused() {
+		fmt.Printf("  ⚠ Globally PAUSED across all sessions (all commands bypass yolonot; run: yolonot resume --global)\n")
+	} else if isPaused(sessionID) {
 		fmt.Printf("  ⚠ Session %s is PAUSED (all commands bypass yolonot; run: yolonot resume)\n", sessionID)
 	}
 	fmt.Printf("  %d approved · %d asked · %d denied\n\n", len(approved), len(asked), len(denied))

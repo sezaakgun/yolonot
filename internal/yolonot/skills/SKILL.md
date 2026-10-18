@@ -127,6 +127,10 @@ Pause is a total bypass of yolonot, session-wide rather than project-scoped.
 Only use on an explicit request to pause protection:
 `yolonot pause --session-id <id> --confirm-bypass`.
 Restore with `yolonot resume --session-id <id>`.
+Global pause (`yolonot pause --global --confirm-bypass` / `yolonot resume --global`)
+is hard-blocked by the hook for agents and must never be executed from this
+skill; if the user explicitly asks to pause or resume globally, print the
+command for the user to run in their own terminal.
 
 ## Policy, judges and models
 

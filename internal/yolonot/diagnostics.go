@@ -181,7 +181,11 @@ func auditChecks(cfg Config, targets []Harness, cwd string) []diagnosticCheck {
 	checks = append(checks, policyRiskChecks(cfg, targets)...)
 	checks = append(checks, hostPermissionChecks(targets, cwd)...)
 	if paused := pausedSessions(); len(paused) > 0 {
-		checks = append(checks, diagnosticCheck{Name: "paused_sessions", Status: "warning", Detail: fmt.Sprintf("%d paused session(s): %s (run: yolonot resume --session-id <id>)", len(paused), strings.Join(paused, ", "))})
+		hint := "yolonot resume --session-id <id>"
+		if isGloballyPaused() {
+			hint = "yolonot resume --global"
+		}
+		checks = append(checks, diagnosticCheck{Name: "paused_sessions", Status: "warning", Detail: fmt.Sprintf("%d paused session(s): %s (run: %s)", len(paused), strings.Join(paused, ", "), hint)})
 	}
 	return checks
 }

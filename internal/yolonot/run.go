@@ -269,7 +269,9 @@ func cmdDefault() {
 	if sessionID == "" {
 		sessionID = FindSessionID()
 	}
-	if sessionID != "" {
+	if isGloballyPaused() {
+		fmt.Printf("  Session:  PAUSED GLOBALLY (run: yolonot resume --global)\n")
+	} else if sessionID != "" {
 		if isPaused(sessionID) {
 			fmt.Printf("  Session:  PAUSED (run: yolonot resume)\n")
 		} else {

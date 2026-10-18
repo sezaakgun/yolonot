@@ -828,7 +828,11 @@ func selfPolicyVerb(command string) string {
 					continue
 				}
 				var words []string
+				hasGlobal := false
 				for _, w := range f[1:] {
+					if w == "--global" || w == "-g" {
+						hasGlobal = true
+					}
 					if !strings.HasPrefix(w, "-") {
 						words = append(words, w)
 					}
@@ -837,6 +841,9 @@ func selfPolicyVerb(command string) string {
 					continue
 				}
 				verb := words[0]
+				if (verb == "pause" || verb == "resume") && hasGlobal {
+					return verb + " --global"
+				}
 				if always[verb] {
 					return verb
 				}

@@ -92,12 +92,14 @@ Use `--session-id <id>` for the intended conversation. `--current` means the
 latest recorded session, which may be a different chat. `status` also falls
 back to the latest session when its host session variable is absent.
 
-Pause is a session-wide bypass, including explicit deny rules, and requires
-an explicit opt-in:
+Pause is a session-wide (or global) bypass, including explicit deny rules, and
+requires an explicit opt-in (`--global` is hard-denied if invoked by an agent):
 
 ```bash
 yolonot pause --session-id <id> --confirm-bypass
 yolonot resume --session-id <id>
+yolonot pause --global --confirm-bypass
+yolonot resume --global
 ```
 
 For one command, prefer project-scoped `approve` rather than pausing.

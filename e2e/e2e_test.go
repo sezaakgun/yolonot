@@ -687,6 +687,29 @@ func TestCrossHarnessBinaryE2E(t *testing.T) {
 			if out, err := auditCmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "yolonot audit") {
 				t.Errorf("%s audit unexpected (err=%v):\n%s", h.name, err, string(out))
 			}
+
+			// Verify `yolonot pause --global --confirm-bypass` is hard-denied when called by an agent,
+			// and pauses/resumes all sessions when invoked directly from the CLI.
+			checkGlobalCmd := exec.Command(yolonotBin, "check", "yolonot pause --global --confirm-bypass")
+			checkGlobalCmd.Dir, checkGlobalCmd.Env = wt1, s.Env
+			if out, err := checkGlobalCmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "DENY (layer: rule, self-policy)") {
+				t.Errorf("%s check pause --global unexpected (err=%v):\n%s", h.name, err, string(out))
+			}
+			pauseGlobalCmd := exec.Command(yolonotBin, "pause", "--global", "--confirm-bypass")
+			pauseGlobalCmd.Dir, pauseGlobalCmd.Env = wt1, s.Env
+			if out, err := pauseGlobalCmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "paused globally") {
+				t.Fatalf("%s pause --global failed (err=%v):\n%s", h.name, err, string(out))
+			}
+			statusPausedCmd := exec.Command(yolonotBin, "status")
+			statusPausedCmd.Dir, statusPausedCmd.Env = wt1, s.Env
+			if out, err := statusPausedCmd.CombinedOutput(); err != nil || (!strings.Contains(string(out), "PAUSED GLOBALLY") && !strings.Contains(string(out), "Globally PAUSED")) {
+				t.Errorf("%s status while globally paused unexpected (err=%v):\n%s", h.name, err, string(out))
+			}
+			resumeGlobalCmd := exec.Command(yolonotBin, "resume", "--global")
+			resumeGlobalCmd.Dir, resumeGlobalCmd.Env = wt1, s.Env
+			if out, err := resumeGlobalCmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "resumed globally") {
+				t.Fatalf("%s resume --global failed (err=%v):\n%s", h.name, err, string(out))
+			}
 		})
 	}
 }
