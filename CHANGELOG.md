@@ -5,7 +5,7 @@ All notable changes to yolonot are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] — 2026-10-18
 
 ### 1.0.0 — the config contract
 
@@ -17,6 +17,8 @@ reader stays through 1.x and goes away in 2.0. Full table in
 [docs/upgrading.md](docs/upgrading.md).
 
 ### Added
+- **Host sandbox bypass isolation (`[unsandboxed]`).** When a harness payload requests unsandboxed execution (`dangerouslyDisableSandbox: true` in Claude, `BypassSandbox: true` in Antigravity, `sandbox: false` in Cursor, or `sandbox_permissions: "require_escalated"` / `with_escalated_permissions: true` in Codex), yolonot skips `.yolonot` `allow-cmd`/`allow-path` rules and `fast_allow`, isolates session approvals (`approved_unsandboxed`), script cache keys, and Claude mod replay bindings from prior sandboxed runs, annotates LLM judge prompts with `[Sandbox: agent requested unsandboxed execution (host sandbox bypass)]`, tags `yolonot log` rows with `[unsandboxed]`, and excludes unsandboxed calls from `yolonot suggest` rule/hint promotion.
+- **Cross-harness lifecycle & human resolution parity.** OpenCode V2's plugin subscribes to `permission.asked` / `permission.replied` (`once`, `always`, `reject`) and forwards `PermissionReplied` to `yolonot hook` to record `allow_once`, `ask_approved` (with session approval) or `ask_rejected` (with session deny). Codex `PreToolUse` → `PermissionRequest` pairs for the same command deduplicate via `.codexpre` without double-calling the LLM or double-logging in `decisions.jsonl` / `stats`, while still re-evaluating newly added `deny` rules on `PermissionRequest`.
 - **Impact & incident summary (`yolonot stats`).** `yolonot stats` now opens with an `Impact:` block reporting `Auto-approved` (instant local allows vs AI-judged allows), `Speed saved` (estimated prompt interruptions avoided and average AI latency), and `Threats stopped` (commands blocked or caught, followed by up to 5 recent `BLOCKED` / `HARDENED` incidents with layer and reason), and caps project breakdowns to the top 10 projects.
 - **Separated health diagnostics (`yolonot doctor`) vs security/policy audit (`yolonot audit`).** `yolonot doctor` checks installation, `config.json` validity, host versions, configured models, judge chain, and escalation latency (with a 1-line summary pointer when security/policy warnings exist). `yolonot audit` lints overly broad `allow-cmd` patterns (`bash *`, `sh *`, `python *`, `git *`, `docker *`, `kubectl *`, etc.), warns on `attach_outside_root`, deduplicated `force_allow` / `high=allow` cells, and active paused sessions, and performs a read-only audit of host permission/sandbox configs across Claude (`.claude/settings*.json` broad `Bash(...)` allows, `bypassPermissions`, sandbox state), Codex (`config.toml` `approval_policy="never"`, `danger-full-access`), Antigravity (`~/.gemini/config/config.json` `autoApprove`, disabled sandbox) and Cursor (`cli-config.json` broad `Shell(...)` allows).
 - **`force_allow` (`override_allow`) risk-map action.** Non-critical risk-map cells (`safe`, `low`, `moderate`, `high`) now accept `force_allow` (or `override_allow`) to explicitly override a classifier's `ask` decision into `allow`. Default `allow` remains escalate-only; `critical` never accepts `allow` or `force_allow`.

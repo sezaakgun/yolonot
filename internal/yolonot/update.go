@@ -93,11 +93,49 @@ func newerThanCurrent(latest string) string {
 	if latest == "" {
 		return ""
 	}
-	clean := strings.Split(Version, "+")[0]
-	if latest != clean && latest > clean {
+	curVer, okCur := parseSemverTuple(Version)
+	latVer, okLat := parseSemverTuple(latest)
+	if okCur && okLat {
+		for i := range curVer {
+			if latVer[i] != curVer[i] {
+				if latVer[i] > curVer[i] {
+					return latest
+				}
+				return ""
+			}
+		}
+		return ""
+	}
+	clean := strings.TrimPrefix(strings.Split(Version, "+")[0], "v")
+	cleanLatest := strings.TrimPrefix(strings.Split(latest, "+")[0], "v")
+	if cleanLatest != clean && cleanLatest > clean {
 		return latest
 	}
 	return ""
+}
+
+func parseSemverTuple(s string) ([3]int, bool) {
+	s = strings.TrimPrefix(strings.Split(s, "+")[0], "v")
+	s = strings.Split(s, "-")[0]
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return [3]int{}, false
+	}
+	var out [3]int
+	for i, p := range parts {
+		if p == "" {
+			return [3]int{}, false
+		}
+		n := 0
+		for _, ch := range p {
+			if ch < '0' || ch > '9' {
+				return [3]int{}, false
+			}
+			n = n*10 + int(ch-'0')
+		}
+		out[i] = n
+	}
+	return out, true
 }
 
 // fetchLatestVersion calls the GitHub releases API. Returns (tag, nil) on
@@ -176,8 +214,8 @@ func cmdUpgrade() {
 		return
 	}
 
-	cleanVersion := strings.Split(Version, "+")[0] // strip +dirty, +incompatible, etc.
-	if latest == cleanVersion || (cleanVersion != "dev" && latest <= cleanVersion) {
+	cleanVersion := strings.Split(Version, "+")[0]
+	if cleanVersion != "dev" && newerThanCurrent(latest) == "" {
 		fmt.Printf("up to date (%s)\n", Version)
 		return
 	}
