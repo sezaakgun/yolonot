@@ -366,7 +366,10 @@ func ValidateCustomProfile(name string, m map[string]string) error {
 
 // cmdProfile dispatches `yolonot profile ...` subcommands. Surface:
 //
-//	yolonot profile                                    show active profile + overrides
+//	yolonot profile                                    show active profile, overrides & effective risk map
+//	yolonot profile <harness>                          show effective 5-tier risk map for <harness>
+//	yolonot profile [set] <harness> <tier> <act|reset> override or reset one tier for <harness>
+//	yolonot profile <harness> reset [<tier>]           reset all or one tier override for <harness>
 //	yolonot profile list                               list built-in + custom profiles
 //	yolonot profile show <name>                        print one profile
 //	yolonot profile use <name> [--harness=<h>]         set global or per-harness profile
@@ -386,15 +389,29 @@ func cmdProfile(args []string) {
 		cmdProfileList()
 	case "show":
 		cmdProfileShow(args[1:])
-	case "use", "set":
+	case "use":
+		cmdProfileUse(args[1:])
+	case "set":
+		if len(args) > 1 && GetHarness(args[1]) != nil {
+			cmdRisk(args[1:])
+			return
+		}
 		cmdProfileUse(args[1:])
 	case "reset", "clear":
+		if len(args) >= 2 && !strings.HasPrefix(args[1], "--") && GetHarness(args[1]) != nil {
+			cmdRisk(append([]string{args[1], "reset"}, args[2:]...))
+			return
+		}
 		cmdProfileReset(args[1:])
 	case "create", "new":
 		cmdProfileCreate(args[1:])
 	case "delete", "rm":
 		cmdProfileDelete(args[1:])
 	default:
+		if GetHarness(args[0]) != nil {
+			cmdRisk(args)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "Unknown profile subcommand %q.\n", args[0])
 		profileUsage(os.Stderr)
 		os.Exit(1)
@@ -403,13 +420,14 @@ func cmdProfile(args []string) {
 
 func profileUsage(w *os.File) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  yolonot profile                              Show active profile")
-	fmt.Fprintln(w, "  yolonot profile list                         List built-in + custom profiles")
-	fmt.Fprintln(w, "  yolonot profile show <name>                  Show one profile's tier→action map")
-	fmt.Fprintln(w, "  yolonot profile use <name> [--harness=<h>]   Set global / per-harness profile")
-	fmt.Fprintln(w, "  yolonot profile reset [--harness=<h>]        Clear global / per-harness override")
+	fmt.Fprintln(w, "  yolonot profile                                   Show active profile & effective risk map")
+	fmt.Fprintln(w, "  yolonot profile list                              List built-in + custom profiles")
+	fmt.Fprintln(w, "  yolonot profile show <name>                       Show one profile's tier→action map")
+	fmt.Fprintln(w, "  yolonot profile use <name> [--harness=<h>|--session]  Set global / per-harness / session profile")
+	fmt.Fprintln(w, "  yolonot profile [set] <harness> <tier> <action|reset> Override or reset one tier for <harness>")
+	fmt.Fprintln(w, "  yolonot profile reset [--harness=<h>|--session]   Clear global / per-harness / session override")
 	fmt.Fprintln(w, "  yolonot profile create <name> --base=<existing> [--<tier>=<action>...]")
-	fmt.Fprintln(w, "  yolonot profile delete <name>                Remove a custom profile")
+	fmt.Fprintln(w, "  yolonot profile delete <name>                     Remove a custom profile")
 }
 
 func printActiveProfile() {
@@ -453,24 +471,22 @@ func printActiveProfile() {
 		}
 	}
 
+	if h := ActiveHarness(); h != nil {
+		fmt.Println()
+		printRiskMap(h)
+	}
+
 	fmt.Println()
 	fmt.Println("Built-in profiles: fast, balanced, strict, paranoid")
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  yolonot profile list                          List all profiles + tier maps")
-	fmt.Println("  yolonot profile show <name>                   Show one profile")
-	fmt.Println("  yolonot profile use <name>                    Set global profile")
-	fmt.Println("  yolonot profile use <name> --harness=<h>      Per-harness override")
-	fmt.Println("  yolonot profile use <name> --session          Pin to current session only")
-	fmt.Println("  yolonot profile reset [--session|--harness=<h>]")
-	fmt.Println()
-	fmt.Println("Custom profiles:")
+	fmt.Println("  yolonot profile list                              List all profiles + tier maps")
+	fmt.Println("  yolonot profile show <name>                       Show one profile")
+	fmt.Println("  yolonot profile use <name> [--harness=<h>|--session]  Set global / per-harness / session profile")
+	fmt.Println("  yolonot profile <harness> [<tier> <action|reset>] View or override per-harness risk tiers")
+	fmt.Println("  yolonot profile reset [--session|--harness=<h>]   Clear profile override")
 	fmt.Println("  yolonot profile create <name> --base=<existing> [--high=deny ...]")
-	fmt.Println("  yolonot profile create <name> --safe=allow --low=allow \\")
-	fmt.Println("      --moderate=ask --high=deny --critical=deny")
 	fmt.Println("  yolonot profile delete <name>")
-	fmt.Println()
-	fmt.Println("Env pins (this shell only): YOLONOT_PROFILE=fast | YOLONOT_<HARNESS>_PROFILE=fast")
 }
 
 func cmdProfileList() {
@@ -554,11 +570,12 @@ func cmdProfileUse(args []string) {
 		return
 	}
 	if harness != "" {
-		if GetHarness(harness) == nil {
+		h := GetHarness(harness)
+		if h == nil {
 			fmt.Fprintf(os.Stderr, "Unknown harness %q.\n", harness)
 			os.Exit(1)
 		}
-		harness = GetHarness(harness).Name()
+		harness = h.Name()
 		if !requireV1(&cfg) {
 			return
 		}

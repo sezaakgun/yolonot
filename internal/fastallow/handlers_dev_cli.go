@@ -148,7 +148,6 @@ func scriptHandler(tokens []string) (bool, string) {
 	if len(tokens) < 2 {
 		return false, ""
 	}
-	flagEnd := 1
 	i := 1
 	for i < len(tokens) {
 		tok := tokens[i]
@@ -175,7 +174,7 @@ func scriptHandler(tokens []string) (bool, string) {
 		}
 		break
 	}
-	flagEnd = i
+	flagEnd := i
 	if i >= len(tokens) {
 		return false, ""
 	}

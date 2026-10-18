@@ -50,13 +50,9 @@ func cmdCheckIn(command, cwd string) {
 	step := 1
 
 	// Step: Deny rules (same as hook.go step 0)
-	firstToken := command
-	if idx := strings.IndexByte(command, ' '); idx > 0 {
-		firstToken = command[:idx]
-	}
 	for _, r := range rules {
 		if r.Action == "deny" {
-			if (r.Type == "cmd" && matchCmd(r.Pattern, command, firstToken)) ||
+			if (r.Type == "cmd" && matchCmd(r.Pattern, command)) ||
 				(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && glob.Match(r.Pattern, scriptPathRe.FindStringSubmatch(" " + command)[1])) {
 				fmt.Printf("  [%d] Deny rules:      DENY — matched deny-%s %s\n", step, r.Type, r.Pattern)
 				fmt.Println()
@@ -73,6 +69,19 @@ func cmdCheckIn(command, cwd string) {
 	// Dry-run parity: the prompt built by the classifier judge must match
 	// what the hook path would build.
 	attachOutsideRoot = checkCfg.AttachOutsideRoot
+
+	// Self-policy guard (same as hook.go step 0b): mutating yolonot
+	// subcommands always require confirmation (or deny on ask-less hosts).
+	if verb := selfPolicyVerb(command); verb != "" {
+		decision := "ask"
+		if !harnessSupportsAsk(ActiveHarness()) {
+			decision = "deny"
+		}
+		fmt.Printf("  [%d] Self-policy:     %s — yolonot %s changes gate policy\n", step, strings.ToUpper(decision), verb)
+		fmt.Println()
+		fmt.Printf("  → Result: %s (layer: rule, self-policy)\n", strings.ToUpper(decision))
+		return
+	}
 
 	// Step: Allow/Ask rules (same as hook.go step 3). Use the SAME priority
 	// matcher the hook uses (deny > ask > allow, file-order-independent) so
@@ -97,7 +106,7 @@ func cmdCheckIn(command, cwd string) {
 		hasAllowCandidate := false
 		for _, r := range rules {
 			if r.Action == "allow" {
-				if (r.Type == "cmd" && matchCmd(r.Pattern, command, firstToken)) ||
+				if (r.Type == "cmd" && matchCmd(r.Pattern, command)) ||
 					(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && glob.Match(r.Pattern, scriptPathRe.FindStringSubmatch(" " + command)[1])) {
 					hasAllowCandidate = true
 					break
@@ -107,7 +116,7 @@ func cmdCheckIn(command, cwd string) {
 		if hasAllowCandidate {
 			fmt.Printf("  [%d] Allow rules:     skipped — command has %s\n", step, strings.Join(reasons, ", "))
 		} else if match != nil && match.Action == "ask" {
-			fmt.Printf("  [%d] Ask rules:       ASK — matched ask-%s\n", step, match.Pattern)
+			fmt.Printf("  [%d] Ask rules:       ASK — matched ask-%s %s\n", step, match.Type, match.Pattern)
 			fmt.Println()
 			fmt.Printf("  → Result: ASK (layer: rule)\n")
 			return
@@ -116,14 +125,14 @@ func cmdCheckIn(command, cwd string) {
 		}
 	} else if match != nil {
 		if match.Action == "allow" {
-			fmt.Printf("  [%d] Allow rules:     ALLOW — matched allow-cmd %s\n", step, match.Pattern)
+			fmt.Printf("  [%d] Allow rules:     ALLOW — matched allow-%s %s\n", step, match.Type, match.Pattern)
 			step++
 			fmt.Printf("  [%d] Chain/sensitive:  clean (no chains, no sensitive files)\n", step)
 			fmt.Println()
 			fmt.Printf("  → Result: ALLOW (layer: rule)\n")
 			return
 		} else if match.Action == "ask" {
-			fmt.Printf("  [%d] Ask rules:       ASK — matched ask-%s\n", step, match.Pattern)
+			fmt.Printf("  [%d] Ask rules:       ASK — matched ask-%s %s\n", step, match.Type, match.Pattern)
 			fmt.Println()
 			fmt.Printf("  → Result: ASK (layer: rule)\n")
 			return

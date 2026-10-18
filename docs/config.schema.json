@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "yolonot configuration",
-  "description": "Structural schema. yolonot config validate also checks references, protocol compatibility and policy names.",
+  "description": "Structural schema. yolonot doctor also checks references, protocol compatibility and policy names.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -330,6 +330,8 @@
         "safe": {
           "enum": [
             "allow",
+            "force_allow",
+            "override_allow",
             "ask",
             "deny",
             "passthrough"
@@ -338,6 +340,8 @@
         "low": {
           "enum": [
             "allow",
+            "force_allow",
+            "override_allow",
             "ask",
             "deny",
             "passthrough"
@@ -346,6 +350,8 @@
         "moderate": {
           "enum": [
             "allow",
+            "force_allow",
+            "override_allow",
             "ask",
             "deny",
             "passthrough"
@@ -354,6 +360,8 @@
         "high": {
           "enum": [
             "allow",
+            "force_allow",
+            "override_allow",
             "ask",
             "deny",
             "passthrough"

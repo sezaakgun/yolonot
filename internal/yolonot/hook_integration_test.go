@@ -1522,16 +1522,6 @@ func TestIntegration_LLM_SystemPromptCarriesConfigHints(t *testing.T) {
 
 // --- Session content gate (script edits invalidate session approvals) ---
 
-func makePostPayloadWithCwd(sessionID, command, cwd string) HookPayload {
-	return HookPayload{
-		HookEventName: "PostToolUse",
-		ToolName:      "Bash",
-		SessionID:     sessionID,
-		Cwd:           cwd,
-		ToolInput:     map[string]interface{}{"command": command},
-	}
-}
-
 // An approval granted while a script held content X must not replay after
 // the script changes to content Y: the session layer falls through and the
 // pipeline re-judges the new contents. The mock answers ALLOW to the

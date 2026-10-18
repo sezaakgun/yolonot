@@ -19,12 +19,6 @@ type FailurePolicy struct {
 	Timeout       string `json:"timeout,omitempty"`
 }
 
-type LearningConfig struct {
-	Enabled       *bool `json:"enabled,omitempty"`        // absent preserves existing enabled behavior
-	RetentionDays int   `json:"retention_days,omitempty"` // 0 = no expiry
-	MaxEntries    int   `json:"max_entries,omitempty"`    // 0 = no cap
-}
-
 // Reading never rewrites a legacy config. Decode errors never leave a partial
 // policy active; validation errors preserve the decoded failure policy only.
 func readConfig(path string) (Config, error) {
@@ -242,9 +236,6 @@ func ValidateConfig(cfg Config) error {
 	if cfg.HookTimeout < 0 || cfg.HookTimeout > 55 {
 		add("hook_timeout must be 1..55 seconds, or 0 for default")
 	}
-	if cfg.Learning.RetentionDays < 0 || cfg.Learning.MaxEntries < 0 {
-		add("learning retention_days and max_entries must be nonnegative")
-	}
 	if len(problems) > 0 {
 		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))
 	}
@@ -259,17 +250,4 @@ func mustSaveConfig(cfg Config) {
 	if err := SaveConfig(cfg); err != nil {
 		os.Exit(1)
 	}
-}
-
-func cmdConfigValidate(args []string) {
-	path := configPath()
-	if len(args) > 0 {
-		path = args[0]
-	}
-	cfg, err := readConfig(path)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
-	}
-	fmt.Printf("Config valid: %s (%d models, %d judges)\n", path, len(cfg.Models), len(cfg.Judges))
 }

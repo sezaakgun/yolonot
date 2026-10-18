@@ -579,7 +579,114 @@ func TestCrossHarnessBinaryE2E(t *testing.T) {
 			if !strings.Contains(gotUser, "E2E-WT-SCRIPT-BODY") {
 				t.Errorf("%s user prompt missing attached script:\n%s", h.name, gotUser)
 			}
+
+			// Verify a subsequent unsandboxed call bypasses the sandboxed session/cache approval,
+			// annotates the LLM prompt, and surfaces across `log --session current`, `stats`, and `status --all`.
+			var unsandboxedPayload []byte
+			switch h.name {
+			case "antigravity":
+				unsandboxedPayload, _ = json.Marshal(obj{
+					"conversationId": "e2e-sess-" + h.name,
+					"stepIdx":        7,
+					"toolCall":       obj{"name": "run_command", "args": obj{"CommandLine": command, "Cwd": wt1, "BypassSandbox": true}},
+				})
+			case "cursor":
+				unsandboxedPayload, _ = json.Marshal(obj{
+					"conversation_id": "e2e-sess-" + h.name,
+					"hook_event_name": "beforeShellExecution",
+					"command":         command,
+					"cwd":             wt1,
+					"sandbox":         false,
+				})
+			case "codex":
+				unsandboxedPayload, _ = json.Marshal(obj{
+					"hook_event_name": "PermissionRequest",
+					"tool_name":       "Bash",
+					"session_id":      "e2e-sess-" + h.name,
+					"cwd":             wt1,
+					"tool_input":      obj{"command": command, "sandbox_permissions": "require_escalated"},
+				})
+			default:
+				unsandboxedPayload, _ = json.Marshal(obj{
+					"hook_event_name": "PreToolUse",
+					"tool_name":       "Bash",
+					"session_id":      "e2e-sess-" + h.name,
+					"cwd":             wt1,
+					"tool_input":      obj{"command": command, "dangerouslyDisableSandbox": true},
+				})
+			}
+			gotUser = ""
+			cmd2 := exec.Command(yolonotBin, args...)
+			cmd2.Dir, cmd2.Env = wt1, s.Env
+			cmd2.Stdin = strings.NewReader(string(unsandboxedPayload))
+			if out2, err := cmd2.CombinedOutput(); err != nil {
+				t.Fatalf("%s unsandboxed hook failed: %v\n%s", h.name, err, string(out2))
+			}
+			if !strings.Contains(gotUser, "[Sandbox: agent requested unsandboxed execution") {
+				t.Errorf("%s unsandboxed call did not re-invoke LLM with sandbox bypass annotation:\n%s", h.name, gotUser)
+			}
+
+			// Verify `yolonot log --session current` shows [unsandboxed] and session-scoped total.
+			logCmd := exec.Command(yolonotBin, "log", "--session", "current")
+			logCmd.Dir, logCmd.Env = wt1, s.Env
+			logBytes, err := logCmd.CombinedOutput()
+			logOut := string(logBytes)
+			if err != nil || !strings.Contains(logOut, "[unsandboxed]") || !strings.Contains(logOut, "Total: 2 decisions logged (session e2e-sess-"+h.name+").") {
+				t.Errorf("%s log --session current unexpected (err=%v):\n%s", h.name, err, logOut)
+			}
+
+			// Verify `yolonot stats` Impact summary and Unsandboxed counter on the live binary.
+			statsCmd := exec.Command(yolonotBin, "stats")
+			statsCmd.Dir, statsCmd.Env = wt1, s.Env
+			statsBytes, err := statsCmd.CombinedOutput()
+			statsOut := string(statsBytes)
+			if err != nil {
+				t.Fatalf("%s stats failed: %v\n%s", h.name, err, statsOut)
+			}
+			for _, want := range []string{"Impact:", "Auto-approved:", "2 rescued by 2nd model", "Unsandboxed:         1"} {
+				if !strings.Contains(statsOut, want) {
+					t.Errorf("%s stats output missing %q:\n%s", h.name, want, statsOut)
+				}
+			}
+
+			// Verify `yolonot status --all` shows both sandboxed and [unsandboxed] approvals + active session.
+			statusCmd := exec.Command(yolonotBin, "status", "--all")
+			statusCmd.Dir, statusCmd.Env = wt1, s.Env
+			statusBytes, err := statusCmd.CombinedOutput()
+			statusOut := string(statusBytes)
+			if err != nil || !strings.Contains(statusOut, "[unsandboxed]") || !strings.Contains(statusOut, "Session: e2e-sess-"+h.name) {
+				t.Errorf("%s status --all unexpected (err=%v):\n%s", h.name, err, statusOut)
+			}
+
+			// Verify `yolonot status --json --harness <h>` returns valid JSON with session approvals.
+			statusJSONCmd := exec.Command(yolonotBin, "status", "--json", "--harness", h.name)
+			statusJSONCmd.Dir, statusJSONCmd.Env = wt1, s.Env
+			statusJSONBytes, err := statusJSONCmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(statusJSONBytes), `"harness": "`+h.name+`"`) || !strings.Contains(string(statusJSONBytes), "[unsandboxed]") {
+				t.Errorf("%s status --json unexpected (err=%v):\n%s", h.name, err, string(statusJSONBytes))
+			}
+
+			// Verify consolidated `rules`, `profile <h>`, `judges`, and `audit --harness <h>` on the live binary.
+			rulesCmd := exec.Command(yolonotBin, "rules")
+			rulesCmd.Dir, rulesCmd.Env = wt1, s.Env
+			if out, err := rulesCmd.CombinedOutput(); err != nil || !strings.Contains(string(out), `allow-hint "E2E-MAIN-HINT"`) {
+				t.Errorf("%s rules unexpected (err=%v):\n%s", h.name, err, string(out))
+			}
+			profCmd := exec.Command(yolonotBin, "profile", h.name)
+			profCmd.Dir, profCmd.Env = wt1, s.Env
+			if out, err := profCmd.CombinedOutput(); err != nil || !strings.Contains(string(out), `Risk map for harness "`+h.name+`"`) {
+				t.Errorf("%s profile unexpected (err=%v):\n%s", h.name, err, string(out))
+			}
+			judgesCmd := exec.Command(yolonotBin, "judges")
+			judgesCmd.Dir, judgesCmd.Env = wt1, s.Env
+			if out, err := judgesCmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "Escalation") {
+				t.Errorf("%s judges unexpected (err=%v):\n%s", h.name, err, string(out))
+			}
+			auditCmd := exec.Command(yolonotBin, "audit", "--harness", h.name)
+			auditCmd.Dir, auditCmd.Env = wt1, s.Env
+			if out, err := auditCmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "yolonot audit") {
+				t.Errorf("%s audit unexpected (err=%v):\n%s", h.name, err, string(out))
+			}
 		})
 	}
 }
-

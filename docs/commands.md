@@ -3,42 +3,50 @@
 ## CLI
 
 ```
+  Inspect & Diagnose:
 yolonot              Status overview + session summary + update check (opens the settings screen on a terminal)
-yolonot setup        First-run wizard (install + rules + models + chain)
-yolonot config       Settings screen: judges, models, policy (profiles, harness overrides, rules), prompt
-yolonot install      Install hooks + native skill (--skill-only skips hooks; --mod adds the Claude mod)
+yolonot status       Show session state (--all includes resolved effective policy; --json; --harness <name>)
+yolonot doctor       Check health, installation, config validity, models, judge chain, escalation latency
+yolonot audit        Audit broad allow-cmd rules, policy risks, paused sessions, and host permissions/sandbox
+yolonot log [n]      Show the last n decisions with model timing (default 20; `-n <n>`; `--session <id|current>`)
+yolonot stats        Show impact summary, blocked/hardened incidents, and analytics (--session <id|current>, --since today|24h|7d, --project <name>)
+yolonot check [--cwd <dir>] <cmd>  Preview rules/judges without command execution; prints which scripts the judge saw
 yolonot explain <cmd> Up to three lines from the first chat judge (stdin JSON {command, reason} also works)
-yolonot models       Model catalog: list | add [typed] | remove <name> | test <name>
-yolonot judges       Judge chain: list | add <entry> | remove <n|entry> | move <n|entry> up|down
-                     (entry = fast_allow, exec:<path to hook>, or a model name)
-yolonot rules        Show active rules + sensitive patterns (--trace includes sources)
-yolonot status       Show session state (approved/asked/denied)
-yolonot log [n]      Show the last n decisions with model timing (default 20; `-n <n>` also works; `--session <id|current>` narrows to one session; `--human` lists your answers to asks in this project and the commands worth a precedent)
-yolonot suggest      Analyze history, suggest permanent rules
-yolonot stats        Show analytics from decision history (--session <id|current>, --since today|24h|7d, --project <name>)
-yolonot check [--cwd <dir>] <cmd>  Preview rules/judges without command execution; may call models; prints which scripts the judge saw
-yolonot config validate [file] Validate config without rewriting it
-yolonot doctor       Check config, hook registration, host version, model/exec readiness, escalation latency and over-broad rule globs
-yolonot effective    Show consolidated resolved policy (--harness <name>, --json)
+
+  Session Control:
 yolonot approve '<cmd>' Approve an exact command for this session/project (--session-id <id>)
 yolonot deny '<cmd>'   Reject an exact command for this session/project
                        (quote the command as one argument; split words are rejected)
-yolonot reset        Clear this project's session decisions; preserve logs and learning
-yolonot learning     status|list|on|off|retention|limit|forget|clear|prune
-yolonot risk         Show/set per-harness risk tier → action policy
-yolonot profile      Pick a named risk policy (fast/balanced/strict/paranoid + custom)
-yolonot prompt       Inspect/validate the chat-model prompt customization (defaults|config|review|verify)
-yolonot escalation   Second-opinion model consulted before surfacing an ask (on|off|setup|test)
-yolonot quiet        Silence banners for allow decisions (only show ask/deny)
-yolonot migrate      Rewrite a 0.x config.json in the 1.x format (--dry-run | --undo)
-yolonot pause        Disable yolonot for current session (total bypass)
+yolonot reset        Clear this project's session decisions; preserve logs
+yolonot pause        Disable yolonot for current session (total bypass; requires --confirm-bypass)
 yolonot resume       Re-enable yolonot for current session
+
+  Policy & Rules:
+yolonot config       Settings screen: judges, models, policy, prompt (`config quiet [on|off]` toggles allow banners)
+yolonot profile      Manage risk profiles and per-harness tier maps (`profile <harness> [<tier> <action|reset>]`)
+yolonot rules        Show active rules, hints + sensitive patterns (`--trace` includes sources; `defaults|config|review|verify` inspect/verify prompt customization)
+yolonot suggest      Analyze history and human ask resolutions to suggest rules/hints (`--list` | `--json` | `--basic`)
+
+  Setup & Models:
+yolonot setup        First-run wizard (install + rules + models + chain)
+yolonot install      Install hooks + native skill (--skill-only skips hooks; --mod adds the Claude mod)
 yolonot uninstall    Remove hooks + managed native skill; preserve yolonot data
+yolonot models       Model catalog: list | add [typed] | remove <name> | test <name>
+yolonot judges       Judge chain & escalation: list | add <entry> | remove <n|entry> | move <n|entry> up|down | escalation [on|off|setup|test]
+                     (entry = fast_allow, exec:<path to hook>, or a model name)
+yolonot migrate      Rewrite a 0.x config.json in the 1.x format (--dry-run | --undo)
 yolonot upgrade      Update to latest release
 yolonot version      Show version
 ```
 
-Removed in 1.0: `provider`, `decision` (use `models add`), `pre-check` (use `judges`), `classifier` (renamed `prompt`), `local-allow`, `threshold`. Each prints the replacement and exits 2.
+Consolidated in 1.0:
+- `effective` → `yolonot status --all` (or `yolonot status --json`)
+- `validate` / `config validate` → `yolonot doctor`
+- `prompt` / `classifier` → `yolonot rules [defaults|config|review|verify]`
+- `risk` → `yolonot profile [<harness> [<tier> <action|reset>]]`
+- `escalation` → `yolonot judges [escalation [on|off|setup|test]]`
+- `quiet` → `yolonot config quiet [on|off]`
+- `learning` / `log --human` / `evolve` → `yolonot suggest [--list | --json]`
 
 ### Verbose mode
 
@@ -71,9 +79,9 @@ rolls back rule-file writes and keeps the draft available for retry.
 By default yolonot emits a short banner for every decision (`yolonot: 🧑‍🚀 <reason>`). To only surface ask/deny banners:
 
 ```bash
-yolonot quiet          # show current state
-yolonot quiet on       # silence allow banners
-yolonot quiet off      # restore default
+yolonot config quiet          # show current state
+yolonot config quiet on       # silence allow banners
+yolonot config quiet off      # restore default
 ```
 
 Quiet mode only affects the user-facing `systemMessage`. The underlying `permissionDecision` + `permissionDecisionReason` still flow to the host CLI, and the decision log (`yolonot log`) is unchanged.
@@ -96,32 +104,27 @@ For one command, prefer project-scoped `approve` rather than pausing.
 `check` excludes session memory/cache and skips exec judges; it cannot verify
 a native approval dialog. See [configuration.md](configuration.md).
 
-### Prompt customization
+### Rules and prompt customization
 
-Read-only inspectors for the chat model's prompt. Full reference: [prompt.md](prompt.md).
+Inspect active rules, LLM hints, and the chat model's prompt customization. Full reference: [prompt.md](prompt.md).
 
 ```bash
-yolonot prompt defaults    # Built-in base prompt + the built-in hint lists behind `$defaults`, as JSON
-yolonot prompt config      # Effective prompt actually sent (config + walk-up, $defaults expanded)
-yolonot prompt review      # The chat model audits your custom hints for ambiguity/redundancy/over-reach
-yolonot prompt verify      # Prove a custom system_prompt still yields parseable verdicts
-yolonot prompt             # Shorthand for `config`
+yolonot rules              # Active rules, hints (allow-hint/ask-hint/context) and sensitive patterns
+yolonot rules --trace      # Every loaded rule and hint with source file, line number and shadowing
+yolonot rules defaults     # Built-in base prompt + the built-in hint lists behind `$defaults`, as JSON
+yolonot rules config       # Effective prompt actually sent (config + walk-up, $defaults expanded)
+yolonot rules review       # The chat model audits your custom hints for ambiguity/redundancy/over-reach
+yolonot rules verify       # Prove a custom system_prompt still yields parseable verdicts
 ```
 
-Customize via `~/.yolonot/config.json` (`prompt.{context,allow_hints,ask_hints,system_prompt}`), the PROMPT section of `yolonot config` (each list opens in `$EDITOR`, one entry per line), or per-project `.yolonot` directives (`context`/`allow-hint`/`ask-hint`/`system-prompt`). `system_prompt` fully replaces the built-in base; hints still append. **Run `verify` after setting a `system_prompt`** — it static-checks the JSON verdict contract and round-trips real probes through your chat model, exiting non-zero if the override wouldn't function.
+Customize via `~/.yolonot/config.json` (`prompt.{context,allow_hints,ask_hints,system_prompt}`), the PROMPT section of `yolonot config` (each list opens in `$EDITOR`, one entry per line), or per-project `.yolonot` directives (`context`/`allow-hint`/`ask-hint`/`system-prompt`). `system_prompt` fully replaces the built-in base; hints still append. **Run `yolonot rules verify` after setting a `system_prompt`** — it static-checks the JSON verdict contract and round-trips real probes through your chat model, exiting non-zero if the override wouldn't function.
 
-### Learning from your answers
+### Suggesting rules and hints from your answers (`yolonot suggest`)
 
-Explicit remembered answers (mod Allow this session/Deny or CLI approve/deny)
-can become **precedents** when learning is enabled, subject to retention and
-caps. They are stored in `~/.yolonot/precedents.jsonl`, reconstructed from
-decision-log entries marked eligible when they were recorded if the file is
-missing; labels that older versions inferred are not imported. Native one-time approvals, unanswered
-asks and answers recorded with learning disabled do not become precedents.
-Two things use this history:
+Human ask resolutions (`ask_approved`, `allow_once`, `ask_rejected`) are recorded in `~/.yolonot/decisions.jsonl` and feed directly into `yolonot suggest`:
 
-- **Model judge calls when learning is enabled.** Nearby precedents from the same project are supplied as historical hints. They do not grant current authorization. `learning off`, retention/caps, forget and clear control this behavior; allow-once answers are excluded.
-- **`/yolonot learn`.** The harness's own model reads `yolonot log --human` (this repository's answers, latest per command) and proposes a handful of `allow-hint` / `ask-hint` sentences with their evidence; the ones you accept go into the project `.yolonot`. Sentences, not globs: they reach chat and typed models alike and generalise to variants an `allow-cmd` pattern would miss. yolonot itself makes no model call for this; the skill does the distilling, so the quality is that of the model you are already talking to.
+- **Interactive terminal (`yolonot suggest`)**: Groups repeated asks, unseen scripts, escalation timeouts, and low-confidence allows alongside your human resolution counts (`approved`, `once`, `rejected`), asks your configured LLM for a tailored rule/hint recommendation, and lets you apply rules or hints to `.yolonot` or `~/.yolonot/rules`.
+- **Non-interactive / Skill mode (`yolonot suggest --list` or `--json`)**: Emits all findings, smart recommendations, and exact repeated-ask candidates (`Asked at least twice and allowed each time`) without opening an interactive TUI. Your coding agent's `/yolonot` skill uses `yolonot suggest --list` to propose high-precision `allow-hint`, `ask-hint`, `allow-cmd`, or `allow-path` rules for your approval.
 
 ## Skill (`/yolonot`)
 
@@ -132,23 +135,21 @@ Claude syntax; the actions and shared CLI are portable:
 
 ```
 /yolonot             Session summary + command menu
-/yolonot status      Full approved/asked/denied lists
+/yolonot status      Session decisions + effective policy (--all, --json)
+/yolonot doctor      Health, hooks, config, escalation latency
+/yolonot audit       Security, broad rules, policy & host permission audit
 /yolonot approve X   Move command to approved
 /yolonot deny X      Move command to denied
 /yolonot reset       Clear session state
 /yolonot log         Recent decisions
-/yolonot rules       Show rules
-/yolonot suggest     Suggest permanent rules from history
-/yolonot learn       Turn your answers to asks into classifier hints
+/yolonot rules       Show rules, hints, and prompt customization (--trace, config, review, verify)
+/yolonot suggest     Suggest permanent rules and hints from history (--list, --json)
 /yolonot check X     Dry-run: test pipeline for a command
-/yolonot stats       Show decision analytics
-/yolonot profile     Pick a named risk policy
-/yolonot risk        Show/set per-harness risk tier → action policy
-/yolonot judges      The judge chain
+/yolonot stats       Show decision analytics and impact summary
+/yolonot profile     Manage risk profiles and per-harness tier maps
+/yolonot judges      The judge chain and second-opinion escalation
 /yolonot models      Model catalog
-/yolonot prompt      Prompt customization (defaults|config|review|verify)
-/yolonot escalation  Second-opinion model status
-/yolonot quiet       Silence allow banners
+/yolonot config      Settings screen and quiet banner toggle (config quiet on|off)
 /yolonot pause       Disable yolonot for current session
 /yolonot resume      Re-enable yolonot for current session
 ```

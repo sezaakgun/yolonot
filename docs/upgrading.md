@@ -18,7 +18,12 @@ move those endpoints into the catalog before upgrading.
 | `judges` keywords `llm`, `decision` / `jev`, `escalation` | the chat model's name, the typed model's name; `escalation` entries are dropped (escalation runs once after the chain) |
 | `yolonot provider`, `yolonot decision` | `yolonot models add [typed]` |
 | `yolonot pre-check …` | `yolonot judges add|remove|move` |
-| `yolonot classifier …` | `yolonot prompt …` |
+| `yolonot classifier …`, `yolonot prompt …` | `yolonot rules [defaults|config|review|verify]` |
+| `yolonot risk …` | `yolonot profile [<harness> [<tier> <action|reset>]]` |
+| `yolonot escalation …` | `yolonot judges [escalation [on|off|setup|test]]` |
+| `yolonot quiet …` | `yolonot config quiet [on|off]` |
+| `yolonot effective …` | `yolonot status --all` (or `yolonot status --json`) |
+| `yolonot learning …`, `yolonot log --human` | `yolonot suggest [--list | --json]` |
 | `LLM_MODEL`, `LLM_URL`, `LLM_TIMEOUT`, `LLM_ESCALATION_*`, `DECISION_*`, `YOLONOT_CLASSIFIER` | removed; endpoints are config only |
 | log layer `llm`, `pre_check (name)` | the model name, `exec:<name>` |
 
@@ -46,8 +51,7 @@ in `yolonot config` if you prefer shorter banners.
 `yolonot` and `yolonot config` offer the migration once on a 0.x file and
 remember a decline (`~/.yolonot/migrate-declined`); `yolonot setup` asks
 and stops if you say no. Commands that write the file (`models`, `judges`,
-`profile use|reset|create|delete`, `risk`, `escalation`, `quiet`, saving in
-`yolonot config`) ask first and do nothing if you say no; without a
+`profile`, `config`) ask first and do nothing if you say no; without a
 terminal they print "Run `yolonot migrate` first" and exit 2. The hook
 never asks and never writes. Reading commands (`yolonot judges`,
 `yolonot models`, `yolonot check`) show the folded 1.x view of a 0.x file.
@@ -56,7 +60,7 @@ The 0.x reader stays through every 1.x release and goes away in 2.0.
 
 ## Validate and reinstall after updating
 
-Run `yolonot config validate` before restarting a host. Unknown or duplicate
+Run `yolonot doctor` before restarting a host. Unknown or duplicate
 fields, invalid model references and invalid actions now produce actionable
 errors instead of silently using defaults. A malformed configuration defaults
 to deny. Supported legacy shapes still normalize in memory.
@@ -69,16 +73,16 @@ PermissionRequest registration. See [harnesses.md](harnesses.md).
 Old script-cache entries lack the new context fingerprint and are rejudged.
 Canonical project paths can also require a fresh session approval for commands
 previously approved through a symlink alias. Existing decision logs remain.
-Learning defaults to enabled for compatibility; use `yolonot learning off`
-to opt out, and retention/limit/prune/clear controls to manage stored precedents.
+Human ask resolutions in `decisions.jsonl` now feed `yolonot suggest` (`--list`
+/ `--json`) rather than injecting raw precedents into live prompts.
 New failure policies, deadline, explicit model protocols and diagnostics are
 listed in [configuration.md](configuration.md).
 
 Pending asks no longer become inferred session rejections. Explicit mod/CLI
-Deny still persists; older inferred denial and learning records are not
+Deny still persists; older inferred denial records are not
 silently rewritten. If a known false rejection remains in a test session,
-use the scoped CLI reset and learning controls deliberately, or test with a
-fresh command/session. Reset preserves logs and learned history.
+use the scoped CLI `reset` deliberately, or test with a
+fresh command/session. Reset preserves logs.
 
 Native executables now require a current snapshot for session approval; an
 older string-only approval can require one fresh decision. Recheck model keys

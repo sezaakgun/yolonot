@@ -12,9 +12,6 @@
     "fast_allow",
     "local-gate"
   ],
-  "learning": {
-    "enabled": false
-  },
   "failure": {
     "unavailable": "deny",
     "parse": "deny",

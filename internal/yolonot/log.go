@@ -18,6 +18,7 @@ type DecisionEntry struct {
 	Project          string   `json:"project"`
 	Harness          string   `json:"harness,omitempty"`         // claude | codex | opencode | gemini
 	PermissionMode   string   `json:"permission_mode,omitempty"` // Claude Code only
+	BypassSandbox    bool     `json:"bypass_sandbox,omitempty"`  // agent requested unsandboxed execution
 	AgentID          string   `json:"agent_id,omitempty"`        // subagent or teammate the call came from
 	AgentType        string   `json:"agent_type,omitempty"`
 	ToolUseID        string   `json:"tool_use_id,omitempty"` // joins an ask to the human answer that followed
@@ -25,14 +26,13 @@ type DecisionEntry struct {
 	Withheld         []string `json:"withheld,omitempty"`    // scripts referenced but not shown, with the reason
 	Layer            string   `json:"layer"`
 	Decision         string   `json:"decision"`
+	OrigDecision     string   `json:"orig_decision,omitempty"`
 	Risk             string   `json:"risk,omitempty"` // safe | low | moderate | high | critical
 	Confidence       float64  `json:"confidence,omitempty"`
 	Short            string   `json:"short,omitempty"` // compact banner label (from LLM)
-	Reasoning        string   `json:"reasoning,omitempty"`
-	Source           string   `json:"source,omitempty"`
-	LearningExcluded bool     `json:"learning_excluded,omitempty"`
-	Precedent        bool     `json:"precedent,omitempty"`   // eligible when written; rebuilds trust only these
-	DurationMs       int64    `json:"duration_ms,omitempty"` // primary LLM call only; escalation time is escalation_ms
+	Reasoning    string  `json:"reasoning,omitempty"`
+	Source       string  `json:"source,omitempty"`
+	DurationMs   int64   `json:"duration_ms,omitempty"` // primary LLM call only; escalation time is escalation_ms
 
 	// Escalation fields — set only when the escalation layer was configured
 	// and consulted (or deliberately skipped). Unattended runs have no
@@ -62,7 +62,15 @@ func LogDecision(entry DecisionEntry) {
 		entry.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	if entry.Project == "" && entry.Cwd != "" {
-		entry.Project = filepath.Base(entry.Cwd)
+		dir := entry.Cwd
+		if root := findRepoRoot(canonicalDirectory(entry.Cwd)); root != "" {
+			if main := resolveWorktreeMainRoot(root); main != "" {
+				dir = main
+			} else {
+				dir = root
+			}
+		}
+		entry.Project = filepath.Base(dir)
 	}
 	if entry.Harness == "" {
 		if h := ActiveHarness(); h != nil {
@@ -71,6 +79,9 @@ func LogDecision(entry DecisionEntry) {
 	}
 	if entry.PermissionMode == "" {
 		entry.PermissionMode = currentPermissionMode
+	}
+	if !entry.BypassSandbox {
+		entry.BypassSandbox = currentBypassSandbox
 	}
 	if entry.AgentID == "" {
 		entry.AgentID = currentAgentID
@@ -81,11 +92,6 @@ func LogDecision(entry DecisionEntry) {
 	if entry.ToolUseID == "" {
 		entry.ToolUseID = currentToolUseID
 	}
-	if !learningEnabled(LoadConfig()) {
-		entry.LearningExcluded = true
-	}
-	entry.Precedent = isPrecedent(entry)
-	recordPrecedent(entry)
 
 	dir := YolonotDir()
 	os.MkdirAll(dir, 0700)
@@ -151,8 +157,12 @@ func ReadRecentDecisions(n int) []DecisionEntry {
 // (session is an id or an id prefix).
 func cmdLog(n int, session ...string) {
 	var entries []DecisionEntry
+	sessionFilter := ""
+	sessionTotal := 0
 	if len(session) > 0 && session[0] != "" {
-		entries = filterDecisions(ReadRecentDecisions(1000000), statsFilter{session: session[0]})
+		sessionFilter = session[0]
+		entries = filterDecisions(ReadRecentDecisions(1000000), statsFilter{session: sessionFilter})
+		sessionTotal = len(entries)
 		if len(entries) > n {
 			entries = entries[len(entries)-n:]
 		}
@@ -175,16 +185,16 @@ func cmdLog(n int, session ...string) {
 			extra = fmt.Sprintf("  (%.1f", e.Confidence)
 			if e.Reasoning != "" {
 				r := e.Reasoning
-				if len(r) > 40 {
-					r = r[:40]
+				if len([]rune(r)) > 40 {
+					r = string([]rune(r)[:40])
 				}
 				extra += " " + r
 			}
 			extra += ")"
 		} else if e.Reasoning != "" {
 			r := e.Reasoning
-			if len(r) > 50 {
-				r = r[:50]
+			if len([]rune(r)) > 50 {
+				r = string([]rune(r)[:50])
 			}
 			extra = "  (" + r + ")"
 		}
@@ -210,14 +220,18 @@ func cmdLog(n int, session ...string) {
 		} else if e.AgentID != "" {
 			esc += "  [subagent]"
 		}
-		cmd := strings.ReplaceAll(e.Command, "\n", " ⏎ ")
-		if len(cmd) > 60 {
-			cmd = cmd[:57] + "..."
+		if e.BypassSandbox {
+			esc += "  [unsandboxed]"
 		}
+		cmd := truncateStr(strings.ReplaceAll(e.Command, "\n", " ⏎ "), 60)
 		fmt.Printf("  %s  %-6s %-18s %s%s%s%s\n", ts, e.Decision, e.Layer, cmd, extra, dur, esc)
 	}
 
 	// Total count
+	if sessionFilter != "" {
+		fmt.Printf("\nTotal: %d decisions logged (session %s).\n", sessionTotal, sessionFilter)
+		return
+	}
 	f, err := os.Open(decisionsPath())
 	if err == nil {
 		total := 0

@@ -128,14 +128,14 @@ ID. Session pins beat env vars and config.
 3. `~/.yolonot/config.json` `policy.harness.<name>.risk_map` per-cell override for that harness.
 4. `YOLONOT_<HARNESS>_RISK_<TIER>=<action>` env vars.
 
-This means profile changes are non-destructive: any per-cell tweak you've already made via `yolonot risk <harness> <tier> <action>` keeps winning.
+This means profile changes are non-destructive: any per-cell tweak you've already made via `yolonot profile <harness> <tier> <action>` keeps winning.
 
 ```bash
-yolonot risk                              # merged map for the active harness, with the source of each cell
-yolonot risk codex                        # for a named harness
-yolonot risk codex high deny              # override one cell (allow|ask|deny|passthrough)
-yolonot risk codex reset high             # drop one override
-yolonot risk codex reset                  # drop every override for that harness
+yolonot profile                               # active profile + merged 5-tier map for the active harness
+yolonot profile codex                         # merged map for a named harness
+yolonot profile codex high deny               # override one cell (allow|force_allow|ask|deny|passthrough)
+yolonot profile codex reset high              # drop one override (or: codex high reset)
+yolonot profile codex reset                   # drop every override for that harness
 ```
 
 In `config.json` all of this is the `policy` block:

@@ -241,14 +241,6 @@ func MatchesLineOrWrappedVariant(sessionID, suffix, command string) bool {
 	return false
 }
 
-// ApprovedAsWrappedVariant is the legacy backward-only lookup. Kept as a
-// thin shim over MatchesLineOrWrappedVariant so existing call sites in
-// hook.go and tests keep compiling, but new code should call the symmetric
-// helper directly.
-func ApprovedAsWrappedVariant(sessionID, command string) bool {
-	return MatchesLineOrWrappedVariant(sessionID, "approved", command)
-}
-
 // AppendLine appends a line to a session file, creating dirs as needed.
 func AppendLine(sessionID, suffix, line string) error {
 	dir := SessionDir()
@@ -275,6 +267,9 @@ func CleanOldSessions() {
 		name := e.Name()
 		if strings.HasSuffix(name, ".approved") ||
 			strings.HasSuffix(name, ".approvedhash") ||
+			strings.HasSuffix(name, ".approved_unsandboxed") ||
+			strings.HasSuffix(name, ".approved_unsandboxedhash") ||
+			strings.HasSuffix(name, ".codexpre") ||
 			strings.HasSuffix(name, ".asked") ||
 			strings.HasSuffix(name, ".denied") ||
 			strings.HasSuffix(name, ".paused") ||
@@ -298,37 +293,42 @@ func CleanOldSessions() {
 func FindSessionID() string {
 	dir := SessionDir()
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
-	}
-
-	type fileInfo struct {
-		stem    string
-		modTime time.Time
-	}
-	var files []fileInfo
-	for _, e := range entries {
-		name := e.Name()
-		for _, suffix := range []string{".approved", ".asked", ".denied"} {
-			if strings.HasSuffix(name, suffix) {
-				info, err := e.Info()
-				if err != nil {
-					continue
+	if err == nil {
+		type fileInfo struct {
+			stem    string
+			modTime time.Time
+		}
+		var files []fileInfo
+		for _, e := range entries {
+			name := e.Name()
+			for _, suffix := range []string{".approved", ".approved_unsandboxed", ".asked", ".denied", ".mod", ".once", ".paused", ".profile"} {
+				if strings.HasSuffix(name, suffix) {
+					info, err := e.Info()
+					if err != nil {
+						continue
+					}
+					stem := strings.TrimSuffix(name, suffix)
+					// Extract base session ID: strip _{8-hex-char hash} suffix
+					stem = baseSessionID(stem)
+					files = append(files, fileInfo{stem, info.ModTime()})
+					break
 				}
-				stem := strings.TrimSuffix(name, suffix)
-				// Extract base session ID: strip _{8-hex-char hash} suffix
-				stem = baseSessionID(stem)
-				files = append(files, fileInfo{stem, info.ModTime()})
 			}
 		}
+		if len(files) > 0 {
+			sort.Slice(files, func(i, j int) bool {
+				return files[i].modTime.After(files[j].modTime)
+			})
+			return files[0].stem
+		}
 	}
-	if len(files) == 0 {
-		return ""
+	recent := ReadRecentDecisions(50)
+	for i := len(recent) - 1; i >= 0; i-- {
+		if recent[i].SessionID != "" {
+			return recent[i].SessionID
+		}
 	}
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime.After(files[j].modTime)
-	})
-	return files[0].stem
+	return ""
 }
 
 // baseSessionID extracts the original session ID from a project-scoped key.

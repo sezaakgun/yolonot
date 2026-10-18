@@ -1710,6 +1710,9 @@ func isSensitivePath(abs string) bool {
 // and cache from a single filesystem snapshot (no re-read race).
 func buildPromptFromCollected(command string, attached []attachedScript, withheld []withheldScript) string {
 	prompt := "Command: " + command
+	if currentBypassSandbox {
+		prompt += "\n[Sandbox: agent requested unsandboxed execution (host sandbox bypass)]"
+	}
 	for _, a := range attached {
 		// Only reachable with attach_outside_root: flag outside-root origin
 		// as a risk signal for the classifier.

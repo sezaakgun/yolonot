@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sezaakgun/yolonot/internal/fastallow"
 )
 
 // The Claude Code mod (function hooks module) runs `yolonot hook` itself from
@@ -22,6 +24,7 @@ type modEntry struct {
 	Cwd            string   `json:"cwd,omitempty"`
 	Binding        string   `json:"binding,omitempty"`
 	ApprovalHashes []string `json:"approval_hashes,omitempty"`
+	BypassSandbox  bool     `json:"bypass_sandbox,omitempty"`
 	Grant          string   `json:"grant,omitempty"`
 	Completed      bool     `json:"completed,omitempty"`
 	Decision       string   `json:"decision"`
@@ -37,9 +40,78 @@ var (
 	modStart          time.Time
 	modCommand        string
 	modCwd            string
+	modRuleAction     string
 	modBinding        string
 	modApprovalHashes []string
 )
+
+type codexPreEntry struct {
+	Command        string   `json:"command"`
+	Cwd            string   `json:"cwd"`
+	Binding        string   `json:"binding"`
+	ApprovalHashes []string `json:"approval_hashes,omitempty"`
+	RuleAction     string   `json:"rule_action,omitempty"`
+	Decision       string   `json:"decision"`
+	Layer          string   `json:"layer"`
+	Reason         string   `json:"reason,omitempty"`
+	Passthrough    bool     `json:"passthrough,omitempty"`
+	Completed      bool     `json:"completed,omitempty"`
+}
+
+func codexRecordPre(sessionID, command, cwd, ruleAction, decision, layer, reason string, passthrough bool) {
+	if sessionID == "" || command == "" || decision == "deny" {
+		return
+	}
+	if h := ActiveHarness(); h == nil || h.Name() != "codex" || currentHookEventName != "PreToolUse" {
+		return
+	}
+	binding, hashes := modBinding, modApprovalHashes
+	if binding == "" {
+		binding, hashes = modCommandSnapshot(command, cwd)
+	}
+	if binding == "" {
+		return
+	}
+	b, err := json.Marshal(codexPreEntry{
+		Command: command, Cwd: cwd, Binding: binding, ApprovalHashes: hashes,
+		RuleAction: ruleAction, Decision: decision, Layer: layer, Reason: reason, Passthrough: passthrough,
+	})
+	if err == nil {
+		AppendLine(sessionID, "codexpre", string(b))
+	}
+}
+
+func codexConsumePre(sessionID, command, cwd, ruleAction string) *codexPreEntry {
+	if sessionID == "" || command == "" {
+		return nil
+	}
+	binding := modCommandBinding(command, cwd)
+	if binding == "" {
+		return nil
+	}
+	lines := ReadLines(sessionID, "codexpre")
+	matchIdx := -1
+	var matched codexPreEntry
+	for i, l := range lines {
+		var e codexPreEntry
+		if json.Unmarshal([]byte(l), &e) == nil && !e.Completed &&
+			e.Command == command && e.Cwd == cwd && e.Binding == binding && e.RuleAction == ruleAction {
+			matchIdx = i
+			matched = e
+		}
+	}
+	if matchIdx < 0 {
+		return nil
+	}
+	matched.Completed = true
+	if b, err := json.Marshal(matched); err == nil {
+		lines[matchIdx] = string(b)
+		if path := sessionPath(sessionID, "codexpre"); path != "" {
+			atomicWriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0600)
+		}
+	}
+	return &matched
+}
 
 func modAppend(sessionID string, e modEntry) {
 	b, err := json.Marshal(e)
@@ -54,7 +126,7 @@ func modRecord(decision, layer, reason string) {
 		return
 	}
 	modAppend(modSessionID, modEntry{ID: modToolUseID, Command: modCommand, Cwd: modCwd, Binding: modBinding, ApprovalHashes: modApprovalHashes,
-		Decision: decision, Layer: layer, Reason: reason, Ms: time.Since(modStart).Milliseconds()})
+		BypassSandbox: currentBypassSandbox, Decision: decision, Layer: layer, Reason: reason, Ms: time.Since(modStart).Milliseconds()})
 }
 
 // modCommandBinding pins a replay to the exact command, working directory,
@@ -99,6 +171,9 @@ func replaySnapshotFromCollected(command, cwd string, attached []attachedScript,
 	}
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\x00%s\x00", command, cwd)
+	if currentBypassSandbox {
+		fmt.Fprintf(h, "unsandboxed\x00")
+	}
 	for _, a := range attached {
 		fmt.Fprintf(h, "%s\x00", a.ref.abs)
 		h.Write(a.digest[:])
@@ -112,7 +187,7 @@ func replaySnapshotFromCollected(command, cwd string, attached []attachedScript,
 func modLookupBound(sessionID, toolUseID, command, cwd string) *modEntry {
 	e := modLookup(sessionID, toolUseID)
 	if e == nil || e.Completed || e.Binding == "" || e.Command != command || e.Cwd != cwd ||
-		e.Binding != modCommandBinding(command, cwd) {
+		e.BypassSandbox != currentBypassSandbox || e.Binding != modCommandBinding(command, cwd) {
 		return nil
 	}
 	return e
@@ -221,14 +296,19 @@ func cmdMod(args []string) {
 			os.Exit(2)
 		}
 		proj := ProjectSessionID(r.SessionID, r.Cwd)
-		attachOutsideRoot = LoadConfig().AttachOutsideRoot
+		cfg := LoadConfig()
+		attachOutsideRoot = cfg.AttachOutsideRoot
+		fastallow.AddWrappers(cfg.Wrappers...)
+		previous := modLookup(r.SessionID, r.ToolUseID)
+		currentBypassSandbox = previous != nil && previous.BypassSandbox
 		binding, hashes := modCommandSnapshot(r.Command, r.Cwd)
 		entry := modEntry{ID: r.ToolUseID, Command: r.Command, Cwd: r.Cwd,
-			Binding: binding, ApprovalHashes: hashes, Layer: "human", Grant: r.Verdict}
+			Binding: binding, ApprovalHashes: hashes, BypassSandbox: currentBypassSandbox, Layer: "human", Grant: r.Verdict}
 		// A human answer is about the snapshot originally judged. Do not
 		// silently bind it to script edits made while the dialog was open.
-		if previous := modLookup(r.SessionID, r.ToolUseID); previous != nil &&
-			previous.Command == r.Command && previous.Cwd == r.Cwd {
+		snapshotUnchanged := true
+		if previous != nil && previous.Command == r.Command && previous.Cwd == r.Cwd {
+			snapshotUnchanged = previous.Binding != "" && previous.Binding == binding
 			entry.Binding = previous.Binding
 			entry.ApprovalHashes = previous.ApprovalHashes
 		}
@@ -239,6 +319,11 @@ func cmdMod(args []string) {
 			LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "allow", Source: "allow_once", ToolUseID: r.ToolUseID})
 			entry.Decision, entry.Reason = "allow", "allowed once"
 		case "allow-session":
+			if snapshotUnchanged {
+				dropLine(proj, "asked", r.Command)
+				saveApprovedSnapshot(proj, r.Command, entry.ApprovalHashes)
+				LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "allow", Source: "ask_approved", ToolUseID: r.ToolUseID})
+			}
 			entry.Decision, entry.Reason = "allow", "allowed for this session"
 		case "deny":
 			AppendLine(proj, "denied", r.Command)

@@ -50,6 +50,7 @@ func cmdStats(args ...string) {
 	askCount := 0
 	denyCount := 0
 	passthroughCount := 0
+	riskPassthroughCount := 0
 
 	// Counts by layer
 	layerCounts := map[string]int{}
@@ -74,6 +75,8 @@ func cmdStats(args ...string) {
 	// both would double-count).
 	humanApproved := 0
 	humanRejected := 0
+	pausedSkipped := 0
+	unsandboxedCount := 0
 
 	// Asked commands for "top asked" grouping
 	askedCmds := map[string]int{}
@@ -82,6 +85,10 @@ func cmdStats(args ...string) {
 	projectMap := map[string]*projectStats{}
 
 	for _, e := range entries {
+		if e.Layer == "pause" {
+			pausedSkipped++
+			continue
+		}
 		if e.Layer == "human" {
 			switch e.Decision {
 			case "allow":
@@ -91,6 +98,9 @@ func cmdStats(args ...string) {
 			}
 			continue
 		}
+		if e.BypassSandbox {
+			unsandboxedCount++
+		}
 		switch e.Decision {
 		case "allow":
 			allowCount++
@@ -98,8 +108,11 @@ func cmdStats(args ...string) {
 			askCount++
 		case "deny":
 			denyCount++
-		case "passthrough":
+		case "passthrough", "":
 			passthroughCount++
+			if e.OrigDecision != "" {
+				riskPassthroughCount++
+			}
 		}
 
 		layer := e.Layer
@@ -135,7 +148,7 @@ func cmdStats(args ...string) {
 		}
 
 		// Asked commands
-		if e.Decision == "ask" && e.Command != "" {
+		if (e.Decision == "ask" || e.OrigDecision == "ask") && e.Command != "" {
 			key := askShape(e.Command)
 			if key != "" {
 				askedCmds[key]++
@@ -163,9 +176,9 @@ func cmdStats(args ...string) {
 		}
 	}
 
-	// Human entries were skipped by the loop; keep them out of the decision
-	// percentages too.
-	total -= humanApproved + humanRejected
+	// Human and pause entries were skipped by the loop; keep them out of the
+	// decision percentages too.
+	total -= humanApproved + humanRejected + pausedSkipped
 
 	// Print header
 	if filter.empty() {
@@ -174,13 +187,24 @@ func cmdStats(args ...string) {
 		fmt.Printf("yolonot stats (%s; %s)\n\n", dateRange, filter.describe())
 	}
 
+	printImpactSummary(entries, total, allowCount, instantAllows, escRescued, escHardened, denyCount, layerCounts["session_deny"], humanRejected, llmCallCount, llmTotalMs)
+
 	// Decision counts
 	fmt.Printf("  Total decisions:   %d\n", total)
 	fmt.Printf("  Allowed:           %3d (%d%%)\n", allowCount, int(pct(allowCount, total)))
 	fmt.Printf("  Asked:             %3d (%d%%)\n", askCount, int(pct(askCount, total)))
 	fmt.Printf("  Denied:            %3d (%d%%)\n", denyCount, int(pct(denyCount, total)))
 	if passthroughCount > 0 {
-		fmt.Printf("  Passthrough:       %3d (LLM unavailable)\n", passthroughCount)
+		label := "LLM unavailable"
+		if riskPassthroughCount == passthroughCount {
+			label = "risk map"
+		} else if riskPassthroughCount > 0 {
+			label = "risk map / LLM unavailable"
+		}
+		fmt.Printf("  Passthrough:       %3d (%s)\n", passthroughCount, label)
+	}
+	if unsandboxedCount > 0 {
+		fmt.Printf("  Unsandboxed:       %3d\n", unsandboxedCount)
 	}
 	if humanApproved > 0 || humanRejected > 0 {
 		fmt.Printf("\n  Ask resolutions:   %d approved, %d rejected by user\n", humanApproved, humanRejected)
@@ -271,9 +295,17 @@ func cmdStats(args ...string) {
 			}
 			return projects[i].name < projects[j].name
 		})
-		for _, ps := range projects {
+		maxProjects := 10
+		shown := projects
+		if len(shown) > maxProjects {
+			shown = shown[:maxProjects]
+		}
+		for _, ps := range shown {
 			fmt.Printf("    %-18s %3d (allow: %d, ask: %d, deny: %d)\n",
 				ps.name, ps.total, ps.allow, ps.ask, ps.deny)
+		}
+		if len(projects) > maxProjects {
+			fmt.Printf("    … and %d more projects\n", len(projects)-maxProjects)
 		}
 	}
 }
@@ -348,7 +380,7 @@ func joinCounts(m map[string]int) string {
 func printAskDiagnostics(entries []DecisionEntry, filter statsFilter) {
 	mainAsks, agentAsks := 0, 0
 	for _, e := range entries {
-		if e.Decision != "ask" || e.Layer == "human" {
+		if (e.Decision != "ask" && e.OrigDecision != "ask") || e.Layer == "human" {
 			continue
 		}
 		if isAgentEntry(e) {
@@ -431,3 +463,74 @@ func printAskDiagnostics(entries []DecisionEntry, filter statsFilter) {
 		}
 	}
 }
+
+func printImpactSummary(entries []DecisionEntry, total, allowCount, instantAllows, escRescued, escHardened, denyCount, repeatBlocked, humanRejected, llmCallCount int, llmTotalMs int64) {
+	judgeAllows := allowCount - instantAllows
+	if judgeAllows < 0 {
+		judgeAllows = 0
+	}
+	rescuedPart := ""
+	if escRescued > 0 {
+		rescuedPart = fmt.Sprintf(", %d rescued by 2nd model", escRescued)
+	}
+	fmt.Printf("  Impact:\n")
+	fmt.Printf("    Auto-approved:   %d (%d%% — %d instant 0ms, %d AI judge%s)\n",
+		allowCount, int(pct(allowCount, total)), instantAllows, judgeAllows, rescuedPart)
+	if llmCallCount > 0 && instantAllows > 0 {
+		avgMs := llmTotalMs / int64(llmCallCount)
+		savedSec := float64(int64(instantAllows)*avgMs) / 1000.0
+		fmt.Printf("    Speed saved:     %d LLM calls skipped (~%.1fs saved at %dms avg)\n", instantAllows, savedSec, avgMs)
+	} else {
+		fmt.Printf("    Speed saved:     %d LLM calls skipped (instant local allow)\n", instantAllows)
+	}
+
+	autoDenied := denyCount - repeatBlocked
+	if autoDenied < 0 {
+		autoDenied = 0
+	}
+	hardenedAsks := 0
+	for _, e := range entries {
+		if e.Escalated && e.EscalationOutcome == "hardened" && e.Decision == "ask" {
+			hardenedAsks++
+		}
+	}
+	threatsTotal := autoDenied + hardenedAsks + humanRejected
+	if threatsTotal == 0 && repeatBlocked > 0 {
+		threatsTotal = repeatBlocked
+	}
+	var parts []string
+	if autoDenied > 0 {
+		parts = append(parts, fmt.Sprintf("%d auto-denied", autoDenied))
+	}
+	if escHardened > 0 {
+		parts = append(parts, fmt.Sprintf("%d hardened by 2nd model", escHardened))
+	}
+	if humanRejected > 0 {
+		parts = append(parts, fmt.Sprintf("%d rejected by user", humanRejected))
+	}
+	if repeatBlocked > 0 {
+		parts = append(parts, fmt.Sprintf("%d repeat blocked", repeatBlocked))
+	}
+	if len(parts) > 0 {
+		fmt.Printf("    Threats stopped: %d (%s)\n", threatsTotal, strings.Join(parts, ", "))
+	} else {
+		fmt.Printf("    Threats stopped: 0\n")
+	}
+	for _, inc := range collectThreatIncidents(entries) {
+		cmd := strings.ReplaceAll(inc.command, "\n", " ⏎ ")
+		if len(cmd) > 60 {
+			cmd = cmd[:57] + "..."
+		}
+		mult := ""
+		if inc.count > 1 {
+			mult = fmt.Sprintf("%dx ", inc.count)
+		}
+		reason := ""
+		if inc.reason != "" {
+			reason = " " + truncateStr(inc.reason, 70)
+		}
+		fmt.Printf("      ✗ %s%s  [%s]%s\n", mult, cmd, inc.tag, reason)
+	}
+	fmt.Println()
+}
+

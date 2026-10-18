@@ -37,24 +37,19 @@ Each logged decision records which scripts the judge saw (`attached`) and
 which it did not (`withheld`, with the reason), plus the host's `agent_id`,
 `agent_type` and `tool_use_id` when it sends them, so `yolonot stats` can
 attribute asks to subagents and join an ask to the answer that followed it.
-That join is reporting only: precedents still come from explicit human
+That join is reporting only: candidate suggestions still come from explicit human
 answers, never from a time-window match.
 
-Prompt hints and nearby human precedents in the same project also reach the
-configured model judges. Precedents persist across sessions: an ordinary
-approval can influence a future judgment as a hint, without creating a
-permanent allow rule. `Allow once` answers are excluded. Native prompt approvals with no exposed
-persistence choice are conservatively one-time: they do not become yolonot
-session grants or learned precedents. Explicit `yolonot approve` and the
-Claude mod session option provide remembered human grants. When an agent runs
-`yolonot approve`, `deny`, `reset`, `learning`, `pause`, `resume` or
-`uninstall` itself, or changes `profile`, `risk`, `judges`, `models`,
-`escalation` or `quiet`, the hook always asks (deny on hosts without ask),
-whatever the rules or judges say, also through global flags or `sh -c`, so an
-agent cannot grant itself approval. Inspect the stored
-answers with `yolonot log --human`. Disable recording/use with `learning off`;
-configure retention/caps and remove entries with forget/clear/prune. Answers
-recorded while disabled are excluded from later log-based reconstruction.
+Prompt hints in the project and global config reach the configured model judges.
+`Allow once` answers and native prompt approvals with no exposed persistence
+choice are conservatively one-time: they do not become yolonot session grants.
+Explicit `yolonot approve` and the Claude mod session option provide remembered
+human grants. When an agent runs `yolonot approve`, `deny`, `reset`, `pause`,
+`resume` or `uninstall` itself, or changes `profile`, `judges`, `models` or
+`config`, the hook always asks (deny on hosts without ask), whatever the rules
+or judges say, also through global flags or `sh -c`, so an agent cannot grant
+itself approval. Inspect repeated asks and human resolutions with
+`yolonot suggest --list`.
 
 An unanswered ask is not a user rejection. Cancelled or unavailable mod
 dialogs block the current call without creating a human Deny or session deny.
@@ -101,4 +96,4 @@ and Codex requires trusted hooks. See [harness behavior](harnesses.md).
 
 Host capabilities differ. In particular, passthrough can still prompt or
 allow according to the host's policy. Check [harness behavior](harnesses.md)
-and `yolonot risk <harness>` before relying on an unattended workflow.
+and `yolonot profile <harness>` before relying on an unattended workflow.

@@ -6,27 +6,38 @@ checkout's policy before using it. CLI writers report persistence errors;
 settings edits stay drafts until Save.
 
 ```bash
-yolonot config validate                 # validate the active file, no rewrite
-yolonot config validate ./example.json  # validate another file
-yolonot effective --harness opencode --json
-yolonot doctor --harness codex
+yolonot status --all                    # session state + effective policy in one view
+yolonot status --harness opencode --json
+yolonot doctor --harness codex          # health, installation, config & escalation latency
 yolonot doctor --all --json
 yolonot doctor --harness claude --probe-models
+yolonot audit --harness codex           # security, broad rules, policy & host permission audit
+yolonot audit --all --json
 ```
 
-`doctor` checks configuration, registration, local CLI version, required
-key variables and exec paths. `--probe-models` explicitly makes model
-connection requests. Registration checks do not prove that a running host
-loaded or trusted the hooks. See [harness verification](harnesses.md).
+`doctor` checks configuration validity, hook registration, local CLI version,
+required key variables, exec paths, and escalation latency, and prints a 1-line
+summary pointer when security/policy warnings exist. `--probe-models`
+explicitly makes model connection requests. Registration checks do not prove
+that a running host loaded or trusted the hooks. See [harness verification](harnesses.md).
 
-`effective` combines resolved risk tiers, profile, models, protocols, judges,
-rule sources, session/pause state, failure actions, learning and the deadline.
-JSON output exposes key presence and variable names, never key values.
+`audit` checks overly broad rules (`/*` suffix globs and broad `allow-cmd`
+patterns on shell interpreters or mutating multiplex tools like `git *` or
+`bash *`), policy risk settings (`attach_outside_root`, `force_allow` /
+`high=allow` overrides), active paused sessions, and read-only host
+permission/sandbox settings across Claude (`.claude/settings*.json`), Codex
+(`config.toml`), Antigravity (`~/.gemini/config/config.json`) and Cursor
+(`cli-config.json`).
+
+`status --all` (and `status --json`) combines session decisions, resolved risk
+tiers, profile, models, protocols, judges, rule sources, pause state, failure
+actions, the deadline and active audit `Warnings`. JSON output exposes key
+presence and variable names, never key values.
 
 The [JSON schema](config.schema.json) supports editor completion. Runnable
 examples are in [examples/](../examples/): local parser only, local typed
-classification and a strict failure policy. `config validate` additionally
-checks references, profiles, model names and protocols.
+classification and a strict failure policy. `doctor` additionally checks
+references, profiles, model names and protocols.
 
 ## Credentials in desktop hosts
 
@@ -111,42 +122,24 @@ Omission retains legacy URL inference. Set an explicit protocol for custom
 typed endpoints whose path does not identify the API. Model settings expose
 a Protocol chooser; new model additions persist the inferred protocol.
 
-## Learning controls
+## Suggesting rules and hints from human resolutions
 
 ```bash
-yolonot learning status
-yolonot learning list
-yolonot learning off
-yolonot learning on
-yolonot learning retention 30  # days; 0 = unlimited
-yolonot learning limit 1000    # entries; 0 = unlimited
-yolonot learning forget 'exact command'  # this project
-yolonot learning clear --project
-yolonot learning clear --all
-yolonot learning prune
+yolonot suggest               # interactive TUI picker
+yolonot suggest --list        # non-interactive findings + candidate rules/hints
+yolonot suggest --json        # structured JSON for tooling/skills
 ```
 
-Equivalent file settings:
-
-```json
-"learning": {"enabled": false, "retention_days": 30, "max_entries": 1000}
-```
-
-Learning remains enabled when `enabled` is omitted, preserving existing
-installations. Turning it off stops recording and supplying model hints;
-existing history remains available for deletion. Answers recorded while
-disabled are excluded from later log-based reconstruction. Forget/clear
-write the remaining store, including an empty file, so normal loading does
-not reconstruct deleted entries. Decision logs are retained separately.
-
-Expiry/caps apply when loading hints and recording answers; `prune` removes
-expired/excess stored entries. Quoted historical commands are explicitly
-data, not instructions or current authorization. Changed targets and script
-contents must still be evaluated. Allow-once answers never become precedents.
-Native PostToolUse does not identify the host's approval choice, so a successful
-pending native ask is treated as one-time and does not create a session grant
-or learned precedent. Use `yolonot approve` or the Claude mod's explicit
-session choice for a remembered human approval.
+Human ask resolutions (`ask_approved`, `allow_once`, `ask_rejected`) are
+recorded in `~/.yolonot/decisions.jsonl`. Rather than silently injecting raw
+past commands into live judge prompts, `yolonot suggest` aggregates your human
+resolutions alongside repeated asks, unseen scripts and escalation timeouts so
+you (or your agent's `/yolonot` skill) can promote vetted `.yolonot` rules or
+`allow-hint` / `ask-hint` directives. Native `PostToolUse` does not identify
+the host's approval choice, so a completed pending native ask is recorded as
+`allow_once` and surfaced as a repeated-ask candidate after 2+ occurrences
+without creating an automatic session grant. Use `yolonot approve` or the
+Claude mod's explicit session choice for a remembered session approval.
 
 ## Manual session decisions
 

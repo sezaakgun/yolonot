@@ -1,95 +1,72 @@
 package yolonot
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestRecordPrecedentKeepsOnlyRememberedHumanAnswers(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	cwd := t.TempDir()
-	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_approved", Decision: "allow", Cwd: cwd, Command: "wget a"})
-	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_rejected", Decision: "deny", Cwd: cwd, Command: "wget b"})
-	recordPrecedent(DecisionEntry{Layer: "human", Source: "allow_once", Decision: "allow", Cwd: cwd, Command: "wget once"})
-	recordPrecedent(DecisionEntry{Layer: "rule", Decision: "allow", Cwd: cwd, Command: "ls"})
-	ps := loadPrecedents()
-	if len(ps) != 2 || ps[0].Command != "wget a" || ps[1].Decision != "deny" {
-		t.Fatalf("got %+v", ps)
-	}
-}
-
-func TestProjectPrecedentsScopeAndLatestWins(t *testing.T) {
+func TestProjectRootScoping(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".git"), 0755)
 	sub := filepath.Join(root, "pkg")
 	os.MkdirAll(sub, 0755)
 	other := t.TempDir()
-	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_rejected", Decision: "deny", Cwd: root, Command: "wget a"})
-	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_approved", Decision: "allow", Cwd: sub, Command: "wget a"})
-	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_approved", Decision: "allow", Cwd: other, Command: "wget elsewhere"})
-	ps := projectPrecedents(root)
-	if len(ps) != 1 || ps[0].Decision != "allow" {
-		t.Fatalf("want the latest verdict for wget a only, got %+v", ps)
+
+	if projectRoot(sub) != projectRoot(root) || projectRoot(other) == projectRoot(root) {
+		t.Fatal("projectRoot must group subdirectories under the same git root and separate other dirs")
 	}
 }
 
-func TestPrecedentsRankBySimilarity(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	cwd := t.TempDir()
-	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_approved", Decision: "allow", Cwd: cwd, Command: "wget -q https://example.com -O /tmp/a.html"})
-	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_rejected", Decision: "deny", Cwd: cwd, Command: "wget -q https://evil.example -O /tmp/b.html"})
-	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_approved", Decision: "allow", Cwd: cwd, Command: "ls -la"})
-	allowed, rejected := Precedents("wget -q https://example.com -O /tmp/c.html", cwd)
-	if len(allowed) != 1 || len(rejected) != 1 || strings.Contains(allowed[0], "ls") {
-		t.Fatalf("allowed=%v rejected=%v", allowed, rejected)
-	}
-	var h WalkupHints
-	addPrecedentHints(&h, "wget -q https://example.com -O /tmp/c.html", cwd)
-	if len(h.AllowHints) != 1 || len(h.AskHints) != 1 || !strings.Contains(h.AskHints[0], "rejected") {
-		t.Fatalf("hints %+v", h)
-	}
-	if cmdSimilarity("ls -la", "wget x") >= precedentMinScore {
-		t.Fatal("unrelated commands must not score")
-	}
-}
-
-func TestCmdLogHumanListsProjectAnswers(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Chdir(t.TempDir())
+func TestSuggestEnrichesFindingsWithHumanResolutionsAndCandidates(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	proj := t.TempDir()
+	os.MkdirAll(filepath.Join(proj, ".git"), 0755)
+	t.Chdir(proj)
 	cwd, _ := os.Getwd()
-	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_approved", Decision: "allow", Cwd: cwd, Command: "wget -q https://example.com -O /tmp/a.html", Timestamp: "2026-10-13T10:00:00Z"})
-	recordPrecedent(DecisionEntry{Layer: "human", Source: "ask_rejected", Decision: "deny", Cwd: t.TempDir(), Command: "wget elsewhere", Timestamp: "2026-10-13T10:00:00Z"})
 
-	r, w, _ := os.Pipe()
-	stdout := os.Stdout
-	os.Stdout = w
-	cmdLogHuman()
-	w.Close()
-	os.Stdout = stdout
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	out := string(buf[:n])
-	if !strings.Contains(out, "2026-10-13  allow wget -q https://example.com -O /tmp/a.html") || strings.Contains(out, "elsewhere") {
-		t.Fatalf("output:\n%s", out)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	entries := []DecisionEntry{
+		{Timestamp: now, SessionID: "s1", Command: "kubectl get pods -n staging", Cwd: cwd, Layer: "gemini", Decision: "ask"},
+		{Timestamp: now, SessionID: "s1", Command: "kubectl get pods -n staging", Cwd: cwd, Layer: "human", Decision: "allow", Source: "allow_once"},
+		{Timestamp: now, SessionID: "s1", Command: "kubectl get pods -n prod", Cwd: cwd, Layer: "gemini", Decision: "ask"},
+		{Timestamp: now, SessionID: "s1", Command: "kubectl get pods -n prod", Cwd: cwd, Layer: "human", Decision: "allow", Source: "ask_approved"},
+		{Timestamp: now, SessionID: "s1", Command: "kubectl get pods -n staging", Cwd: cwd, Layer: "gemini", Decision: "ask"},
+		{Timestamp: now, SessionID: "s1", Command: "kubectl get pods -n staging", Cwd: cwd, Layer: "human", Decision: "allow", Source: "allow_once"},
 	}
-}
+	writeTestDecisions(t, entries)
 
-func TestRebuildSkipsLegacyInferredHumanLabels(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	cwd := t.TempDir()
-	os.MkdirAll(YolonotDir(), 0700)
-	legacy := `{"layer":"human","source":"ask_approved","decision":"allow","cwd":"` + cwd + `","command":"inferred-by-old-build"}` + "\n"
-	if err := os.WriteFile(decisionsPath(), []byte(legacy), 0600); err != nil {
-		t.Fatal(err)
+	listOut := captureStdout(func() { cmdEvolve([]string{"--list", "--basic"}) })
+	for _, want := range []string{
+		"REPEATED ASK",
+		"kubectl get",
+		"human: 1 approved, 2 once",
+		"Asked at least twice and allowed each time:",
+		`yolonot approve "kubectl get pods -n staging"`,
+	} {
+		if !strings.Contains(listOut, want) {
+			t.Errorf("suggest --list missing %q:\n%s", want, listOut)
+		}
 	}
-	LogDecision(DecisionEntry{Layer: "human", Source: "ask_approved", Decision: "allow", Cwd: cwd, Command: "answered-now"})
-	if err := os.Remove(precedentsPath()); err != nil {
-		t.Fatal(err)
+
+	jsonOut := captureStdout(func() { cmdEvolve([]string{"--json", "--basic"}) })
+	var parsed struct {
+		Analyzed   int                 `json:"analyzed"`
+		Findings   []evolveFinding     `json:"findings"`
+		Candidates []learningCandidate `json:"candidates"`
 	}
-	ps := loadPrecedents()
-	if len(ps) != 1 || ps[0].Command != "answered-now" {
-		t.Fatalf("rebuild trusted an unmarked legacy label: %+v", ps)
+	if err := json.Unmarshal([]byte(jsonOut), &parsed); err != nil {
+		t.Fatalf("invalid suggest --json output: %v\n%s", err, jsonOut)
+	}
+	if len(parsed.Findings) != 1 || parsed.Findings[0].Approved != 1 || parsed.Findings[0].Once != 2 {
+		t.Fatalf("unexpected findings in JSON: %+v", parsed.Findings)
+	}
+	if len(parsed.Candidates) != 1 || parsed.Candidates[0].Command != "kubectl get pods -n staging" {
+		t.Fatalf("unexpected candidates in JSON: %+v", parsed.Candidates)
 	}
 }

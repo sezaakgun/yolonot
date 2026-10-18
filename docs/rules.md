@@ -2,9 +2,12 @@
 
 Rules live in `.yolonot` files. Hooks discover them from the command payload's
 working directory; CLI inspectors use their current directory. Discovery
-walks up to the git repository root or `$HOME`, whichever comes first; outside
-a repository only the cwd file is read. Project files load closest-first,
-followed by `~/.yolonot/rules` and the legacy `~/.yolonot` file if present.
+walks up through the git repository root (including linked git worktrees, where
+ the main repository root's `.yolonot` is also loaded) and continues through
+trusted parent directories under `$HOME` (stopping before `$HOME` itself and
+excluding untrusted directories such as `~/Downloads` or `~/tmp`). Project
+files load closest-first, followed by `~/.yolonot/rules` and the legacy
+`~/.yolonot` file if present.
 Across all loaded files, action priority is **deny > ask > allow**. File order
 selects the first matching rule within the winning action, not permission to
 override a deny. `yolonot rules --trace` shows sources. The settings editor
@@ -37,16 +40,18 @@ Rules are checked before the judges, so they are instant and free. Glob matching
 Drop `.yolonot` anywhere up the tree from where the host CLI runs:
 
 ```
-/Users/you/work/.yolonot              # team-wide rules
+/Users/you/work/.yolonot              # team-wide / workspace rules (under $HOME)
 /Users/you/work/project/.yolonot      # project-specific overrides
 /Users/you/work/project/sub/.yolonot  # per-subdir rules
 ```
 
-Running from `project/sub/` loads all three in closest-first order when `work/`
-is the repository root. A `.yolonot` above that root is not read. Within the
-same action, the closer matching rule supplies the message; an allow in a
-subdirectory cannot override a project or global deny. Discovery also stops
-at `$HOME`, so the legacy home rule file is not loaded twice.
+Running from `project/sub/` (or from a linked `git worktree` of `project/`)
+loads all three in closest-first order. Ancestor directories above a repository
+root are read when they sit inside a trusted `$HOME` subtree (never `$HOME`
+itself, `~/Downloads`, or `~/tmp`). Within the same action, the closer matching
+rule supplies the message; an allow in a subdirectory cannot override a project
+or global deny. Discovery stops before `$HOME`, so the legacy home rule file is
+not loaded twice.
 
 ## Per-rule messages
 
@@ -79,7 +84,7 @@ Hints stack across the walk-up chain (no first-match) and merge with the
 personal global config in `~/.yolonot/config.json`. See
 [docs/prompt.md](prompt.md) for the full schema,
 the `$defaults` sentinel, and the inspection commands
-(`yolonot prompt defaults | config | review`).
+(`yolonot rules defaults | config | review`).
 
 ## `allow-redirect` — pre-approved write targets
 

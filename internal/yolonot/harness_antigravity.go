@@ -41,6 +41,7 @@ type antigravityPayload struct {
 	ConversationID string   `json:"conversationId"`
 	WorkspacePaths []string `json:"workspacePaths"`
 	HookEventName  string   `json:"hookEventName"`
+	StepIdx        int      `json:"stepIdx,omitempty"`
 	ToolCall       struct {
 		Name string                 `json:"name"`
 		Args map[string]interface{} `json:"args"`
@@ -65,6 +66,8 @@ func (a *AntigravityHarness) ParseHookInput(input []byte) (HookPayload, error) {
 	cwd, _ := raw.ToolCall.Args["Cwd"].(string)
 	if cwd == "" && len(raw.WorkspacePaths) == 1 {
 		cwd = raw.WorkspacePaths[0]
+	} else if cwd != "" && !filepath.IsAbs(cwd) && len(raw.WorkspacePaths) == 1 {
+		cwd = filepath.Join(raw.WorkspacePaths[0], cwd)
 	}
 	if cwd == "" {
 		return HookPayload{}, fmt.Errorf("Antigravity run_command requires an unambiguous working directory")
@@ -73,8 +76,17 @@ func (a *AntigravityHarness) ParseHookInput(input []byte) (HookPayload, error) {
 	if event != "PreToolUse" && event != "PostToolUse" {
 		return HookPayload{}, fmt.Errorf("unsupported Antigravity hook event %q", event)
 	}
+	bypass, _ := raw.ToolCall.Args["BypassSandbox"].(bool)
+	toolInput := map[string]interface{}{"command": command}
+	if bypass {
+		toolInput["BypassSandbox"] = true
+	}
+	toolUseID := ""
+	if raw.StepIdx > 0 {
+		toolUseID = fmt.Sprintf("step_%d", raw.StepIdx)
+	}
 	return HookPayload{HookEventName: event, ToolName: "Bash", SessionID: raw.ConversationID,
-		Cwd: cwd, ToolInput: map[string]interface{}{"command": command}}, nil
+		ToolUseID: toolUseID, Cwd: cwd, ToolInput: toolInput, BypassSandbox: bypass}, nil
 }
 
 // Antigravity's common stdin fields do not include the event name.
@@ -120,6 +132,7 @@ func (a *AntigravityHarness) FormatHookResponse(r HookResponse) string {
 		decision = "auto_approve"
 	case ActionAsk:
 		// Cached/Always Allow grants must not suppress a fresh policy ask.
+		// shortcut: force_ask narrows the prompt to one-time Allow/Deny and PostToolUse omits grant scope, switch to scope-aware ask when agy hooks expose the user's permission selection
 		decision = "force_ask"
 	case ActionDeny:
 	default:

@@ -123,7 +123,7 @@ prompt doesn't already cover. They are deliberately org-agnostic: no
 domains, repo orgs, or path prefixes. Print them with:
 
 ```bash
-yolonot prompt defaults
+yolonot rules defaults
 ```
 
 > **Footgun:** omitting `"$defaults"` from a list takes full ownership
@@ -173,7 +173,7 @@ system-prompt "Sandbox classifier. Output ONLY JSON: {\"decision\":\"allow|ask\"
 > instruction, replies may become unparseable. The next judge can run; if no
 > judge decides, the configured `failure.parse` action applies. Its default
 > defers to the host, which may prompt or auto-allow according to its mode.
-> Keep the JSON-output line and **run `yolonot prompt verify` after editing**.
+> Keep the JSON-output line and **run `yolonot rules verify` after editing**.
 > It checks the contract and a small set of live parse probes, not general
 > classification safety. A failed probe does not automatically roll back an
 > installed override. See [failure policy](configuration.md#failure-policy).
@@ -181,7 +181,7 @@ system-prompt "Sandbox classifier. Output ONLY JSON: {\"decision\":\"allow|ask\"
 Verify what will actually be sent:
 
 ```bash
-yolonot prompt config | jq -r .system_prompt
+yolonot rules config | jq -r .system_prompt
 ```
 
 ## Inspecting your configuration
@@ -189,14 +189,14 @@ yolonot prompt config | jq -r .system_prompt
 Four subcommands, all read-only:
 
 ```bash
-yolonot prompt defaults    # Built-in system prompt + the built-in hint lists behind $defaults, as JSON
-yolonot prompt config      # Effective merged config — config + walk-up, $defaults expanded
-yolonot prompt review      # Ask the active LLM provider to flag ambiguous or redundant hints
-yolonot prompt verify      # Prove a custom system_prompt still yields parseable verdicts
-yolonot prompt             # Shorthand for `config`
+yolonot rules defaults    # Built-in system prompt + the built-in hint lists behind $defaults, as JSON
+yolonot rules config      # Effective merged config — config + walk-up, $defaults expanded
+yolonot rules review      # Ask the active LLM provider to flag ambiguous or redundant hints
+yolonot rules verify      # Prove a custom system_prompt still yields parseable verdicts
+yolonot rules             # Shorthand for `config`
 ```
 
-`yolonot prompt verify` is the command to run after writing a
+`yolonot rules verify` is the command to run after writing a
 `system_prompt` override. Two gates:
 
 1. **Static** — the override must still carry the JSON verdict contract
@@ -214,17 +214,17 @@ It exits non-zero when the override wouldn't function, so you can gate on it
 in CI or a pre-commit hook. `verify` answers "will this work"; `config`
 shows "what will be sent"; `review` audits your hint *prose*.
 
-`yolonot prompt config` prints the actual `system_prompt` that will
+`yolonot rules config` prints the actual `system_prompt` that will
 be sent on the next LLM call — the most useful single field for debugging
 why a command got an unexpected decision. Pipe through `jq` to extract
 just one part:
 
 ```bash
-yolonot prompt config | jq -r .system_prompt
-yolonot prompt config | jq .context
+yolonot rules config | jq -r .system_prompt
+yolonot rules config | jq .context
 ```
 
-`yolonot prompt review` calls your configured LLM provider with a
+`yolonot rules review` calls your configured LLM provider with a
 meta-prompt that audits each hint for ambiguity, redundancy, over-broad
 matching, and over-permissive language. Run it after editing your
 hints — a 30-second sanity check before the new entries start steering
@@ -305,7 +305,7 @@ built-in `SystemPrompt` const.
   settings, so you can't distribute a hint set across an org from a
   central file. Workaround: ship a per-repo `.yolonot` in your
   scaffolding.
-- No `prompt` mutator subcommands — `yolonot prompt defaults | config |
+- No `prompt` mutator subcommands — `yolonot rules defaults | config |
   review | verify` are read-only. Author hints in the PROMPT section of
   `yolonot config` (each list opens in `$EDITOR`, one entry per line,
   `$defaults` kept; the system prompt override has edit / reset-to-built-in),

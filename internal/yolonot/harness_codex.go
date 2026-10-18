@@ -79,6 +79,16 @@ func (c *CodexHarness) ParseHookInput(input []byte) (HookPayload, error) {
 	if err := json.Unmarshal(input, &p); err != nil {
 		return HookPayload{}, err
 	}
+	if wd, ok := p.ToolInput["workdir"].(string); ok && wd != "" {
+		if !filepath.IsAbs(wd) && p.Cwd != "" {
+			p.Cwd = filepath.Join(p.Cwd, wd)
+		} else {
+			p.Cwd = wd
+		}
+	}
+	if !p.BypassSandbox {
+		p.BypassSandbox = extractToolInputBypassSandbox(p.ToolInput)
+	}
 	return p, nil
 }
 

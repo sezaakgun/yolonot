@@ -24,8 +24,42 @@ type HookPayload struct {
 	ToolInput      map[string]interface{} `json:"tool_input"`
 	ToolUseID      string                 `json:"tool_use_id,omitempty"`
 	PermissionMode string                 `json:"permission_mode,omitempty"` // Claude Code only
-	AgentID        string                 `json:"agent_id,omitempty"`        // Claude Code, subagent and teammate calls
+	BypassSandbox  bool                   `json:"bypass_sandbox,omitempty"`
+	AgentID        string                 `json:"agent_id,omitempty"` // Claude Code, subagent and teammate calls
 	AgentType      string                 `json:"agent_type,omitempty"`
+}
+
+func extractToolInputBypassSandbox(toolInput map[string]interface{}) bool {
+	if len(toolInput) == 0 {
+		return false
+	}
+	if b, ok := toolInput["dangerouslyDisableSandbox"].(bool); ok && b {
+		return true
+	}
+	if b, ok := toolInput["BypassSandbox"].(bool); ok && b {
+		return true
+	}
+	if sp, ok := toolInput["sandbox_permissions"].(string); ok && sp == "require_escalated" {
+		return true
+	}
+	if b, ok := toolInput["with_escalated_permissions"].(bool); ok && b {
+		return true
+	}
+	return false
+}
+
+func approvedSuffix() string {
+	if currentBypassSandbox {
+		return "approved_unsandboxed"
+	}
+	return "approved"
+}
+
+func approvedHashSuffix() string {
+	if currentBypassSandbox {
+		return "approved_unsandboxedhash"
+	}
+	return "approvedhash"
 }
 
 // HookResponse is the JSON returned to Claude Code.
@@ -51,6 +85,9 @@ var quietOnAllow bool
 // currentPermissionMode mirrors HookPayload.PermissionMode for the active
 // hook invocation. Claude Code only — empty on other harnesses.
 var currentPermissionMode string
+
+// currentBypassSandbox mirrors HookPayload.BypassSandbox for the active hook invocation.
+var currentBypassSandbox bool
 
 // currentAgentID, currentAgentType and currentToolUseID mirror the same
 // payload fields into every decision logged by this invocation.
@@ -231,6 +268,7 @@ func hookResponse(decision, layer, reason, command string) string {
 		r.HookSpecificOutput.HookEventName = "PermissionRequest"
 	}
 	modRecord(decision, layer, reason)
+	codexRecordPre(modSessionID, modCommand, modCwd, modRuleAction, decision, layer, reason, false)
 	return activeHarnessFormat(r)
 }
 
@@ -307,7 +345,11 @@ func cmdHook() {
 	if payload.HookEventName == "" {
 		return
 	}
+	if !payload.BypassSandbox {
+		payload.BypassSandbox = extractToolInputBypassSandbox(payload.ToolInput)
+	}
 	currentPermissionMode = payload.PermissionMode
+	currentBypassSandbox = payload.BypassSandbox
 	currentAgentID, currentAgentType, currentToolUseID = payload.AgentID, payload.AgentType, payload.ToolUseID
 	currentHookEventName = payload.HookEventName
 	modRun = os.Getenv("YOLONOT_MOD") == "1"
@@ -386,7 +428,7 @@ func cmdHook() {
 				return
 			}
 			pendingAsk := MatchesLineOrWrappedVariant(projSessionID, "asked", command)
-			if MatchesLineOrWrappedVariant(projSessionID, "approved", command) && !pendingAsk {
+			if MatchesLineOrWrappedVariant(projSessionID, approvedSuffix(), command) && !pendingAsk {
 				// PreToolUse already saved the judged snapshot. Running a
 				// script must not grant approval to edits made while it ran.
 				return
@@ -409,14 +451,14 @@ func cmdHook() {
 			if modAnswer == nil {
 				if pendingAsk {
 					dropLineOrVariant(projSessionID, "asked", command)
-					dropLineOrVariant(projSessionID, "approved", command)
+					dropLineOrVariant(projSessionID, approvedSuffix(), command)
 					// Cursor CLI also emits afterShellExecution after Skip,
 					// indistinguishable from an empty-output successful call.
 					// Codex defers asks to its own approval policy, which may run
 					// the command with no human involved.
 					// Clear the pending ask so a later call can ask again,
 					// but never fabricate a human approval from this event.
-					if harness.Name() != "cursor" && harness.Name() != "codex" {
+					if harnessSupportsAsk(harness) && harness.Name() != "cursor" && harness.Name() != "codex" {
 						LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "human", Decision: "allow", Source: "allow_once"})
 					}
 				}
@@ -425,6 +467,7 @@ func cmdHook() {
 				return
 			}
 			if pendingAsk {
+				dropLineOrVariant(projSessionID, "asked", command)
 				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "human", Decision: "allow", Source: "ask_approved"})
 			}
 			saveApprovedSnapshot(projSessionID, command, modAnswer.ApprovalHashes)
@@ -438,6 +481,7 @@ func cmdHook() {
 		return
 	}
 	modCommand, modCwd = command, cwd
+	modRuleAction = ""
 	modBinding = ""
 	modApprovalHashes = nil
 	if modRun && payload.ToolUseID != "" {
@@ -461,6 +505,9 @@ func cmdHook() {
 	rules := LoadRules(cwd)
 	sensitive := LoadSensitivePatterns(cwd)
 	ruleMatch := MatchRuleByPriority(command, rules, sensitive)
+	if ruleMatch != nil {
+		modRuleAction = ruleMatch.Action
+	}
 	if ruleMatch != nil && ruleMatch.Action == "deny" {
 		userReason := fmt.Sprintf("rule %s", ruleMatch.Pattern)
 		if ruleMatch.Message != "" {
@@ -487,6 +534,21 @@ func cmdHook() {
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "self", Decision: action, Reasoning: reason})
 		emitHook(hookResponse(action, "self", reason, command))
 		return
+	}
+
+	// Codex fires PreToolUse followed immediately by PermissionRequest for
+	// the same command when host approval is requested. If no new deny rule
+	// intervened above, reuse the paired PreToolUse verdict without logging
+	// or calling remote judges a second time.
+	if harness.Name() == "codex" && payload.HookEventName == "PermissionRequest" && sessionID != "" {
+		if pre := codexConsumePre(sessionID, command, cwd, modRuleAction); pre != nil {
+			if pre.Passthrough {
+				emitHook("")
+				return
+			}
+			emitHook(hookResponse(pre.Decision, pre.Layer, pre.Reason, command))
+			return
+		}
 	}
 
 	// Step 0.4: Rule allow. Placed above session_deny so an explicitly added
@@ -534,7 +596,7 @@ func cmdHook() {
 	// string in the approved list and re-allow) — the content-keyed
 	// cache/LLM layers judge the new contents instead.
 	contentStale := false
-	if sessionID != "" && MatchesLineOrWrappedVariant(projSessionID, "approved", command) {
+	if sessionID != "" && MatchesLineOrWrappedVariant(projSessionID, approvedSuffix(), command) {
 		// Content gate: a string match is not enough when the command
 		// attaches script contents — the approval was granted for the
 		// contents that existed then. If the script has been edited since,
@@ -545,7 +607,7 @@ func cmdHook() {
 			Verbosef("session: approved command %q has changed script contents; re-judging", command)
 		} else {
 			source := "exact_match"
-			if !ContainsLine(projSessionID, "approved", command) {
+			if !ContainsLine(projSessionID, approvedSuffix(), command) {
 				saveApproved(projSessionID, command, cwd)
 				source = "wrapped_variant"
 			}
@@ -618,8 +680,13 @@ func cmdHook() {
 	// Non-classifier verdict (fast_allow / exec hook): allow-only today.
 	if v.Dec == nil {
 		finalDecision, passthrough := applyRiskMap(ActiveHarness(), v.Decision, v.Risk)
-		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: v.Layer, Decision: finalDecision, Risk: v.Risk, Reasoning: v.Reason})
+		loggedDecision := finalDecision
 		if passthrough {
+			loggedDecision = ActionPassthrough
+		}
+		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: v.Layer, Decision: loggedDecision, OrigDecision: v.Decision, Risk: v.Risk, Reasoning: v.Reason})
+		if passthrough {
+			codexRecordPre(modSessionID, modCommand, modCwd, modRuleAction, "", v.Layer, "", true)
 			emitHook("")
 			return
 		}
@@ -671,10 +738,14 @@ func cmdHook() {
 		saveCacheHash(v.CacheKey, d, v.CacheContext)
 	}
 
+	loggedDecision := finalDecision
+	if passthrough {
+		loggedDecision = ActionPassthrough
+	}
 	entry := DecisionEntry{
 		SessionID: sessionID, Command: command, Cwd: cwd, Layer: strings.TrimSuffix(v.Layer, "+esc"),
-		Decision: finalDecision, Risk: d.Risk, Confidence: d.Confidence, Short: d.Short,
-		Reasoning:  fmt.Sprintf("orig=%s → %s %s", d.Decision, finalDecision, d.Reasoning),
+		Decision: loggedDecision, OrigDecision: d.Decision, Risk: d.Risk, Confidence: d.Confidence, Short: d.Short,
+		Reasoning:  fmt.Sprintf("orig=%s → %s %s", d.Decision, loggedDecision, d.Reasoning),
 		DurationMs: ms, Attached: v.Attached, Withheld: v.Withheld,
 	}
 	escalationLogFields(&entry, escOut)
@@ -684,6 +755,7 @@ func cmdHook() {
 	LogDecision(entry)
 
 	if passthrough {
+		codexRecordPre(modSessionID, modCommand, modCwd, modRuleAction, "", v.Layer, "", true)
 		emitHook("")
 		return
 	}
@@ -721,7 +793,7 @@ func hookMemoryLookup(ctx context.Context, command, cwd, sessionID, projSessionI
 	// so the compare would trivially answer "same command, allow" and
 	// launder the stale approval right back in.
 	if sessionID != "" && !contentStale {
-		approved := ReadLines(projSessionID, "approved")
+		approved := ReadLines(projSessionID, approvedSuffix())
 		candidates := filterByPrefix(command, approved)
 		cfg := GetLLMConfig()
 		cfg.Context = ctx
@@ -756,16 +828,21 @@ func hookMemoryLookup(ctx context.Context, command, cwd, sessionID, projSessionI
 	// paths apply the same policy. Older cache entries without a Risk
 	// tier fall through with their original decision (no map applied).
 	finalDecision, passthrough := applyRiskMap(ActiveHarness(), cached.Decision, cached.Risk)
+	loggedDecision := finalDecision
+	if passthrough {
+		loggedDecision = ActionPassthrough
+	}
 	LogDecision(DecisionEntry{
 		SessionID: sessionID, Command: command, Cwd: cwd, Layer: "cache",
-		Decision: finalDecision, Risk: cached.Risk, Confidence: cached.Confidence, Short: cached.Short,
-		Reasoning: fmt.Sprintf("orig=%s → %s (cached) %s", cached.Decision, finalDecision, cached.Reasoning),
+		Decision: loggedDecision, OrigDecision: cached.Decision, Risk: cached.Risk, Confidence: cached.Confidence, Short: cached.Short,
+		Reasoning: fmt.Sprintf("orig=%s → %s (cached) %s", cached.Decision, loggedDecision, cached.Reasoning),
 		// A cache hit on a big-model-earned verdict must keep its
 		// provenance — otherwise every replay looks like a plain
 		// primary decision in the audit trail.
 		Escalated: cached.Escalated, Attached: seen, Withheld: notSeen,
 	})
 	if passthrough {
+		codexRecordPre(modSessionID, modCommand, modCwd, modRuleAction, "", "cache", "", true)
 		emitHook("")
 		return true
 	}
@@ -909,6 +986,9 @@ func hashCollected(command string, attached []attachedScript, withheld []withhel
 		fmt.Fprintf(h, "%s\x00", n)
 	}
 	h.Write([]byte(command))
+	if currentBypassSandbox {
+		h.Write([]byte("\x00unsandboxed"))
+	}
 	sum := h.Sum(nil)
 	return fmt.Sprintf("%x", sum[:8])
 }
@@ -947,9 +1027,9 @@ func approvalHashesFromCollected(command string, attached []attachedScript, with
 }
 
 func saveApprovedSnapshot(projSessionID, command string, hashes []string) {
-	AppendLine(projSessionID, "approved", command)
+	AppendLine(projSessionID, approvedSuffix(), command)
 	for _, hash := range hashes {
-		AppendLine(projSessionID, "approvedhash", hash)
+		AppendLine(projSessionID, approvedHashSuffix(), hash)
 	}
 	dropLineOrVariant(projSessionID, "asked", command)
 }
@@ -975,14 +1055,14 @@ func sessionContentOK(projSessionID, command, cwd string) bool {
 	if h == "" {
 		return true
 	}
-	return ContainsLine(projSessionID, "approvedhash", h)
+	return ContainsLine(projSessionID, approvedHashSuffix(), h)
 }
 
 func nativeSnapshotOK(projSessionID, command, cwd string) bool {
 	identity, _ := nativeExecutableIdentity(command, cwd)
 	prefix := executableApprovalPrefix(command)
 	hadNativeSnapshot := false
-	for _, hash := range ReadLines(projSessionID, "approvedhash") {
+	for _, hash := range ReadLines(projSessionID, approvedHashSuffix()) {
 		if strings.HasPrefix(hash, prefix) {
 			hadNativeSnapshot = true
 			break
@@ -991,7 +1071,7 @@ func nativeSnapshotOK(projSessionID, command, cwd string) bool {
 	if identity == "" && !hadNativeSnapshot {
 		return true
 	}
-	return identity != "" && ContainsLine(projSessionID, "approvedhash", prefix+identity)
+	return identity != "" && ContainsLine(projSessionID, approvedHashSuffix(), prefix+identity)
 }
 
 func checkCache(command, cwd string) *Decision {

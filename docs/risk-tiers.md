@@ -29,16 +29,17 @@ yolonot profile use paranoid    # ask on safe; deny moderate+
 ```
 
 Profiles set the baseline; per-cell overrides below still win.
-An allow cell preserves a model's ask; it does not automatically approve it.
+An `allow` cell is escalate-only: it preserves a model's `ask` rather than automatically approving it. To override a model's `ask` into `allow` on a non-critical tier (`safe`, `low`, `moderate`, `high`), set the cell to `force_allow` (`override_allow` is accepted as an alias). `critical` never accepts `allow` or `force_allow`.
 
 ## Overrides
 
 ```bash
-yolonot risk                         # show merged map for active harness
-yolonot risk claude                  # show for a specific harness
-yolonot risk codex moderate deny     # override one cell
-yolonot risk codex reset             # drop all user overrides for a harness
-yolonot risk codex reset moderate    # drop one override
+yolonot profile                           # show active profile + merged map for active harness
+yolonot profile claude                    # show for a specific harness
+yolonot profile codex moderate deny       # override one cell
+yolonot profile claude moderate force_allow # override classifier ask → allow on moderate
+yolonot profile codex reset               # drop all user overrides for a harness
+yolonot profile codex reset moderate      # drop one override (or: codex moderate reset)
 ```
 
 ## Env var overrides
@@ -47,7 +48,7 @@ Env vars override config at runtime:
 
 ```bash
 YOLONOT_CODEX_RISK_MODERATE=deny
-YOLONOT_CLAUDE_RISK_HIGH=allow
+YOLONOT_CLAUDE_RISK_MODERATE=force_allow
 ```
 
 Format: `YOLONOT_<HARNESS>_RISK_<TIER>=<action>`. Env vars beat config on every hook invocation, so they are useful for one-off sessions or CI tweaks.

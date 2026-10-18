@@ -22,10 +22,5 @@
     "invalid_config": "deny",
     "oversize": "deny",
     "timeout": "deny"
-  },
-  "learning": {
-    "enabled": false,
-    "retention_days": 30,
-    "max_entries": 1000
   }
 }

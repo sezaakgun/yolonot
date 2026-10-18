@@ -6,12 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sezaakgun/yolonot/internal/fastallow"
 )
 
 // New multiline commands occupy one physical record. Existing single-line
 // session files remain readable; a command can never become several approvals.
 func encodeSessionLine(suffix, line string) string {
-	if suffix != "approved" && suffix != "asked" && suffix != "denied" && suffix != "once" {
+	if suffix != "approved" && suffix != "approved_unsandboxed" && suffix != "asked" && suffix != "denied" && suffix != "once" {
 		return line
 	}
 	if strings.ContainsAny(line, "\r\n") || strings.HasPrefix(line, "@json:") {
@@ -21,7 +23,7 @@ func encodeSessionLine(suffix, line string) string {
 	return line
 }
 func decodeSessionLine(suffix, line string) string {
-	if suffix != "approved" && suffix != "asked" && suffix != "denied" && suffix != "once" {
+	if suffix != "approved" && suffix != "approved_unsandboxed" && suffix != "asked" && suffix != "denied" && suffix != "once" {
 		return line
 	}
 	if strings.HasPrefix(line, "@json:") {
@@ -115,12 +117,16 @@ func sessionDecision(verb, command, sid, cwd string) error {
 	}
 	project := ProjectSessionID(sid, cwd)
 	if verb == "reset" {
-		for _, suffix := range []string{"approved", "approvedhash", "asked", "denied", "once"} {
+		for _, suffix := range []string{"approved", "approvedhash", "approved_unsandboxed", "approved_unsandboxedhash", "asked", "denied", "once"} {
 			path := sessionPath(project, suffix)
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 		}
+		_ = rewriteSessionLines(sid, "codexpre", func(line string) bool {
+			var e codexPreEntry
+			return json.Unmarshal([]byte(line), &e) != nil || ProjectSessionID(sid, e.Cwd) != project
+		})
 		// Replay belongs to the base session; remove this project's records only.
 		return rewriteSessionLines(sid, "mod", func(line string) bool {
 			var e modEntry
@@ -130,6 +136,9 @@ func sessionDecision(verb, command, sid, cwd string) error {
 	if strings.TrimSpace(command) == "" || strings.ContainsRune(command, 0) {
 		return fmt.Errorf("provide an exact non-empty command")
 	}
+	cfg := LoadConfig()
+	attachOutsideRoot = cfg.AttachOutsideRoot
+	fastallow.AddWrappers(cfg.Wrappers...)
 	forms := rejectionForms(command)
 	removeEquivalent := func(line string) bool {
 		for f := range rejectionForms(line) {
@@ -159,6 +168,9 @@ func sessionDecision(verb, command, sid, cwd string) error {
 		if err := rewriteSessionLines(project, "approved", removeEquivalent); err != nil {
 			return err
 		}
+		if err := rewriteSessionLines(project, "approved_unsandboxed", removeEquivalent); err != nil {
+			return err
+		}
 		if err := AppendLine(project, "denied", command); err != nil {
 			return err
 		}
@@ -166,6 +178,10 @@ func sessionDecision(verb, command, sid, cwd string) error {
 			return err
 		}
 	}
+	_ = rewriteSessionLines(sid, "codexpre", func(line string) bool {
+		var e codexPreEntry
+		return json.Unmarshal([]byte(line), &e) != nil || ProjectSessionID(sid, e.Cwd) != project || removeEquivalent(e.Command)
+	})
 	// Do not leave an old human/mod replay in authority over a manual update.
 	if err := rewriteSessionLines(sid, "mod", func(line string) bool {
 		var e modEntry

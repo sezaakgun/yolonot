@@ -1150,14 +1150,6 @@ var helmSafeSubcommands = map[string]map[string]struct{}{
 	"repo":       {"list": {}, "ls": {}},
 }
 
-var helmUnsafeSubcommands = map[string]map[string]struct{}{
-	"dependency": {"build": {}, "update": {}, "up": {}},
-	"dep":        {"build": {}, "update": {}, "up": {}},
-	"plugin":     {"install": {}, "uninstall": {}, "update": {}, "package": {}},
-	"registry":   {"login": {}, "logout": {}},
-	"repo":       {"add": {}, "remove": {}, "rm": {}, "update": {}, "up": {}, "index": {}},
-}
-
 var helmDangerousFlags = map[string]struct{}{
 	// Same threat model as kubectl: kubeconfig exec plugin, arbitrary
 	// API server, attacker-controlled CA bundle.

@@ -32,7 +32,10 @@ func parseStatsArgs(args []string) (statsFilter, error) {
 				return f, err
 			}
 			if v == "current" {
-				v = FindSessionID()
+				v = GetSessionIDFromEnv()
+				if v == "" {
+					v = FindSessionID()
+				}
 				if v == "" {
 					return f, fmt.Errorf("no current session found")
 				}
@@ -237,7 +240,7 @@ type repeatedAsk struct {
 func collectRepeatedAsks(entries []DecisionEntry) []repeatedAsk {
 	counts := map[string]*repeatedAsk{}
 	for _, e := range entries {
-		if e.Decision != "ask" || e.Layer == "human" {
+		if (e.Decision != "ask" && e.OrigDecision != "ask") || e.Layer == "human" {
 			continue
 		}
 		pat := askShape(e.Command)
@@ -316,7 +319,7 @@ func collectInconsistentVerdicts(entries []DecisionEntry) []inconsistentVerdict 
 func withheldScriptCounts(entries []DecisionEntry) (asks int, byPath map[string]int) {
 	byPath = map[string]int{}
 	for _, e := range entries {
-		if e.Decision != "ask" || len(e.Withheld) == 0 {
+		if (e.Decision != "ask" && e.OrigDecision != "ask") || len(e.Withheld) == 0 {
 			continue
 		}
 		asks++
@@ -356,39 +359,57 @@ func humanResolution(h DecisionEntry) string {
 }
 
 func collectAskResolutions(entries []DecisionEntry) []askResolution {
-	byTool := map[string]DecisionEntry{}
-	byKey := map[string][]DecisionEntry{}
-	for _, e := range entries {
+	type indexedHuman struct {
+		idx   int
+		entry DecisionEntry
+	}
+	byTool := map[string]indexedHuman{}
+	byKey := map[string][]indexedHuman{}
+	usedHuman := map[int]bool{}
+	for idx, e := range entries {
 		if e.Layer != "human" || humanResolution(e) == "" {
 			continue
 		}
+		ih := indexedHuman{idx: idx, entry: e}
 		if e.ToolUseID != "" {
-			byTool[e.ToolUseID] = e
+			byTool[e.ToolUseID] = ih
 		}
 		k := askKey(e)
-		byKey[k] = append(byKey[k], e)
+		byKey[k] = append(byKey[k], ih)
+	}
+	for _, e := range entries {
+		if (e.Decision != "ask" && e.OrigDecision != "ask") || e.Layer == "human" || e.ToolUseID == "" {
+			continue
+		}
+		if ih, ok := byTool[e.ToolUseID]; ok {
+			usedHuman[ih.idx] = true
+		}
 	}
 	var out []askResolution
 	for _, e := range entries {
-		if e.Decision != "ask" || e.Layer == "human" {
+		if (e.Decision != "ask" && e.OrigDecision != "ask") || e.Layer == "human" {
 			continue
 		}
 		r := askResolution{ask: e, resolution: "unanswered"}
 		if e.ToolUseID != "" {
-			if h, ok := byTool[e.ToolUseID]; ok {
-				r.resolution, r.exact = humanResolution(h), true
+			if ih, ok := byTool[e.ToolUseID]; ok {
+				r.resolution, r.exact = humanResolution(ih.entry), true
 				out = append(out, r)
 				continue
 			}
 		}
 		askTime, err := time.Parse(time.RFC3339Nano, e.Timestamp)
 		if err == nil {
-			for _, h := range byKey[askKey(e)] {
-				ht, err := time.Parse(time.RFC3339Nano, h.Timestamp)
+			for _, ih := range byKey[askKey(e)] {
+				if usedHuman[ih.idx] {
+					continue
+				}
+				ht, err := time.Parse(time.RFC3339Nano, ih.entry.Timestamp)
 				if err != nil || ht.Before(askTime) || ht.Sub(askTime) > askResolutionWindow {
 					continue
 				}
-				r.resolution = humanResolution(h)
+				usedHuman[ih.idx] = true
+				r.resolution = humanResolution(ih.entry)
 				break
 			}
 		}
@@ -433,7 +454,7 @@ type sessionAskCount struct {
 func collectSessionAskCounts(entries []DecisionEntry) []sessionAskCount {
 	m := map[string]*sessionAskCount{}
 	for _, e := range entries {
-		if e.Decision != "ask" || e.Layer == "human" || e.SessionID == "" {
+		if (e.Decision != "ask" && e.OrigDecision != "ask") || e.Layer == "human" || e.SessionID == "" {
 			continue
 		}
 		s, ok := m[e.SessionID]
@@ -470,7 +491,7 @@ func todayAnomaly(entries []DecisionEntry, now time.Time) string {
 	since, _ := parseSince("today", now)
 	asks, timeouts := 0, 0
 	for _, e := range filterDecisions(entries, statsFilter{since: since}) {
-		if e.Decision == "ask" && e.Layer != "human" {
+		if (e.Decision == "ask" || e.OrigDecision == "ask") && e.Layer != "human" {
 			asks++
 		}
 		if e.EscalationError == "timeout" {
@@ -482,3 +503,96 @@ func todayAnomaly(entries []DecisionEntry, now time.Time) string {
 	}
 	return fmt.Sprintf("today: %d asks, %d escalation timeouts — yolonot stats --since today", asks, timeouts)
 }
+
+type threatIncident struct {
+	command string
+	tag     string
+	reason  string
+	count   int
+	lastIdx int
+}
+
+func cleanDecisionReason(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "orig=") {
+		if i := strings.Index(s, " → "); i > 0 {
+			rest := s[i+len(" → "):]
+			if sp := strings.IndexByte(rest, ' '); sp > 0 {
+				s = strings.TrimSpace(rest[sp+1:])
+			}
+		}
+	}
+	return s
+}
+
+// collectThreatIncidents returns up to 5 most recent distinct blocked or
+// hardened commands (auto-deny, 2nd-model hardened, or user-rejected ask),
+// folding session_deny repeats into the same incident.
+func collectThreatIncidents(entries []DecisionEntry) []threatIncident {
+	askReason := map[string]string{}
+	byCmd := map[string]*threatIncident{}
+	for idx, e := range entries {
+		if e.Command == "" {
+			continue
+		}
+		if (e.Decision == "ask" || e.OrigDecision == "ask") && e.Layer != "human" {
+			if r := cleanDecisionReason(e.Reasoning); r != "" {
+				askReason[e.SessionID+"\x00"+e.Command] = r
+			}
+		}
+		var tag, reason string
+		switch {
+		case e.Layer == "human" && e.Decision == "deny":
+			tag = "rejected by user"
+			reason = askReason[e.SessionID+"\x00"+e.Command]
+		case e.Layer == "session_deny" && e.Decision == "deny":
+			if inc, ok := byCmd[e.Command]; ok {
+				inc.count++
+				inc.lastIdx = idx
+				continue
+			}
+			tag = "session_deny"
+			reason = cleanDecisionReason(e.Reasoning)
+		case e.Decision == "deny" && e.Layer != "human":
+			if e.Escalated && e.EscalationOutcome == "hardened" {
+				tag = "hardened → deny"
+				reason = strings.TrimSpace(e.EscalationReasoning)
+			} else {
+				tag = e.Layer + " deny"
+			}
+			if reason == "" {
+				reason = cleanDecisionReason(e.Reasoning)
+			}
+		case e.Escalated && e.EscalationOutcome == "hardened":
+			tag = "hardened → " + e.Decision
+			reason = strings.TrimSpace(e.EscalationReasoning)
+			if reason == "" {
+				reason = cleanDecisionReason(e.Reasoning)
+			}
+		default:
+			continue
+		}
+		if inc, ok := byCmd[e.Command]; ok {
+			inc.count++
+			inc.lastIdx = idx
+			if tag != "session_deny" {
+				inc.tag = tag
+			}
+			if reason != "" {
+				inc.reason = reason
+			}
+			continue
+		}
+		byCmd[e.Command] = &threatIncident{command: e.Command, tag: tag, reason: reason, count: 1, lastIdx: idx}
+	}
+	var out []threatIncident
+	for _, inc := range byCmd {
+		out = append(out, *inc)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].lastIdx > out[j].lastIdx })
+	if len(out) > 5 {
+		out = out[:5]
+	}
+	return out
+}
+

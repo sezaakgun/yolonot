@@ -51,9 +51,6 @@ func TestProductNativeApprovalDoesNotWidenOneTimeGrant(t *testing.T) {
 	if ContainsLine(project, "approved", command) || ContainsLine(project, "asked", command) {
 		t.Fatal("one-time grant persisted or stale ask survived")
 	}
-	if got := loadPrecedents(); len(got) != 0 {
-		t.Fatalf("one-time grant learned: %+v", got)
-	}
 	out, err = productCLI(t, payload, "hook", "--harness", "claude")
 	if err != nil || productPermission(t, out) != ActionAsk {
 		t.Fatalf("repeat must ask again, not allow or infer rejection: %s %v", out, err)
@@ -341,13 +338,13 @@ func TestProductConfiguredHookBudgetStopsPendingModel(t *testing.T) {
 
 func TestProductDiagnosticsHonorExplicitHarness(t *testing.T) {
 	productControlHome(t)
-	out, err := productCLI(t, nil, "effective", "--harness", "codex", "--json")
+	out, err := productCLI(t, nil, "status", "--harness", "codex", "--json")
 	if err != nil {
-		t.Fatalf("effective failed: %s %v", out, err)
+		t.Fatalf("status --json failed: %s %v", out, err)
 	}
 	var state effectiveState
 	if err := json.Unmarshal(out, &state); err != nil || state.Harness != "codex" {
-		t.Fatalf("effective ignored explicit harness: %s %v", out, err)
+		t.Fatalf("status --json ignored explicit harness: %s %v", out, err)
 	}
 	oldArgs := os.Args
 	defer func() { os.Args = oldArgs }()
@@ -432,60 +429,76 @@ func TestProductManualRelativeCwdMatchesHookScope(t *testing.T) {
 	}
 }
 
-func TestProductLearningOptOutSurvivesRebuildAndForget(t *testing.T) {
+func TestProductDoctorAndAuditSeparateHealthFromSecurity(t *testing.T) {
 	productControlHome(t)
+	if out, err := productCLI(t, nil, "install", "--harness", "claude"); err != nil {
+		t.Fatalf("install failed: %s %v", out, err)
+	}
 	cwd := t.TempDir()
-	log := func(command string) {
-		LogDecision(DecisionEntry{Layer: "human", Source: "ask_approved", Decision: ActionAllow, Cwd: cwd, Command: command})
-	}
-	log("remember-before")
-	off := false
-	if err := SaveConfig(Config{Learning: LearningConfig{Enabled: &off}}); err != nil {
-		t.Fatal(err)
-	}
-	log("private-while-off")
-	if got := loadPrecedents(); len(got) != 0 {
-		t.Fatalf("disabled learning still supplied hints: %+v", got)
-	}
-	on := true
-	if err := SaveConfig(Config{Learning: LearningConfig{Enabled: &on}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(precedentsPath()); err != nil {
-		t.Fatal(err)
-	}
-	if rebuilt := loadPrecedents(); len(rebuilt) != 1 || rebuilt[0].Command != "remember-before" {
-		t.Fatalf("rebuild resurrected disabled learning: %+v", rebuilt)
-	}
+	os.MkdirAll(filepath.Join(cwd, ".git"), 0755)
+	os.WriteFile(filepath.Join(cwd, ".yolonot"), []byte("allow-cmd git *\n"), 0600)
 	t.Chdir(cwd)
-	captureStdout(func() { cmdLearning([]string{"forget", "remember-before"}) })
-	if got := loadPrecedents(); len(got) != 0 {
-		t.Fatalf("forget did not remove/rebuild-proof the answer: %+v", got)
+
+	docOut, err := productCLI(t, nil, "doctor", "--harness", "claude")
+	if err != nil {
+		t.Fatalf("doctor failed: %s %v", docOut, err)
+	}
+	if !bytes.Contains(docOut, []byte("security/policy warning(s) found — run: yolonot audit")) {
+		t.Fatalf("doctor should show 1-line summary pointer to yolonot audit:\n%s", docOut)
+	}
+	if bytes.Contains(docOut, []byte("allow-cmd git *")) {
+		t.Fatalf("doctor should not inline audit details directly:\n%s", docOut)
+	}
+
+	auditOut, err := productCLI(t, nil, "audit", "--harness", "claude")
+	if err != nil {
+		t.Fatalf("audit failed: %s %v", auditOut, err)
+	}
+	if !bytes.Contains(auditOut, []byte("allow-cmd git *")) {
+		t.Fatalf("audit should report broad allow-cmd rule:\n%s", auditOut)
 	}
 }
 
-func TestProductLearningRetentionAndForgetAreProjectScoped(t *testing.T) {
+func TestProductConsolidatedCLISubcommands(t *testing.T) {
 	productControlHome(t)
-	a, b := t.TempDir(), t.TempDir()
-	now := time.Now().UTC()
-	records := []precedent{
-		{Ts: now.Add(-30 * 24 * time.Hour).Format(time.RFC3339Nano), Cwd: a, Command: "old", Decision: ActionAllow},
-		{Ts: now.Add(-time.Hour).Format(time.RFC3339Nano), Cwd: a, Command: "same-command", Decision: ActionAllow},
-		{Ts: now.Add(-30 * time.Minute).Format(time.RFC3339Nano), Cwd: b, Command: "same-command", Decision: ActionDeny},
+	cwd := t.TempDir()
+	os.MkdirAll(filepath.Join(cwd, ".git"), 0755)
+	os.WriteFile(filepath.Join(cwd, ".yolonot"), []byte("allow-cmd git status*\nallow-hint \"pytest is safe\"\n"), 0600)
+	t.Chdir(cwd)
+
+	// 1. yolonot rules shows both rules and hints, and dispatches defaults/config
+	rulesOut, err := productCLI(t, nil, "rules")
+	if err != nil || !bytes.Contains(rulesOut, []byte("allow-cmd git status*")) || !bytes.Contains(rulesOut, []byte(`allow-hint "pytest is safe"`)) {
+		t.Fatalf("rules failed to show both rules and hints: %s %v", rulesOut, err)
 	}
-	if err := writePrecedents(records); err != nil {
-		t.Fatal(err)
+	traceOut, err := productCLI(t, nil, "rules", "--trace")
+	if err != nil || !bytes.Contains(traceOut, []byte("[hint   ] allow-hint")) {
+		t.Fatalf("rules --trace failed to show hints: %s %v", traceOut, err)
 	}
-	if err := SaveConfig(Config{Learning: LearningConfig{RetentionDays: 7, MaxEntries: 2}}); err != nil {
-		t.Fatal(err)
+	cfgOut, err := productCLI(t, nil, "rules", "config")
+	if err != nil || !bytes.Contains(cfgOut, []byte("pytest is safe")) {
+		t.Fatalf("rules config failed: %s %v", cfgOut, err)
 	}
-	if got := loadPrecedents(); len(got) != 2 || got[0].Command == "old" {
-		t.Fatalf("retention/cap not applied: %+v", got)
+
+	// 2. yolonot config quiet on/off
+	if out, err := productCLI(t, nil, "config", "quiet", "on"); err != nil || !bytes.Contains(out, []byte("Quiet on approve: ON")) {
+		t.Fatalf("config quiet on failed: %s %v", out, err)
 	}
-	t.Chdir(a)
-	captureStdout(func() { cmdLearning([]string{"forget", "same-command"}) })
-	if got := loadPrecedents(); len(got) != 1 || got[0].Cwd != b {
-		t.Fatalf("forget crossed project boundary: %+v", got)
+
+	// 3. yolonot profile <harness> <tier> <action> & bare yolonot profile
+	if out, err := productCLI(t, nil, "profile", "claude", "high", "deny"); err != nil || !bytes.Contains(out, []byte("claude/high → deny")) {
+		t.Fatalf("profile claude high deny failed: %s %v", out, err)
+	}
+	if out, err := productCLI(t, nil, "profile", "claude"); err != nil || !bytes.Contains(out, []byte("Risk map for harness \"claude\"")) {
+		t.Fatalf("profile claude failed: %s %v", out, err)
+	}
+
+	// 4. yolonot judges & yolonot judges escalation
+	if out, err := productCLI(t, nil, "judges"); err != nil || !bytes.Contains(out, []byte("Escalation")) {
+		t.Fatalf("judges failed to include Escalation section: %s %v", out, err)
+	}
+	if out, err := productCLI(t, nil, "judges", "escalation"); err != nil || !bytes.Contains(out, []byte("Escalation")) {
+		t.Fatalf("judges escalation failed: %s %v", out, err)
 	}
 }
 
@@ -580,19 +593,12 @@ func TestSessionCommandArgsRejectsUnquotedWords(t *testing.T) {
 	}
 }
 
-func TestLearningSubcommandsRejectStrayWords(t *testing.T) {
+func TestRetiredSubcommandsRejected(t *testing.T) {
 	productControlHome(t)
-	for _, c := range []struct {
-		args []string
-		want string
-	}{
-		{[]string{"learning", "forget", "rm", "-rf", "build"}, "one quoted argument"},
-		{[]string{"learning", "clear", "--all", "now"}, "Usage: yolonot learning clear"},
-		{[]string{"learning", "prune", "foo"}, "Usage: yolonot learning prune"},
-	} {
-		out, err := productCLI(t, nil, c.args...)
-		if err == nil || !strings.Contains(string(out), c.want) {
-			t.Errorf("%v: err=%v out=%s", c.args, err, out)
+	for _, verb := range []string{"learning", "effective", "validate", "prompt", "risk", "escalation", "quiet", "evolve"} {
+		out, err := productCLI(t, nil, verb)
+		if err == nil || !strings.Contains(string(out), "unknown command:") {
+			t.Errorf("retired verb %q should be rejected: err=%v out=%s", verb, err, out)
 		}
 	}
 }

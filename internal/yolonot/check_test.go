@@ -111,16 +111,15 @@ func TestCheckHonorsAttachOutsideRoot(t *testing.T) {
 	}
 }
 
-func TestCheckAndHookReceiveSameProjectPrecedents(t *testing.T) {
+func TestCheckAndHookReceiveSameWalkupHints(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()
 	t.Setenv("YOLONOT_HARNESS", "claude")
 	projectDir := t.TempDir()
+	os.MkdirAll(filepath.Join(projectDir, ".git"), 0755)
+	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("allow-hint \"unfamiliar-tool --probe is safe in this repo\"\n"), 0600)
 	t.Chdir(projectDir)
 	const command = "unfamiliar-tool --probe"
-	recordPrecedent(DecisionEntry{
-		Cwd: projectDir, Command: command, Layer: "human", Source: "ask_approved", Decision: "allow",
-	})
 	bodies := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -146,11 +145,11 @@ func TestCheckAndHookReceiveSameProjectPrecedents(t *testing.T) {
 	}
 	captureStdout(func() { cmdCheck(command) })
 	checkBody := awaitBody()
-	runHookWithStruct(t, makePrePayload("precedent-parity", command, projectDir))
+	runHookWithStruct(t, makePrePayload("hint-parity", command, projectDir))
 	hookBody := awaitBody()
 	for label, body := range map[string]string{"check": checkBody, "hook": hookBody} {
-		if !strings.Contains(body, "the user allowed") || !strings.Contains(body, command) {
-			t.Errorf("%s did not receive the current project's precedent: %s", label, body)
+		if !strings.Contains(body, "unfamiliar-tool --probe is safe in this repo") {
+			t.Errorf("%s did not receive the current project's walk-up hint: %s", label, body)
 		}
 	}
 	if checkBody != hookBody {

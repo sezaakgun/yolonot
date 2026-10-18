@@ -18,9 +18,9 @@ yolonot/
 │   │   ├── judge.go            # the judge chain: fast_allow, exec hooks, typed and chat models
 │   │   ├── budget.go           # shared hook deadline and bounded external judges
 │   │   ├── decision.go         # typed decision-model backend (System One / OpenAI Decisions / Workers AI)
-│   │   ├── escalation.go       # second-opinion model after the chain
-│   │   ├── profile.go          # risk profiles, per-harness pins, `profile` verb
-│   │   ├── cmd_classifier.go   # `prompt` verb (defaults / config / review / verify)
+│   │   ├── escalation.go       # second-opinion model after the chain (`judges escalation`)
+│   │   ├── profile.go          # risk profiles, per-harness pins & tier maps (`profile` verb)
+│   │   ├── cmd_classifier.go   # `rules` prompt subcommands (defaults / config / review / verify)
 │   │   ├── suggest_llm.go      # `suggest` smart mode
 │   │   ├── models.go           # `models` and `migrate` verbs
 │   │   ├── tui.go              # text prompts (charmbracelet/huh)
@@ -35,7 +35,7 @@ yolonot/
 │   │   ├── stats.go            # decision analytics
 │   │   ├── similarity.go       # session similarity pre-filtering
 │   │   ├── log.go              # decision logging (JSONL)
-│   │   ├── learn.go            # project human precedents supplied to model prompts
+│   │   ├── learn.go            # project repeated-ask candidate extraction for `suggest`
 │   │   ├── mod.go              # optional Claude mod lifecycle and bound verdict replay
 │   │   ├── executable_snapshot.go # local native executable identity for approval/replay
 │   │   ├── pause.go            # session pause/resume marker handling
@@ -48,7 +48,7 @@ yolonot/
 │   │   ├── harness_gemini.go   # retired Gemini compatibility/cleanup
 │   │   ├── harness_cursor.go   # Cursor adapter
 │   │   └── skills/
-│   │       └── SKILL.md        # Claude Code skill (embedded in binary)
+│   │       └── SKILL.md        # Shared management skill (embedded in binary)
 │   ├── fastallow/          # built-in bash-AST fast-path (Dippy-inspired)
 │   │   ├── localallow.go       # mvdan/sh AST walk — IsLocallySafe / IsLocallySafeWith
 │   │   ├── allowlist.go        # safeCommands, wrapperCommands, subcommandReadOnly tables
@@ -87,9 +87,8 @@ All yolonot data lives at `~/.yolonot/`:
 | `sessions/` | Per-session per-project approved/asked/denied lists, script/native executable hashes and allow-once markers; session-wide `<id>.paused` and `<id>.profile` pins |
 | `sessions/<id>.mod` | Claude mod verdicts bound to tool ID, command, cwd and snapshot, with explicit grant scope and completion state |
 | `mod/` | Optional Claude plugin manifest and TypeScript module |
-| `precedents.jsonl` | Human ask resolutions used as project-scoped model hints across sessions; allow-once answers are excluded |
-| `cache/` | Attached-script content hash (command + full-file sha256s) → cached model decisions plus a policy/prompt/model/learning context fingerprint |
-| `decisions.jsonl` | Decision log with timestamps and model timing, one record per line |
+| `cache/` | Attached-script content hash (command + full-file sha256s) → cached model decisions plus a policy/prompt/model context fingerprint |
+| `decisions.jsonl` | Decision log with timestamps, human ask resolutions and model timing, one record per line |
 | `suggest-cache.json` | `yolonot suggest` cache |
 | `migrate-declined` | Marker: the one-time migration offer was declined |
 | `update_check.json` | Cached update check (once per day) |
@@ -101,12 +100,11 @@ Session files are keyed by a hash of the git root (or cwd), so approvals in one 
 `config_validate.go` owns strict decoding and semantic validation;
 `protocol.go` selects provider wire formats. `failure.go` and `budget.go`
 apply configurable failure actions and the shared deadline. `diagnostics.go`
-implements `doctor` and `effective` without exposing API keys.
+implements `doctor`, `audit` and `status --all` / `status --json` without exposing API keys.
 
 `session_commands.go` implements project-scoped approve/deny/reset, with
 script and supported native executable snapshots. Multiline commands use one JSON-encoded physical record
 in session files; old single-line records remain readable.
-`learning_controls.go` implements opt-out, retention, caps, pruning and
-forgetting. `cache_context.go` invalidates verdicts when their decision
-context changes. `harness_skill.go` installs managed native skills while
-preserving unrelated user files. See [configuration.md](configuration.md).
+`cache_context.go` invalidates verdicts when their decision context changes.
+`harness_skill.go` installs managed native skills while preserving unrelated
+user files. See [configuration.md](configuration.md).

@@ -24,8 +24,15 @@ const parseBanner = (s: string) => {
   return m ? { layer: m[1], text: m[2] } : { layer: '', text: s }
 }
 
-async function judge($: any, command: string, id: string, cwd: string): Promise<Entry> {
-  const payload = { hook_event_name: 'PreToolUse', tool_name: 'Bash', session_id: sid, cwd, tool_use_id: id, tool_input: { command } }
+async function judge($: any, command: string, id: string, cwd: string, ev?: any): Promise<Entry> {
+  const toolInput: Record<string, any> = { command }
+  if (ev?.dangerouslyDisableSandbox === true || ev?.input?.dangerouslyDisableSandbox === true) {
+    toolInput.dangerouslyDisableSandbox = true
+  }
+  const payload: Record<string, any> = { hook_event_name: 'PreToolUse', tool_name: ev?.tool || 'Bash', session_id: sid, cwd, tool_use_id: id, tool_input: toolInput }
+  if (typeof ev?.permission_mode === 'string' && ev.permission_mode) {
+    payload.permission_mode = ev.permission_mode
+  }
   const t0 = Date.now()
   const r = await $.process.run([BIN, 'hook'], { stdin: JSON.stringify(payload), env: { YOLONOT_MOD: '1' }, timeoutMs: 65000 })
   const ms = Date.now() - t0
@@ -74,7 +81,7 @@ export const register: Register = on => {
     const cwd = await $.session.cwd()
     // The Go hook owns rejection memory and current policy precedence,
     // including pause, explicit allow rules and shell-wrapped retries.
-    const h = await judge($, command, id, cwd)
+    const h = await judge($, command, id, cwd, e)
     entries.set(id, h)
     $.ui.invalidate('ui.render')
     if (h.decision === 'deny') {
@@ -132,7 +139,7 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const en = entries.get(e.props.tool_use_id)
-    if (!en || e.props.toolName !== 'Bash') return next(e)
+    if (!en || (e.props.toolName !== 'Bash' && e.props.toolName !== 'PowerShell')) return next(e)
     const { Box, Text } = await $.ui.resolve(e)
     const tree = await next(e)
     return (

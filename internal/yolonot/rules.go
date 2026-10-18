@@ -54,6 +54,7 @@ type WalkupHints struct {
 
 type RuleMatch struct {
 	Action  string
+	Type    string
 	Pattern string
 	Message string
 }
@@ -627,12 +628,6 @@ func loadSensitiveFromFile(path string) (adds []string, removes []string) {
 	return
 }
 
-// hasSensitivePath returns true if the command references sensitive files.
-// Uses the given patterns list (from LoadSensitivePatterns).
-func hasSensitivePath(command string) bool {
-	return hasSensitivePathWith(command, LoadSensitivePatterns())
-}
-
 // hasSensitivePathWith checks against a specific pattern list.
 func hasSensitivePathWith(command string, patterns []string) bool {
 	lower := strings.ToLower(command)
@@ -677,17 +672,13 @@ func MatchRuleByPriority(command string, rules []Rule, sensitive []string) *Rule
 	if m := scriptPathRe.FindStringSubmatch(" " + command); len(m) > 1 {
 		scriptPath = m[1]
 	}
-	firstToken := command
-	if idx := strings.IndexByte(command, ' '); idx > 0 {
-		firstToken = command[:idx]
-	}
 
 	var denyM, askM, allowM *RuleMatch
 	for _, r := range rules {
 		matches := false
 		switch r.Type {
 		case "cmd":
-			matches = matchCmd(r.Pattern, command, firstToken)
+			matches = matchCmd(r.Pattern, command)
 		case "path":
 			if scriptPath != "" {
 				matches = glob.Match(r.Pattern, scriptPath)
@@ -696,7 +687,7 @@ func MatchRuleByPriority(command string, rules []Rule, sensitive []string) *Rule
 		if !matches {
 			continue
 		}
-		m := &RuleMatch{Action: r.Action, Pattern: r.Pattern, Message: r.Message}
+		m := &RuleMatch{Action: r.Action, Type: r.Type, Pattern: r.Pattern, Message: r.Message}
 		switch r.Action {
 		case "deny":
 			if denyM == nil {
@@ -731,12 +722,6 @@ func MatchRuleWith(command string, rules []Rule, sensitive []string) *RuleMatch 
 		scriptPath = m[1]
 	}
 
-	// Extract the first token (actual command being executed)
-	firstToken := command
-	if idx := strings.IndexByte(command, ' '); idx > 0 {
-		firstToken = command[:idx]
-	}
-
 	for _, r := range rules {
 		// Skip allow rules for chained/redirected/sensitive commands
 		if skipAllow && r.Action == "allow" {
@@ -744,12 +729,12 @@ func MatchRuleWith(command string, rules []Rule, sensitive []string) *RuleMatch 
 		}
 		switch r.Type {
 		case "cmd":
-			if matchCmd(r.Pattern, command, firstToken) {
-				return &RuleMatch{Action: r.Action, Pattern: r.Pattern, Message: r.Message}
+			if matchCmd(r.Pattern, command) {
+				return &RuleMatch{Action: r.Action, Type: r.Type, Pattern: r.Pattern, Message: r.Message}
 			}
 		case "path":
 			if scriptPath != "" && glob.Match(r.Pattern, scriptPath) {
-				return &RuleMatch{Action: r.Action, Pattern: r.Pattern, Message: r.Message}
+				return &RuleMatch{Action: r.Action, Type: r.Type, Pattern: r.Pattern, Message: r.Message}
 			}
 		}
 	}
@@ -760,7 +745,7 @@ func MatchRuleWith(command string, rules []Rule, sensitive []string) *RuleMatch 
 // Patterns starting with * (like *curl *) verify the command word appears
 // as an actual executable (first token or after sudo/env prefixes), not just
 // in arguments like echo "curl example.com".
-func matchCmd(pattern, fullCommand, firstToken string) bool {
+func matchCmd(pattern, fullCommand string) bool {
 	if !glob.Match(pattern, fullCommand) {
 		return false
 	}
@@ -826,12 +811,12 @@ func splitSegments(command string) []string {
 }
 
 // selfPolicyVerb returns the yolonot verb when command, or a shell-wrapped
-// form of it, runs one that writes approvals, denials, learning state or
-// policy. Global flags may sit before the verb.
+// form of it, runs one that writes approvals, denials, or policy. Global
+// flags may sit before the verb.
 func selfPolicyVerb(command string) string {
-	always := map[string]bool{"approve": true, "deny": true, "reset": true, "learning": true, "pause": true, "resume": true, "uninstall": true}
-	withArgs := map[string]bool{"profile": true, "risk": true, "judges": true, "models": true, "escalation": true, "quiet": true}
-	readOnly := map[string]bool{"list": true, "show": true, "status": true}
+	always := map[string]bool{"approve": true, "deny": true, "reset": true, "pause": true, "resume": true, "uninstall": true, "mod": true}
+	withArgs := map[string]bool{"profile": true, "judges": true, "judge": true, "models": true, "model": true, "config": true}
+	readOnly := map[string]bool{"list": true, "ls": true, "show": true, "status": true}
 	for form := range rejectionForms(command) {
 		for _, seg := range splitSegments(form) {
 			for inner := range rejectionForms(seg) {
@@ -851,9 +836,23 @@ func selfPolicyVerb(command string) string {
 				if len(words) == 0 {
 					continue
 				}
-				if always[words[0]] || withArgs[words[0]] && len(words) > 1 && !readOnly[words[1]] {
-					return words[0]
+				verb := words[0]
+				if always[verb] {
+					return verb
 				}
+				if !withArgs[verb] || len(words) <= 1 || readOnly[words[1]] {
+					continue
+				}
+				if verb == "config" && words[1] == "quiet" && len(words) == 2 {
+					continue
+				}
+				if (verb == "judges" || verb == "judge") && (words[1] == "escalation" || words[1] == "esc") && (len(words) == 2 || words[2] == "test") {
+					continue
+				}
+				if verb == "profile" && len(words) == 2 && GetHarness(words[1]) != nil {
+					continue
+				}
+				return verb
 			}
 		}
 	}

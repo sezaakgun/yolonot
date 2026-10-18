@@ -203,7 +203,6 @@ func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 		return Verdict{}, false, &judgeError{Kind: judgeErrUnavailable, Msg: "skipped — no provider configured for " + spec.Use}
 	}
 	hints := LoadHints(in.Cwd)
-	addPrecedentHints(&hints, in.Command, in.Cwd)
 	sysPrompt := BuildSystemPrompt(in.Config.Prompt, hints)
 	override := HasSystemPromptOverride(in.Config.Prompt, hints)
 
@@ -303,11 +302,16 @@ func RunJudges(specs []JudgeSpec, in *JudgeInput, beforeRemote func() bool) (*Ve
 	return nil, lastErr, false
 }
 
-// cmdJudges lists and edits the chain: `yolonot judges [add <entry>|remove <n|entry>|move <n> up|down]`.
+// cmdJudges lists and edits the chain and second-opinion escalation:
+// `yolonot judges [add <entry>|remove <n|entry>|move <n> up|down|escalation [on|off|setup|test]]`.
 func cmdJudges(args []string) {
 	cfg := LoadConfig()
 	if len(args) == 0 || args[0] == "list" {
 		printJudges(cfg)
+		return
+	}
+	if args[0] == "escalation" || args[0] == "esc" {
+		cmdEscalation(args[1:])
 		return
 	}
 	if !requireV1(&cfg) {
@@ -365,7 +369,7 @@ func cmdJudges(args []string) {
 		mustSaveConfig(cfg)
 		printJudges(cfg)
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: yolonot judges [add <entry>|remove <n|entry>|move <n|entry> up|down]")
+		fmt.Fprintln(os.Stderr, "Usage: yolonot judges [add <entry>|remove <n|entry>|move <n|entry> up|down|escalation [on|off|setup|test]]")
 		os.Exit(2)
 	}
 }
@@ -405,16 +409,18 @@ func printJudges(cfg Config) {
 	if len(specs) == 0 {
 		fmt.Println("Judges: none configured — every command passes through to the host's own permissions.")
 		fmt.Println("  Add one with: yolonot judges add fast_allow / yolonot judges add <model>")
-		return
-	}
-	fmt.Println("Judges (in order; the first permitted verdict wins):")
-	for i, s := range specs {
-		if s.Kind() == judgeUnknown {
-			fmt.Printf("  [%d] %-24s unknown — not fast_allow, exec:<path> or a model name; skipped\n", i+1, s.Use)
-			continue
+	} else {
+		fmt.Println("Judges (in order; the first permitted verdict wins):")
+		for i, s := range specs {
+			if s.Kind() == judgeUnknown {
+				fmt.Printf("  [%d] %-24s unknown — not fast_allow, exec:<path> or a model name; skipped\n", i+1, s.Use)
+				continue
+			}
+			fmt.Printf("  [%d] %-24s %-6s may: %s\n", i+1, s.Use, s.Kind(), strings.Join(s.effectiveMay(), ","))
 		}
-		fmt.Printf("  [%d] %-24s %-6s may: %s\n", i+1, s.Use, s.Kind(), strings.Join(s.effectiveMay(), ","))
 	}
+	fmt.Println()
+	printEscalationStatus(cfg)
 	fmt.Println()
 	fmt.Println("Rules and session memory always run before the chain; escalation and the risk map run once after it.")
 	fmt.Println("Entries: fast_allow (built-in parser), exec:<path> (hook binary), or a model name from `yolonot models`.")

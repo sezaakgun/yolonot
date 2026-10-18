@@ -3929,17 +3929,6 @@ func TestScriptHashOutsideProjectDisabled(t *testing.T) {
 
 // --- cmdProvider (simulate stdin selection) ---
 
-func runWithStdin(t *testing.T, input string, fn func()) string {
-	t.Helper()
-	oldStdin := os.Stdin
-	r, w, _ := os.Pipe()
-	w.WriteString(input)
-	w.Close()
-	os.Stdin = r
-	defer func() { os.Stdin = oldStdin }()
-	return captureStdout(fn)
-}
-
 func TestCmdProviderSaveAndLoad(t *testing.T) {
 	// Interactive TUI (huh) requires a real terminal — can't test cmdProvider directly.
 	// Test the config save/load path that cmdProvider uses.

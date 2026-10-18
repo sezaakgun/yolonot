@@ -25,6 +25,7 @@ async function askYolonot(
   cwd: string,
   toolResponse: Any,
   nativeAsk = false,
+  toolUseID = "",
 ): Promise<{ decision: string; reason: string }> {
   const payload = {
     hook_event_name: event,
@@ -32,6 +33,7 @@ async function askYolonot(
     session_id: sessionID,
     cwd,
     tool_input: { command },
+    ...(toolUseID ? { tool_use_id: toolUseID } : {}),
     ...(toolResponse !== undefined ? { tool_response: toolResponse } : {}),
   }
 
@@ -100,6 +102,8 @@ export const YolonotPlugin = async (_ctx: Any) => ({
       command,
       cwd,
       undefined,
+      false,
+      input.callID ?? "",
     )
     // OpenCode's plugin API has no "ask" primitive: only throw-to-block
     // or return-to-allow. Risk map now expresses policy via allow/deny/
@@ -128,6 +132,8 @@ export const YolonotPlugin = async (_ctx: Any) => ({
       command,
       cwd,
       { output: output?.output ?? "", title: output?.title ?? "" },
+      false,
+      input.callID ?? "",
     )
   },
 })
@@ -163,14 +169,14 @@ export default {
             const command = input.command
             const cwd = resolve(directory, input.workdir ?? directory)
             const callKey = key(context.sessionID, context.id)
-            const verdict = await askYolonot("PreToolUse", context.sessionID, command, cwd, undefined, true)
+            const verdict = await askYolonot("PreToolUse", context.sessionID, command, cwd, undefined, true, context.id ?? "")
             if (verdict.decision === "deny") throw new Error(`yolonot: ${verdict.reason || "deny"}`)
             // Empty output is passthrough, not an instruction to override
             // OpenCode's own permission policy.
             if (verdict.decision !== "") pending.set(callKey, verdict)
             try {
               const result = await execute(input, context)
-              await askYolonot("PostToolUse", context.sessionID, command, cwd, result, true)
+              await askYolonot("PostToolUse", context.sessionID, command, cwd, result, true, context.id ?? "")
               return result
             } finally {
               pending.delete(callKey)

@@ -105,7 +105,7 @@ func TestWriteCommandsOnV0WithoutTerminalLeaveTheFile(t *testing.T) {
 	if err := os.WriteFile(configPath(), []byte(releasedV0Config), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"quiet", "off"}, {"profile", "use", "strict"}, {"escalation", "off"}} {
+	for _, args := range [][]string{{"config", "quiet", "off"}, {"profile", "use", "strict"}, {"judges", "escalation", "off"}} {
 		out, err := productCLI(t, nil, args...)
 		if err == nil || !strings.Contains(string(out), "Run `yolonot migrate` first") {
 			t.Errorf("%v: err=%v out=%s", args, err, out)

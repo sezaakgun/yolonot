@@ -5,8 +5,5 @@
   ],
   "failure": {
     "invalid_config": "deny"
-  },
-  "learning": {
-    "enabled": false
   }
 }

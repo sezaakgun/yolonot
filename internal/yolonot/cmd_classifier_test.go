@@ -369,10 +369,10 @@ func TestCmdClassifierDispatch(t *testing.T) {
 			`"system_prompt"`, ""},
 		{"help",
 			[]string{"help"},
-			`Usage: yolonot prompt`, ""},
+			`Usage: yolonot rules`, ""},
 		{"-h flag",
 			[]string{"-h"},
-			`Usage: yolonot prompt`, ""},
+			`Usage: yolonot rules`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

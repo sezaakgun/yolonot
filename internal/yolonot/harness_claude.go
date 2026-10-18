@@ -77,6 +77,9 @@ func (c *ClaudeHarness) ParseHookInput(input []byte) (HookPayload, error) {
 	if err := json.Unmarshal(input, &p); err != nil {
 		return HookPayload{}, err
 	}
+	if !p.BypassSandbox {
+		p.BypassSandbox = extractToolInputBypassSandbox(p.ToolInput)
+	}
 	return p, nil
 }
 
@@ -297,10 +300,8 @@ func claudeAdapter() *ClaudeHarness {
 	return &ClaudeHarness{}
 }
 
-func settingsPath() string                  { return claudeAdapter().SettingsPath() }
 func loadSettings() map[string]interface{}  { return claudeAdapter().loadSettings() }
 func saveSettings(s map[string]interface{}) { claudeAdapter().saveSettings(s) }
-func removeHooks()                          { claudeAdapter().removeHooks() }
 
 // binaryPath returns the path to the running yolonot executable. Used by
 // Install() to register the hook command.

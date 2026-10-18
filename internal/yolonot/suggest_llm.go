@@ -112,8 +112,11 @@ func buildSuggestUserPrompt(f evolveFinding) string {
 	if f.Category != "" {
 		fmt.Fprintf(&b, "Why it was collected: %s — %s\n", f.Category, f.Desc)
 	}
-	fmt.Fprintf(&b, "Occurrences: %d (weighted %.1f)\n\n", f.Count, f.Weighted)
-	b.WriteString("Example commands:\n")
+	fmt.Fprintf(&b, "Occurrences: %d (weighted %.1f)\n", f.Count, f.Weighted)
+	if f.Approved > 0 || f.Once > 0 || f.Rejected > 0 {
+		fmt.Fprintf(&b, "Human resolutions: %d approved, %d allow-once, %d rejected\n", f.Approved, f.Once, f.Rejected)
+	}
+	b.WriteString("\nExample commands:\n")
 	for i, ex := range f.Examples {
 		fmt.Fprintf(&b, "  - %s\n", truncateStr(ex, 180))
 		if i < len(f.Context) && f.Context[i] != "" {

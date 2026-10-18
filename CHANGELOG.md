@@ -17,13 +17,15 @@ reader stays through 1.x and goes away in 2.0. Full table in
 [docs/upgrading.md](docs/upgrading.md).
 
 ### Added
-- **Script attachment across command lists.** The positional proof now runs per
-  simple command, follows one literal `cd <dir>`, ignores redirect targets and
-  stops at anything it cannot track, so a gate script run as
-  `cd ~/work/repo && .local-ci/run-gates.sh 2>&1 | tail` is judged on its
-  contents instead of asked about. `yolonot check [--cwd <dir>]` prints which
+- **Impact & incident summary (`yolonot stats`).** `yolonot stats` now opens with an `Impact:` block reporting `Auto-approved` (instant local allows vs AI-judged allows), `Speed saved` (estimated prompt interruptions avoided and average AI latency), and `Threats stopped` (commands blocked or caught, followed by up to 5 recent `BLOCKED` / `HARDENED` incidents with layer and reason), and caps project breakdowns to the top 10 projects.
+- **Separated health diagnostics (`yolonot doctor`) vs security/policy audit (`yolonot audit`).** `yolonot doctor` checks installation, `config.json` validity, host versions, configured models, judge chain, and escalation latency (with a 1-line summary pointer when security/policy warnings exist). `yolonot audit` lints overly broad `allow-cmd` patterns (`bash *`, `sh *`, `python *`, `git *`, `docker *`, `kubectl *`, etc.), warns on `attach_outside_root`, deduplicated `force_allow` / `high=allow` cells, and active paused sessions, and performs a read-only audit of host permission/sandbox configs across Claude (`.claude/settings*.json` broad `Bash(...)` allows, `bypassPermissions`, sandbox state), Codex (`config.toml` `approval_policy="never"`, `danger-full-access`), Antigravity (`~/.gemini/config/config.json` `autoApprove`, disabled sandbox) and Cursor (`cli-config.json` broad `Shell(...)` allows).
+- **`force_allow` (`override_allow`) risk-map action.** Non-critical risk-map cells (`safe`, `low`, `moderate`, `high`) now accept `force_allow` (or `override_allow`) to explicitly override a classifier's `ask` decision into `allow`. Default `allow` remains escalate-only; `critical` never accepts `allow` or `force_allow`.
+- **Consolidated v1 CLI & `suggest` workflow.** `yolonot` help is grouped into four sections (`Inspect & Diagnose`, `Session Control`, `Policy & Rules`, `Setup & Models`) with overlapping subcommands merged: `status` absorbs `effective` (`yolonot status [--all] [--json] [--harness <h>]`, capping default approved display to 15 items); `rules` absorbs `prompt` (`yolonot rules [--trace | defaults | config | review | verify]`, displaying both rules and hints); `profile` absorbs `risk` (`yolonot profile [<harness> [<tier> <action|reset>]]`); `judges` absorbs `escalation` (`yolonot judges [escalation [on|off|setup|test]]`); `config` absorbs `quiet` (`yolonot config quiet [on|off]`); and `suggest` absorbs `learning` / `log --human` (`yolonot suggest [--list | --json] [--basic]`), enriching findings with human resolution counts (`approved`, `once`, `rejected`) and repeated-ask candidates without injecting raw historical commands into live judge prompts.
+- **Script attachment across command lists, heredocs, and variable paths.** The positional proof now runs per
+  simple command, follows one literal `cd <dir>`, expands `~`/`$HOME` and simple `$VAR` paths assigned earlier in the command (`D=/path/to/repo && $D/run.sh`), strips heredoc bodies before scanning tokens, taints only the specific target file modified by an earlier segment (`cat > a.py && python b.py` withholds `a.py` and still attaches `b.py`), and stops at untrackable constructs. `yolonot check [--cwd <dir>]` prints which
   scripts the judge saw and why the rest were withheld; the decision log keeps
   the same lists (`attached`, `withheld`).
+- **Linked git worktree and trusted `$HOME` ancestor discovery.** Linked git worktrees (`.git` file pointing to `worktrees/<name>`) now resolve to their main repository root for `.yolonot` rule/hint discovery, project session scoping, and script attachment boundaries. Rule and hint walk-up also continues through trusted parent directories under `$HOME` (excluding `$HOME` itself, `~/Downloads`, and `~/tmp`).
 - **Self-diagnosis of a noisy session.** `yolonot stats --session <id|current>`,
   `--since today|24h|7d` and `--project <name>`; escalation errors split by kind
   with the p50/p90 of answered calls against the configured timeout; asks by
@@ -32,14 +34,13 @@ reader stays through 1.x and goes away in 2.0. Full table in
   what you did with each ask (exact `tool_use_id` join, else same command shape
   within ten minutes, reporting only); the sessions with the most asks. `yolonot
   log --session <id>` and an escalation outcome column; `yolonot doctor` reports
-  escalation latency against its timeout and flags deny/ask globs ending in `/*`
+  escalation latency against its timeout; `yolonot audit` flags deny/ask globs ending in `/*`
   that match every absolute path; the bare `yolonot` prints one line when today
-  crossed 10 asks or 5 escalation timeouts. `yolonot escalation` counts timeouts.
-- **Learning candidates.** `yolonot log --human` ends with the commands this
+  crossed 10 asks or 5 escalation timeouts.
+- **Suggested candidates.** `yolonot suggest` (`--list` / `--json`) ends with the commands this
   project asked about at least twice and you allowed each time, with the
-  `yolonot approve` line that turns each into a precedent. `yolonot suggest`
-  buckets asks whose script was unseen and asks lost to an escalation timeout
-  separately and tells the model what the judges saw for each example.
+  `yolonot approve` line for session approval, and buckets asks whose script was unseen and asks lost to an escalation timeout
+  separately while telling the model what the judges saw for each example.
 - The decision log records `agent_id`, `agent_type` and `tool_use_id` when the
   host sends them (Claude Code subagent and teammate calls).
 - Two default ask hints: bypassing hooks, signing or verification
@@ -49,8 +50,8 @@ reader stays through 1.x and goes away in 2.0. Full table in
 - Strict config validation, JSON Schema and ready-to-edit examples; configurable
   failure actions, shared hook deadline and explicit provider protocols.
 - Project-scoped CLI approve/deny/reset, native skills for all five supported adapters,
-  learning opt-out/retention/caps/forget/prune and context-aware script caches.
-- `doctor` and `effective` diagnostics, including JSON output and optional model probes.
+  and context-aware script caches.
+- `doctor`, `audit` and `status --all` / `status --json` diagnostics, including JSON output and optional model probes.
 - Antigravity CLI adapter. yolonot Gemini CLI support is retired; new installs
   exclude it, while legacy diagnostics and uninstall remain available.
 - OpenCode V2 plugin lifecycle and native ask support; Codex PermissionRequest

@@ -179,19 +179,6 @@ func init() {
 	}
 }
 
-// dispatchHandler is the entry point the analyzer uses. Returns
-// (handled=true, ok=true, desc) to say "handler approved"; (handled=true,
-// ok=false, _) to say "handler rejected — fall through"; (handled=false,
-// _, _) to say "no handler — use default logic".
-func dispatchHandler(head string, tokens []string) (handled, ok bool, desc string) {
-	h, exists := cliHandlers[head]
-	if !exists {
-		return false, false, ""
-	}
-	ok, desc = h(tokens)
-	return true, ok, desc
-}
-
 // tokenRepr produces a best-effort literal string for a Word. Fully
 // literal words become their concatenated text. Words containing
 // CmdSubst/ProcSubst/ParamExp that passed substitution-safety checks are

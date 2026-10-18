@@ -18,7 +18,7 @@ in banners (`🧑‍🚀 gemini -> npm test`) and in `decisions.jsonl` (`layer`)
 Set a model's `protocol` explicitly: `chat`, `anthropic`, `claude-cli`,
 `systemone`, `decisions` or `workers-ai`. Typed protocols are the last three;
 they answer fixed questions and cannot generate text. Chat models also power
-session similarity, Explain, `yolonot suggest` and `yolonot prompt review`. Omitting
+session similarity, Explain, `yolonot suggest` and `yolonot rules review`. Omitting
 `protocol` preserves legacy URL inference. Explicit protocols support custom
 proxy paths without relying on URL substrings; `claude-cli` requires the
 `claude-cli` URL sentinel. See [configuration.md](configuration.md).
@@ -77,7 +77,7 @@ Use `yolonot models test <name>` to check your configured endpoint.
 | Anthropic (API) | claude-haiku-5-5, claude-sonnet-5-5 / claude-opus-5-5 | 10s |
 | xAI | grok-4.3, grok-4.20-0309-non-reasoning / grok-4.7, grok-4.6 | 10s |
 | Ollama | any installed model | 30s |
-| OpenRouter | free models fetched live (primary); type any model ID for escalation | 30s |
+| OpenRouter | free models fetched live (primary); type any model ID for escalation | 15s (primary) / 30s (escalation) |
 | Custom | any URL | 10s |
 
 These are bundled wizard choices, not a guarantee of current provider or
@@ -184,12 +184,10 @@ What a decision model does not do:
   condition (`project_ask`) fires when an "Ask when" line matches, and
   "Allow when" lines tell the model what this project treats as routine.
   The request carries the command, attached script contents and these sections.
-  When learning is enabled, nearby project human precedents are supplied as
-  historical hints too; they are not current authorization. Raw host chat
-  history is not sent. The question set alone is about 6.5 KB per request.
+  Raw host chat history is not sent. The question set alone is about 6.5 KB per request.
 - It cannot be the escalation model, and it never says `deny`.
 - Explain, session similarity compare (`session_llm`), `yolonot suggest` smart
-  mode and `yolonot prompt review` use the first chat model in the chain;
+  mode and `yolonot rules review` use the first chat model in the chain;
   with no chat model they are skipped or refuse with a clear message.
 
 For eval: `--model <catalog name>` runs a suite against any configured
@@ -203,47 +201,38 @@ the typed model only with `--with-hints`, as for chat models.
 Optionally configure a second, bigger model that is consulted **only when
 the primary classifier is uncertain in a way that would surface an ask**
 (never on confident allows, never on `critical`). If the big model returns
-a confident `allow` with a `safe`/`low` tier, the ask is rescued into an
-allow; if it returns a *more* dangerous tier, the verdict is hardened
-upward. Anything else leaves the primary verdict untouched, and any
-escalation error preserves the primary verdict; it does not turn an ask into
-allow. The final unresolved policy and host permissions still apply.
+a confident `allow` at an adoptable tier (any non-critical tier that your
+active risk map resolves to `allow`), the ask is rescued into an allow; if
+it returns a *more* dangerous tier, the verdict is hardened upward. Anything
+else leaves the primary verdict untouched, and any escalation error
+preserves the primary verdict; it does not turn an ask into allow. The final
+unresolved policy and host permissions still apply.
 
-### Why rescue requires `safe`/`low` — not just `allow`
+### How rescue interacts with your active profile
 
-A log line that raises eyebrows on first sight:
+Under the default `balanced` profile (`safe=allow`, `low=allow`, `moderate=ask`),
+only `safe` and `low` resolve to `allow`:
 
 ```
 primary:    ask   / moderate   ("DELETE request can modify state")
 escalation: allow / moderate   ("localhost only, bounded, reversible")
-outcome:    kept — the ask stands
+outcome:    kept on balanced (moderate maps to ask) — rescued on fast (moderate maps to allow)
 ```
 
-The big model said allow — why no rescue? Because **both models assessed
-the same risk tier.** An equal-tier `allow` is a different vote at the same
-risk level, not evidence the command is safer than the primary believed.
-Adopting it would make the cascade break ties toward permissive — and a
-gate that resolves model disagreements in favor of allowing is how a safety
-net erodes. Rescue therefore demands that the bigger model *downgrade* the
-tier into the definitively-safe band (`safe` = read-only, `low` = trivially
-reversible local write): proof the primary **overestimated** the risk, not
-merely a second opinion at the same level. `moderate` stays excluded even
-when your profile maps it to allow — it is the ambiguous middle whose
-uncertainty triggered the escalation in the first place, and the same
-principle already stops a permissive risk-map cell from overriding a
-classifier's ask.
-
-Had the big model answered `allow`/`low` above ("dead port, nothing
-listening — effectively a no-op probe"), the verdict would have been
-adopted and no prompt shown. The asymmetry is deliberate: a wrongly-kept
-ask costs one interruption; a wrongly-granted allow executes a state change
-unattended. The band is hard-coded, not configurable.
+Under `balanced`, an `allow/moderate` second opinion still maps to `ask` in the
+risk map, so rescuing requires the bigger model to downgrade the tier into
+`safe` or `low` (for example, `allow/low` — "dead port, nothing listening —
+effectively a no-op probe"). Under `fast` (or when `moderate` is explicitly
+mapped to `allow` or `force_allow`), `moderate` is an adoptable allow tier, so
+`allow/moderate` rescues the primary `ask`. Under `paranoid` (where even `safe`
+maps to `ask`), no tier resolves to `allow` unless overridden, so escalation is
+skipped. `critical` is never adoptable.
 
 ```bash
-yolonot escalation setup   # pick a chat model from the catalog, or add one
-yolonot escalation         # status: model, trigger, recent fire/rescue counts
-yolonot escalation off     # keep config, disable
-yolonot escalation test    # non-interactive connection test, exit 0/1 (CI)
+yolonot judges escalation setup   # pick a chat model from the catalog, or add one
+yolonot judges                    # judge chain + escalation status (model, trigger, recent fire/rescue counts)
+yolonot judges escalation off     # keep config, disable
+yolonot judges escalation test    # non-interactive connection test, exit 0/1 (CI)
 ```
 
 Config block (`~/.yolonot/config.json`):
@@ -260,8 +249,8 @@ Config block (`~/.yolonot/config.json`):
 ```
 
 `escalation.model` names a catalog entry; it must be a chat model, and
-`yolonot escalation setup` only offers those. `disabled: true` keeps the
-reference but turns the step off (`yolonot escalation off`). Credentials
+`yolonot judges escalation setup` only offers those. `disabled: true` keeps the
+reference but turns the step off (`yolonot judges escalation off`). Credentials
 follow the entry's own `env_key`; nothing is shared between endpoints. Both
 models receive the same system prompt and [prompt hints](prompt.md).
 

@@ -29,7 +29,8 @@ yolonot install --harness antigravity   # agy is an alias
 yolonot uninstall --harness gemini      # remove retired integration
 yolonot install --harness cursor
 yolonot doctor --harness codex
-yolonot effective --harness opencode --json
+yolonot audit --harness codex
+yolonot status --harness opencode --json
 ```
 
 Without a target, install/setup use detected harnesses; uninstall uses
@@ -179,12 +180,12 @@ unchanged. PostToolUse follows successful execution only; temporary verdict
 state is cleaned up.
 
 V2 subprocesses set `YOLONOT_OPENCODE_API=2`. Moderate risk can ask; high and
-critical retain their hard-deny floor. The human's answer to a native ask is
-not yet recorded: the 2.0.28 SDK publishes `permission.asked` (with the shell
-call's `tool.callID`) and `permission.replied` (`once`, `always`, `reject`),
-which is enough to log `ask_approved` / `ask_rejected` once the plugin can
-subscribe to them; until then only `yolonot approve` / `deny` record an answer
-on OpenCode. Read-only diagnostics infer the marker
+critical retain their hard-deny floor. The plugin subscribes to the 2.0.28 SDK
+`permission.asked` (matched by the shell call's `tool.callID`) and
+`permission.replied` (`once`, `always`, `reject`) events and forwards the
+human's resolution to `yolonot hook` as `PermissionReplied`, recording
+`allow_once`, `ask_approved` (with session approval) or `ask_rejected` (with
+session deny). Read-only diagnostics infer the marker
 from the installed V2 CLI. V1 keeps its legacy named/server exports and its
 older host-deferred ask behavior.
 
@@ -204,7 +205,20 @@ uses Antigravity for supported Google CLI workflows.
 
 Antigravity uses a named-hook map in `~/.gemini/config/hooks.json`, matches
 `run_command`, and reads `toolCall.args.CommandLine/Cwd`. Allow maps to
-`auto_approve`, ask to `force_ask`, and deny blocks. When yolonot is active,
+`auto_approve`, ask to `force_ask`, and deny blocks. `force_ask` is used
+deliberately instead of `ask` (`"ask"` respects Antigravity's cached `"Always
+Allow"` grants in `~/.gemini/config/config.json` and
+`~/.gemini/config/projects/<uuid>.json`, which would silently bypass a fresh
+yolonot ask or `BypassSandbox` review; `"force_ask"` ignores cached host grants
+and narrows the native prompt to a one-time Allow/Deny confirmation). Because
+Antigravity's hook protocol (`hooks_go_proto`, checked through `agy` 1.4.2)
+only emits `SessionStart`, `PreToolUse`, `PostToolUse`, `PreInvocation`,
+`PostInvocation`, `Stop`, `OnCompaction` and `OnToolError` — with no
+`PermissionReplied` event and no chosen grant-scope field (`once`, `session`,
+`workspace`, `always`) on `PostToolUse` — completed native asks are logged as
+`allow_once` and do not auto-widen to a session grant (use `yolonot approve` or
+`yolonot suggest` to persist approvals until Antigravity exposes the user's
+permission-scope selection to hooks). When yolonot is active,
 `auto_approve` also satisfies Antigravity's `BypassSandbox: true` gate for
 allowed commands; when a session is paused (`yolonot pause`), yolonot emits
 an empty passthrough (`{}`) and Antigravity falls back to its native manual

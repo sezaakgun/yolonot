@@ -147,13 +147,6 @@ func configRows(cfg Config) []configRow {
 	add(configRow{"POLICY", "Decision budget", fmt.Sprintf("%ds", budget), "max 55s", func(c *Config) {
 		editPositiveSetting("Hook budget, seconds (0 = 55)", c.HookTimeout, 55, func(n int) { c.HookTimeout = n })
 	}})
-	add(configRow{"POLICY", "Learning", onOff(learningEnabled(cfg)), "cross-session hints", func(c *Config) { enabled := !learningEnabled(*c); c.Learning.Enabled = &enabled }})
-	add(configRow{"POLICY", "Learning retention", fmt.Sprintf("%d days", cfg.Learning.RetentionDays), "0 = unlimited", func(c *Config) {
-		editPositiveSetting("Retention days", c.Learning.RetentionDays, 0, func(n int) { c.Learning.RetentionDays = n })
-	}})
-	add(configRow{"POLICY", "Learning limit", fmt.Sprint(cfg.Learning.MaxEntries), "0 = unlimited", func(c *Config) {
-		editPositiveSetting("Maximum stored answers", c.Learning.MaxEntries, 0, func(n int) { c.Learning.MaxEntries = n })
-	}})
 
 	// PROMPT — what the chat model (and, as state text, the typed model) sees.
 	add(configRow{"PROMPT", "Context", hintListSummary(cfg.Prompt.Context), "", editPromptList("Context", "trusted background facts", func(c *Config) *[]string { return &c.Prompt.Context })})

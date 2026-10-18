@@ -83,6 +83,7 @@ type cursorPayload struct {
 	Cwd            string   `json:"cwd"`
 	Command        string   `json:"command"`
 	WorkspaceRoots []string `json:"workspace_roots"`
+	Sandbox        *bool    `json:"sandbox,omitempty"`
 }
 
 // ParseHookInput decodes Cursor's stdin JSON into the canonical HookPayload
@@ -112,6 +113,7 @@ func (c *CursorHarness) ParseHookInput(input []byte) (HookPayload, error) {
 	} else if cwd != "" && !filepath.IsAbs(cwd) && len(raw.WorkspaceRoots) > 0 {
 		cwd = filepath.Join(raw.WorkspaceRoots[0], cwd)
 	}
+	bypass := raw.Sandbox != nil && !*raw.Sandbox
 	return HookPayload{
 		HookEventName: event,
 		ToolName:      "Bash",
@@ -119,6 +121,7 @@ func (c *CursorHarness) ParseHookInput(input []byte) (HookPayload, error) {
 		ToolUseID:     raw.ToolUseID,
 		Cwd:           cwd,
 		ToolInput:     map[string]interface{}{"command": raw.Command},
+		BypassSandbox: bypass,
 	}, nil
 }
 

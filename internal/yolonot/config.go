@@ -52,11 +52,10 @@ type Config struct {
 	// repo root of the session cwd, else the cwd). Sensitive home dirs stay
 	// floored regardless. Config-file only by design: no CLI verb and no
 	// .yolonot directive, so an untrusted clone can never widen the boundary.
-	AttachOutsideRoot bool           `json:"attach_outside_root,omitempty"`
-	HookTimeout       int            `json:"hook_timeout,omitempty"` // overall model/exec budget, 1..55 seconds; default 55
-	Failure           FailurePolicy  `json:"failure,omitzero"`
-	Learning          LearningConfig `json:"learning,omitzero"`
-	LoadError         error          `json:"-"`
+	AttachOutsideRoot bool          `json:"attach_outside_root,omitempty"`
+	HookTimeout       int           `json:"hook_timeout,omitempty"` // overall model/exec budget, 1..55 seconds; default 55
+	Failure           FailurePolicy `json:"failure,omitzero"`
+	LoadError         error         `json:"-"`
 
 	// v0 keys (yolonot ≤ 0.23). Read only: normalize() folds them into the
 	// fields above and clears them, so they never reach disk again.
@@ -977,6 +976,14 @@ func listOllamaModels() []string {
 }
 
 func cmdRules() {
+	if len(os.Args) > 2 {
+		switch os.Args[2] {
+		case "defaults", "config", "review", "verify", "help", "-h", "--help":
+			cmdClassifier(os.Args[2:])
+			return
+		}
+	}
+
 	// --trace prints every `.yolonot` yolonot actually loads (walk-up order),
 	// shows each rule's source path + line, and marks shadowed entries —
 	// answers "which ancestor .yolonot did this rule come from?".
@@ -992,12 +999,13 @@ func cmdRules() {
 		return
 	}
 
-	// Default view: every loaded source, rules listed per-source.
+	// Default view: every loaded source, rules and hints listed per-source.
 	paths := yolonotConfigSearchPaths()
 	anyPrinted := false
 	for _, path := range paths {
 		rules := loadRulesFromFile(path)
-		if len(rules) == 0 {
+		hints := loadHintsFromFile(path)
+		if len(rules) == 0 && len(hints) == 0 {
 			continue
 		}
 		anyPrinted = true
@@ -1009,8 +1017,31 @@ func cmdRules() {
 				fmt.Printf("  %s-%s %s\n", r.Action, r.Type, r.Pattern)
 			}
 		}
+		for _, h := range hints {
+			fmt.Printf("  %s %q\n", h.Type, h.Text)
+		}
 		fmt.Println()
 	}
+
+	cfg := LoadConfig()
+	if len(cfg.Prompt.Context) > 0 || len(cfg.Prompt.AllowHints) > 0 || len(cfg.Prompt.AskHints) > 0 || cfg.Prompt.SystemPrompt != "" {
+		anyPrinted = true
+		fmt.Printf("%s (prompt):\n", configPath())
+		for _, c := range cfg.Prompt.Context {
+			fmt.Printf("  context %q\n", c)
+		}
+		for _, h := range cfg.Prompt.AllowHints {
+			fmt.Printf("  allow-hint %q\n", h)
+		}
+		for _, h := range cfg.Prompt.AskHints {
+			fmt.Printf("  ask-hint %q\n", h)
+		}
+		if cfg.Prompt.SystemPrompt != "" {
+			fmt.Printf("  system-prompt %q\n", truncateStr(cfg.Prompt.SystemPrompt, 80))
+		}
+		fmt.Println()
+	}
+
 	if !anyPrinted {
 		fmt.Println("Rules: (none)")
 		fmt.Println("Drop a .yolonot in this project or run `yolonot init`.")
@@ -1042,6 +1073,7 @@ func cmdRulesTrace() {
 		source     string
 		line       int
 		rule       Rule
+		hint       *Hint
 		shadowed   bool
 		shadowedBy string
 	}
@@ -1067,6 +1099,15 @@ func cmdRulesTrace() {
 				continue
 			}
 			actionType := parts[0]
+			switch actionType {
+			case "context", "allow-hint", "ask-hint", "system-prompt":
+				text := unquoteHintBody(parts[1])
+				if text != "" {
+					h := Hint{Type: actionType, Text: text}
+					all = append(all, entry{source: path, line: lineNum, hint: &h})
+				}
+				continue
+			}
 			idx := strings.Index(actionType, "-")
 			if idx < 0 {
 				continue
@@ -1110,6 +1151,11 @@ func cmdRulesTrace() {
 	fmt.Println()
 
 	for _, e := range all {
+		if e.hint != nil {
+			fmt.Printf("  [hint   ] %s %q\n", e.hint.Type, e.hint.Text)
+			fmt.Printf("            %s:%d\n", e.source, e.line)
+			continue
+		}
 		tag := "active "
 		if e.shadowed {
 			tag = "shadow "
@@ -1128,12 +1174,23 @@ func cmdRulesTrace() {
 }
 
 func cmdStatus() {
+	args := os.Args[2:]
+	if sliceHas(args, "--json") {
+		cmdEffective(args)
+		return
+	}
+	showAll := Verbose || sliceHas(args, "--all") || sliceHas(args, "--effective")
+	explicitHarness := sliceHas(args, "--harness")
 	sessionID := GetSessionIDFromEnv()
 	if sessionID == "" {
 		sessionID = FindSessionID()
 	}
 	if sessionID == "" {
 		fmt.Println("No active session found.")
+		if showAll || explicitHarness {
+			fmt.Println()
+			cmdEffective(args)
+		}
 		return
 	}
 
@@ -1141,10 +1198,17 @@ func cmdStatus() {
 	projSessionID := ProjectSessionID(sessionID, cwd)
 
 	approved := ReadLines(projSessionID, "approved")
+	for _, cmd := range ReadLines(projSessionID, "approved_unsandboxed") {
+		approved = append(approved, cmd+"  [unsandboxed]")
+	}
 	asked := ReadLines(projSessionID, "asked")
 	denied := ReadLines(projSessionID, "denied")
 
-	fmt.Printf("yolonot session: %s (project: %s)\n", sessionID, filepath.Base(cwd))
+	projName := filepath.Base(projectRoot(cwd))
+	if projName == "" || projName == "." {
+		projName = filepath.Base(cwd)
+	}
+	fmt.Printf("yolonot session: %s (project: %s)\n", sessionID, projName)
 	if isPaused(sessionID) {
 		fmt.Printf("  ⚠ Session %s is PAUSED (all commands bypass yolonot; run: yolonot resume)\n", sessionID)
 	}
@@ -1152,36 +1216,39 @@ func cmdStatus() {
 
 	if len(approved) > 0 {
 		fmt.Printf("APPROVED (%d):\n", len(approved))
-		for _, cmd := range approved {
-			if len(cmd) > 80 {
-				cmd = cmd[:77] + "..."
-			}
-			fmt.Printf("  ✓ %s\n", cmd)
+		shown := approved
+		const maxShown = 15
+		if !showAll && len(shown) > maxShown {
+			shown = shown[len(shown)-maxShown:]
+		}
+		for _, cmd := range shown {
+			fmt.Printf("  ✓ %s\n", truncateStr(cmd, 80))
+		}
+		if !showAll && len(approved) > maxShown {
+			fmt.Printf("  … and %d earlier approved commands (run `yolonot status --all` to see all)\n", len(approved)-maxShown)
 		}
 		fmt.Println()
 	}
 	if len(asked) > 0 {
 		fmt.Printf("ASKED (%d):\n", len(asked))
 		for _, cmd := range asked {
-			if len(cmd) > 80 {
-				cmd = cmd[:77] + "..."
-			}
-			fmt.Printf("  ? %s\n", cmd)
+			fmt.Printf("  ? %s\n", truncateStr(cmd, 80))
 		}
 		fmt.Println()
 	}
 	if len(denied) > 0 {
 		fmt.Printf("DENIED (%d):\n", len(denied))
 		for _, cmd := range denied {
-			if len(cmd) > 80 {
-				cmd = cmd[:77] + "..."
-			}
-			fmt.Printf("  ✗ %s\n", cmd)
+			fmt.Printf("  ✗ %s\n", truncateStr(cmd, 80))
 		}
 		fmt.Println()
 	}
 	if len(approved) == 0 && len(asked) == 0 && len(denied) == 0 {
 		fmt.Println("No decisions recorded for this session yet.")
+	}
+	if showAll || explicitHarness {
+		fmt.Println()
+		cmdEffective(args)
 	}
 }
 
@@ -1364,13 +1431,16 @@ func timeWeight(ts string) float64 {
 
 // evolveFinding holds an aggregated pattern discovered by cmdEvolve.
 type evolveFinding struct {
-	Category string
-	Pattern  string
-	Count    int
-	Weighted float64
-	Desc     string
-	Examples []string
-	Context  []string // one line per example: verdicts, risk, escalation, withheld scripts
+	Category string   `json:"category"`
+	Pattern  string   `json:"pattern"`
+	Count    int      `json:"count"`
+	Weighted float64  `json:"weighted"`
+	Approved int      `json:"approved,omitempty"`
+	Once     int      `json:"once,omitempty"`
+	Rejected int      `json:"rejected,omitempty"`
+	Desc     string   `json:"desc"`
+	Examples []string `json:"examples"`
+	Context  []string `json:"context,omitempty"` // one line per example: verdicts, risk, escalation, withheld scripts
 }
 
 // evolveChange holds a rule chosen by the user during cmdEvolve.
@@ -1391,11 +1461,17 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 		examples []string
 		context  []string
 	}
+	type humanTally struct {
+		approved int
+		once     int
+		rejected int
+	}
 
 	askBuckets := map[string]*bucket{}
 	allowBuckets := map[string]*bucket{}
 	timeoutBuckets := map[string]*bucket{}
 	withheldBuckets := map[string]*bucket{}
+	humanByPat := map[string]*humanTally{}
 	add := func(buckets map[string]*bucket, pat string, e DecisionEntry, w float64) {
 		b, ok := buckets[pat]
 		if !ok {
@@ -1411,7 +1487,33 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 	}
 
 	for _, e := range entries {
-		if e.Command == "" {
+		if e.Command == "" || e.BypassSandbox {
+			continue
+		}
+		if e.Layer == "human" {
+			pat := askShape(e.Command)
+			if pat == "" {
+				continue
+			}
+			ht := humanByPat[pat]
+			if ht == nil {
+				ht = &humanTally{}
+				humanByPat[pat] = ht
+			}
+			switch {
+			case e.Source == "allow_once":
+				ht.once++
+			case e.Source == "ask_rejected" || e.Decision == "deny":
+				ht.rejected++
+			case e.Source == "ask_approved" || e.Decision == "allow":
+				ht.approved++
+			}
+			continue
+		}
+		isAsk := e.Decision == "ask" || e.OrigDecision == "ask"
+		isJudgeOrCache := isModelLayer(e.Layer) || e.Layer == "cache"
+		isLowConfAllow := e.Decision == "allow" && isJudgeOrCache && e.Confidence > 0 && e.Confidence < 0.8
+		if !((isAsk && isJudgeOrCache) || isLowConfAllow) {
 			continue
 		}
 		pat := askShape(e.Command)
@@ -1421,7 +1523,7 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 		w := timeWeight(e.Timestamp)
 
 		switch {
-		case e.Decision == "ask" && isModelLayer(e.Layer) && len(e.Withheld) > 0:
+		case isAsk && isJudgeOrCache && len(e.Withheld) > 0:
 			// Keyed by the script the judge could not see: the fix is a hint
 			// about that script, whatever command shape invoked it.
 			path := e.Withheld[0]
@@ -1429,11 +1531,11 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 				path = path[:i]
 			}
 			add(withheldBuckets, path, e, w)
-		case e.Decision == "ask" && isModelLayer(e.Layer) && e.EscalationError == "timeout":
+		case isAsk && isJudgeOrCache && e.EscalationError == "timeout":
 			add(timeoutBuckets, pat, e, w)
-		case e.Decision == "ask" && isModelLayer(e.Layer):
+		case isAsk && isJudgeOrCache:
 			add(askBuckets, pat, e, w)
-		case e.Decision == "allow" && isModelLayer(e.Layer) && e.Confidence > 0 && e.Confidence < 0.8:
+		case isLowConfAllow:
 			add(allowBuckets, pat, e, w)
 		}
 	}
@@ -1447,10 +1549,13 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 			}
 			// Skip patterns already covered by existing rules
 			sample := pat + " test"
+			if category == "SCRIPT NOT SHOWN" {
+				sample = "bash " + pat
+			}
 			if MatchRuleWith(sample, existingRules, nil) != nil {
 				continue
 			}
-			findings = append(findings, evolveFinding{
+			f := evolveFinding{
 				Category: category,
 				Pattern:  pat,
 				Count:    b.count,
@@ -1458,7 +1563,26 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 				Desc:     fmt.Sprintf(descFmt, b.count, b.weighted),
 				Examples: b.examples,
 				Context:  b.context,
-			})
+			}
+			if ht := humanByPat[pat]; ht != nil {
+				f.Approved = ht.approved
+				f.Once = ht.once
+				f.Rejected = ht.rejected
+				var parts []string
+				if ht.approved > 0 {
+					parts = append(parts, fmt.Sprintf("%d approved", ht.approved))
+				}
+				if ht.once > 0 {
+					parts = append(parts, fmt.Sprintf("%d once", ht.once))
+				}
+				if ht.rejected > 0 {
+					parts = append(parts, fmt.Sprintf("%d rejected", ht.rejected))
+				}
+				if len(parts) > 0 {
+					f.Desc += " · human: " + strings.Join(parts, ", ")
+				}
+			}
+			findings = append(findings, f)
 		}
 	}
 
@@ -1477,45 +1601,134 @@ func collectEvolveFindings(entries []DecisionEntry, existingRules []Rule) []evol
 
 func cmdEvolve(args []string) {
 	// --basic disables LLM-driven suggestions and falls back to the
-	// statistics-only flow. We default smart-on because the
-	// template-only output ("hint allow → ... on <add scope>") is
-	// almost never what the user wants, but offline users + CI need
-	// an opt-out.
+	// statistics-only flow. --list / -l prints non-interactive findings
+	// and candidate rules (also auto-selected when stdin is not a terminal
+	// so skills and pipes never hang on /dev/tty). --json emits structured JSON.
 	basic := false
+	listMode := false
+	jsonMode := false
 	for _, a := range args {
 		switch a {
 		case "--basic":
 			basic = true
+		case "--list", "-l":
+			listMode = true
+		case "--json":
+			jsonMode = true
 		case "--help", "-h":
-			fmt.Println("Usage: yolonot suggest [--basic]")
+			fmt.Println("Usage: yolonot suggest [--list | --json] [--basic]")
 			fmt.Println()
-			fmt.Println("  --basic   Skip LLM-driven action recommendation; show only the")
-			fmt.Println("            statistics-derived hint/rule templates.")
+			fmt.Println("  --list, -l  Print findings and candidate rules without interactive TUI")
+			fmt.Println("  --json      Emit findings and candidate rules as JSON")
+			fmt.Println("  --basic     Skip LLM-driven action recommendation; show only the")
+			fmt.Println("              statistics-derived hint/rule templates.")
 			return
 		}
+	}
+	if !listMode && !jsonMode && !stdinIsTerminal() {
+		listMode = true
 	}
 
 	entries := ReadRecentDecisions(10000) // read all
 	if len(entries) == 0 {
+		if jsonMode {
+			fmt.Println(`{"analyzed":0,"findings":[],"candidates":[]}`)
+			return
+		}
 		fmt.Println("No decision log found. Use yolonot for a while first.")
 		return
 	}
 
+	cwd, _ := os.Getwd()
 	existingRules := LoadRules()
 	findings := collectEvolveFindings(entries, existingRules)
+	candidates := collectLearningCandidates(cwd, entries, existingRules)
 
-	if len(findings) == 0 {
+	if len(findings) == 0 && len(candidates) == 0 {
+		if jsonMode {
+			fmt.Printf(`{"analyzed":%d,"findings":[],"candidates":[]}`+"\n", len(entries))
+			return
+		}
 		fmt.Println("No patterns found worth promoting. Use yolonot more to build history.")
 		return
 	}
-
-	fmt.Printf("SUGGEST: Analyzed %d decisions\n\n", len(entries))
 
 	// Smart-suggest cache: persisted across runs so a tuning session
 	// doesn't re-pay LLM cost for already-judged patterns. Loaded
 	// once, written eagerly per new judgment in cachedOrSmart.
 	cache := loadSuggestCache()
 	smartEnabled := !basic && GetLLMConfig().URL != "" && GetLLMConfig().Model != ""
+
+	if jsonMode {
+		type jsonFinding struct {
+			evolveFinding
+			Recommended *SmartSuggestion `json:"recommended,omitempty"`
+		}
+		outFindings := make([]jsonFinding, 0, len(findings))
+		for _, f := range findings {
+			jf := jsonFinding{evolveFinding: f}
+			if smartEnabled {
+				if s, ok := cachedOrSmart(f, &cache); ok && s.Action != "skip" {
+					jf.Recommended = &s
+				}
+			}
+			outFindings = append(outFindings, jf)
+		}
+		payload := struct {
+			Analyzed   int                 `json:"analyzed"`
+			Findings   []jsonFinding       `json:"findings"`
+			Candidates []learningCandidate `json:"candidates"`
+		}{
+			Analyzed:   len(entries),
+			Findings:   outFindings,
+			Candidates: candidates,
+		}
+		if payload.Candidates == nil {
+			payload.Candidates = []learningCandidate{}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(payload)
+		return
+	}
+
+	fmt.Printf("SUGGEST: Analyzed %d decisions\n\n", len(entries))
+
+	if listMode {
+		for i, f := range findings {
+			fmt.Printf("[%d/%d] %s  %q — %s\n", i+1, len(findings), f.Category, f.Pattern, f.Desc)
+			if len(f.Examples) > 0 {
+				fmt.Println("  Examples:")
+				for _, ex := range f.Examples {
+					fmt.Printf("    %s\n", truncateStr(strings.ReplaceAll(ex, "\n", " ⏎ "), 80))
+				}
+			}
+			if smartEnabled {
+				if smart, ok := cachedOrSmart(f, &cache); ok && smart.Action != "skip" {
+					fmt.Printf("  ✦ Recommended: %s\n", smartActionToRule(smart))
+					if smart.Reason != "" {
+						fmt.Printf("    Reason: %s\n", smart.Reason)
+					}
+				}
+			}
+			if f.Category == "SCRIPT NOT SHOWN" {
+				fmt.Printf("  Rule options: allow-path %s  |  ask-path %s\n", f.Pattern, f.Pattern)
+			} else {
+				fmt.Printf("  Hint option:  allow-hint \"%s is read-only routine\"\n", f.Pattern)
+				fmt.Printf("  Rule option:  allow-cmd %s*\n", f.Pattern)
+			}
+			fmt.Println()
+		}
+		if len(candidates) > 0 {
+			printLearningCandidateList(candidates)
+		}
+		return
+	}
+
+	if len(findings) == 0 {
+		printLearningCandidateList(candidates)
+		return
+	}
 
 	var changes []evolveChange
 
@@ -1531,10 +1744,7 @@ suggestLoop:
 		if len(f.Examples) > 0 {
 			fmt.Println("  Examples:")
 			for _, ex := range f.Examples {
-				cmd := ex
-				if len(cmd) > 80 {
-					cmd = cmd[:77] + "..."
-				}
+				cmd := truncateStr(strings.ReplaceAll(ex, "\n", " ⏎ "), 80)
 				fmt.Printf("    %s\n", cmd)
 			}
 		}
@@ -1557,12 +1767,21 @@ suggestLoop:
 		// destructive sibling on next match. Hints are prose that the
 		// LLM reads, so they can describe risk-class boundaries that a
 		// glob can't.
+		isScriptNotShown := f.Category == "SCRIPT NOT SHOWN"
+		ruleAllowItem := fmt.Sprintf("rule allow → allow-cmd %s*  (risk: matches destructive siblings)", f.Pattern)
+		ruleDenyItem := fmt.Sprintf("rule deny  → deny-cmd *%s*  (risk: blocks legit siblings)", f.Pattern)
+		ruleAskItem := fmt.Sprintf("rule ask   → ask-cmd *%s*", f.Pattern)
+		if isScriptNotShown {
+			ruleAllowItem = fmt.Sprintf("rule allow → allow-path %s", f.Pattern)
+			ruleDenyItem = fmt.Sprintf("rule deny  → deny-path %s", f.Pattern)
+			ruleAskItem = fmt.Sprintf("rule ask   → ask-path %s", f.Pattern)
+		}
 		baseItems := []string{
 			fmt.Sprintf("hint allow → allow-hint \"%s on <add scope> is routine\"", f.Pattern),
 			fmt.Sprintf("hint ask   → ask-hint \"%s mutating ops always confirm\"", f.Pattern),
-			fmt.Sprintf("rule allow → allow-cmd %s*  (risk: matches destructive siblings)", f.Pattern),
-			fmt.Sprintf("rule deny  → deny-cmd *%s*  (risk: blocks legit siblings)", f.Pattern),
-			fmt.Sprintf("rule ask   → ask-cmd *%s*", f.Pattern),
+			ruleAllowItem,
+			ruleDenyItem,
+			ruleAskItem,
 			"skip",
 		}
 		var items []string
@@ -1658,12 +1877,24 @@ suggestLoop:
 			defScopeIdx := 0
 			switch idx {
 			case 2:
-				rule = fmt.Sprintf("allow-cmd %s*", f.Pattern)
+				if isScriptNotShown {
+					rule = fmt.Sprintf("allow-path %s", f.Pattern)
+				} else {
+					rule = fmt.Sprintf("allow-cmd %s*", f.Pattern)
+				}
 			case 3:
-				rule = fmt.Sprintf("deny-cmd *%s*", f.Pattern)
+				if isScriptNotShown {
+					rule = fmt.Sprintf("deny-path %s", f.Pattern)
+				} else {
+					rule = fmt.Sprintf("deny-cmd *%s*", f.Pattern)
+				}
 				defScopeIdx = 1
 			case 4:
-				rule = fmt.Sprintf("ask-cmd *%s*", f.Pattern)
+				if isScriptNotShown {
+					rule = fmt.Sprintf("ask-path %s", f.Pattern)
+				} else {
+					rule = fmt.Sprintf("ask-cmd *%s*", f.Pattern)
+				}
 				defScopeIdx = 1
 			}
 			scopeIdx := tuiSelect("Scope", []string{
@@ -1681,6 +1912,10 @@ suggestLoop:
 		default:
 			continue // skip
 		}
+	}
+
+	if len(candidates) > 0 {
+		printLearningCandidateList(candidates)
 	}
 
 	if len(changes) == 0 {
@@ -1703,7 +1938,6 @@ suggestLoop:
 	}
 
 	header := fmt.Sprintf("\n# Suggested by yolonot (%s)\n", time.Now().Format("2006-01-02"))
-	cwd, _ := os.Getwd()
 
 	for _, c := range changes {
 		var path string
@@ -1739,7 +1973,7 @@ func cmdQuiet(args []string) {
 			fmt.Println("  Banners shown for every decision (allow / ask / deny).")
 		}
 		fmt.Println()
-		fmt.Println("Usage: yolonot quiet [on|off]")
+		fmt.Println("Usage: yolonot config quiet [on|off]")
 		return
 	}
 
@@ -1763,18 +1997,7 @@ func cmdQuiet(args []string) {
 	}
 }
 
-// cmdRisk shows or updates the per-harness risk→action map.
-//
-//	yolonot risk                        → print merged map for active harness
-//	yolonot risk <harness>              → print merged map for a named harness
-//	yolonot risk <harness> <tier> <act> → override one cell
-//	yolonot risk <harness> reset        → drop all user overrides for harness
-//	yolonot risk <harness> reset <tier> → drop one user override
-//
-// Actions: allow, ask, deny, passthrough. Tiers: safe, low, moderate, high,
-// critical. Env vars (YOLONOT_<HARNESS>_RISK_<TIER>=<action>) override
-// both config and defaults at runtime; they are shown in the listing but
-// cannot be set via this command.
+// cmdRisk shows or updates the per-harness risk→action map via `yolonot profile`.
 func cmdRisk(args []string) {
 	if len(args) == 0 {
 		h := ActiveHarness()
@@ -1836,7 +2059,7 @@ func cmdRisk(args []string) {
 	}
 
 	if len(args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: yolonot risk <harness> <tier> <action>")
+		fmt.Fprintln(os.Stderr, "Usage: yolonot profile <harness> <tier> <action>")
 		return
 	}
 	tier, action := args[1], normalizeRiskAction(args[2])

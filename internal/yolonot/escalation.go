@@ -130,7 +130,7 @@ func truncateStr(s string, n int) string {
 // run's script-cache write — otherwise the un-rescued ask freezes into the
 // cross-session cache and the one-shot rescue never re-fires.
 func maybeEscalate(h Harness, cfg Config, d *Decision, sysPrompt, userPrompt string, hookStart time.Time) (out escalationOutcome, cacheOK bool) {
-	return maybeEscalateContext(nil, h, cfg, d, sysPrompt, userPrompt, hookStart)
+	return maybeEscalateContext(context.Background(), h, cfg, d, sysPrompt, userPrompt, hookStart)
 }
 
 func maybeEscalateContext(parent context.Context, h Harness, cfg Config, d *Decision, sysPrompt, userPrompt string, hookStart time.Time) (out escalationOutcome, cacheOK bool) {
@@ -283,7 +283,7 @@ func escalationUnresolvedDeny(cfg Config, out escalationOutcome, d *Decision) (b
 		d.Decision, primaryRisk, out.summary())
 }
 
-// cmdEscalation implements `yolonot escalation [on|off|setup|test]`.
+// cmdEscalation implements `yolonot judges escalation [on|off|setup|test]`.
 func cmdEscalation(args []string) {
 	cfg := LoadConfig()
 
@@ -295,7 +295,7 @@ func cmdEscalation(args []string) {
 	switch strings.ToLower(args[0]) {
 	case "on", "true", "1", "yes", "y":
 		if cfg.Escalation == nil || cfg.Escalation.Model == "" {
-			fmt.Println("Escalation is not configured yet. Run: yolonot escalation setup")
+			fmt.Println("Escalation is not configured yet. Run: yolonot judges escalation setup")
 			return
 		}
 		if !requireV1(&cfg) {
@@ -315,7 +315,7 @@ func cmdEscalation(args []string) {
 		// Keep the model reference — re-enabling must not need a re-setup.
 		cfg.Escalation.Disabled = true
 		mustSaveConfig(cfg)
-		fmt.Println("Escalation: OFF — model reference kept; re-enable with: yolonot escalation on")
+		fmt.Println("Escalation: OFF — model reference kept; re-enable with: yolonot judges escalation on")
 	case "setup":
 		if !requireV1(&cfg) {
 			return
@@ -356,7 +356,7 @@ func cmdEscalation(args []string) {
 	}
 }
 
-// printEscalationStatus renders the bare `yolonot escalation` view.
+// printEscalationStatus renders the escalation section in `yolonot judges` and `yolonot judges escalation`.
 func printEscalationStatus(cfg Config) {
 	esc := GetEscalationConfig()
 
@@ -364,12 +364,12 @@ func printEscalationStatus(cfg Config) {
 	case esc.URL == "" || esc.Model == "":
 		fmt.Println("Escalation: not configured")
 		fmt.Println("  A second, bigger model consulted before surfacing an ask.")
-		fmt.Println("  Set up with: yolonot escalation setup")
+		fmt.Println("  Set up with: yolonot judges escalation setup")
 		return
 	case escalationGateReason(cfg, esc) == "env-off":
 		fmt.Println("Escalation: OFF (YOLONOT_ESCALATION=off in this environment)")
 	case escalationGateReason(cfg, esc) == "disabled":
-		fmt.Println("Escalation: OFF (configured; enable with: yolonot escalation on)")
+		fmt.Println("Escalation: OFF (configured; enable with: yolonot judges escalation on)")
 	default:
 		fmt.Println("Escalation: ON")
 	}
@@ -405,5 +405,5 @@ func printEscalationStatus(cfg Config) {
 		}
 	}
 	fmt.Println()
-	fmt.Println("Usage: yolonot escalation [on|off|setup|test]")
+	fmt.Println("Usage: yolonot judges escalation [on|off|setup|test]")
 }

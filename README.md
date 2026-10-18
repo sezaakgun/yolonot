@@ -19,7 +19,7 @@
 
 yolonot evaluates shell commands before your coding agent runs them. Combine explicit rules, local parsers, external hooks and [model judges](docs/judges.md), then apply a configurable risk policy. Session memory remembers approved commands and rejects repeated denied commands; script approvals track their contents. An optional [escalation model](docs/models.md#escalation-second-opinion-model) reviews uncertain model verdicts before they reach you.
 
-> **Shared policy, host-specific enforcement.** Each harness exposes different hook and approval capabilities. Check [the adapter behavior](docs/harnesses.md) and `yolonot risk <harness>` for the effective action map. Claude Code also has an optional transcript mod.
+> **Shared policy, host-specific enforcement.** Each harness exposes different hook and approval capabilities. Check [the adapter behavior](docs/harnesses.md) and `yolonot profile <harness>` for the effective action map. Claude Code also has an optional transcript mod.
 
 > Model judgments can be wrong. Use explicit deny rules for commands that must be blocked. yolonot gates shell tool calls; it does not sandbox processes or cover every file, MCP or native tool action. See [security, privacy and failure behavior](docs/security.md).
 
@@ -62,11 +62,11 @@ Restart your host CLI or start a new desktop session to load the hooks, then
 inspect the effective policy:
 
 ```bash
-yolonot risk codex                  # use your harness name
-yolonot config validate
-yolonot doctor --harness codex       # inspect /hooks trust in Codex too
-yolonot effective --harness codex
-yolonot judges list
+yolonot profile codex               # use your harness name
+yolonot doctor --harness codex      # health, hooks, config, escalation latency
+yolonot audit --harness codex       # security, rule lint & host permissions audit
+yolonot status --all --harness codex
+yolonot judges
 yolonot check "git status"          # dry-run without executing the command
 ```
 
@@ -80,12 +80,12 @@ OpenCode V2 has a native plugin integration, including approval prompts.
 Google workflows use Antigravity. yolonot Gemini CLI support has been retired;
 remove old hooks with `yolonot uninstall --harness gemini`. See the dated [version and verification matrix](docs/harnesses.md).
 
-Choose failure handling, learning/retention and the total decision budget
+Choose failure handling, risk policy and the total decision budget
 through settings or [configuration](docs/configuration.md). Native
 `approve`, `deny` and `reset` commands work across harnesses. Start from a
-reviewed [example config](examples/) and validate it before installation.
+reviewed [example config](examples/) and validate it with `yolonot doctor` before installation.
 
-An example of `effective` with the local-only configuration (temporary paths
+An example of `yolonot status --all` with the local-only configuration (temporary paths
 shortened for display; hooks have not been installed in this example):
 
 ![Effective policy diagnostics](assets/diagnostics.png)

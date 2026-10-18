@@ -26,8 +26,7 @@ func classifierContextFingerprint(cfg Config, hints WalkupHints, cwd string) str
 		Attach     bool
 		Wrappers   []string
 		Failure    FailurePolicy
-		Learning   LearningConfig
-	}{3, projectRoot(cwd), models, cfg.Judges, cfg.Escalation, cfg.Policy, BuildSystemPrompt(cfg.Prompt, hints), DecisionHints(cfg.Prompt, hints), cfg.AttachOutsideRoot, cfg.Wrappers, cfg.Failure, cfg.Learning})
+	}{3, projectRoot(cwd), models, cfg.Judges, cfg.Escalation, cfg.Policy, BuildSystemPrompt(cfg.Prompt, hints), DecisionHints(cfg.Prompt, hints), cfg.AttachOutsideRoot, cfg.Wrappers, cfg.Failure})
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
@@ -37,7 +36,6 @@ func currentCacheContext(command, cwd string) string {
 		return ""
 	}
 	hints := LoadHints(cwd)
-	addPrecedentHints(&hints, command, cwd)
 	return classifierContextFingerprint(cfg, hints, cwd)
 }
 

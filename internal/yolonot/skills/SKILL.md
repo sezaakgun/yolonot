@@ -1,6 +1,6 @@
 ---
 name: yolonot
-description: Manage yolonot command safety policy, session approvals, decision history, learning, judges and model configuration. Use for yolonot troubleshooting and explicit yolonot management requests.
+description: Manage yolonot command safety policy, session approvals, decision history, rule suggestions, security audits, judges and model configuration. Use for yolonot troubleshooting and explicit yolonot management requests.
 ---
 
 <!-- yolonot-managed-skill -->
@@ -51,42 +51,54 @@ chat. Pass `--session-id <id>` explicitly to mutations and session profile pins.
 
 ## Diagnostics and inspection
 
-- No arguments: show `yolonot status` with the identity caveat above, then a
-  short menu of the workflows below.
-- `yolonot doctor --harness {{HARNESS}}`: check installation and configuration.
+- No arguments: show `yolonot status` (or `yolonot status --all` for session +
+  effective policy in one call, or `yolonot status --json --harness {{HARNESS}}`
+  for structured output) with the identity caveat above, then a short menu of
+  the workflows below.
+- `yolonot doctor --harness {{HARNESS}}`: check installation, `config.json`
+  validity, host versions, configured models, judge chain and escalation
+  latency, plus a 1-line summary pointer when security/policy warnings exist.
   `--probe-models` additionally makes real provider requests; may incur charges.
-- `yolonot effective --harness {{HARNESS}}`: resolved policy and controls.
-- `yolonot config validate`: validate configuration without changing it.
-- `yolonot check '<exact command>'`: classify without executing it. This can
-  contact configured models. It excludes session memory and skips exec judges;
-  it does not reproduce an entire live host approval flow.
+- `yolonot audit --harness {{HARNESS}}`: audit security, broad `allow-cmd`
+  rules in `.yolonot`, policy risk warnings (`attach_outside_root`,
+  `force_allow`, `high=allow`), paused sessions and host permission/sandbox
+  settings (`Bash(*)`, `bypassPermissions`, `approval_policy = "never"`,
+  `sandbox_mode = "danger-full-access"`, `command(*)`, `Shell(*)`).
+- `yolonot check [--cwd <dir>] '<exact command>'`: classify without executing
+  it and print which scripts were attached or withheld. This can contact
+  configured models. It excludes session memory and skips exec judges; it does
+  not reproduce an entire live host approval flow.
 - `yolonot log [n]`: recent decisions; `yolonot log --session <id|current>`:
-  one session's; `yolonot log --human`: durable human answers in this project,
-  excluding allow-once answers, followed by learning candidates.
-- `yolonot stats`: aggregate decision and latency analytics;
-  `--session <id|current>`, `--since today|24h|7d`, `--project <name>`.
+  one session's decisions.
+- `yolonot stats`: aggregate decision and latency analytics, starting with an
+  `Impact` summary (`Auto-approved`, `Speed saved`, `Threats stopped` and top
+  blocked/hardened incidents); `--session <id|current>`, `--since today|24h|7d`,
+  `--project <name>`.
 - Too many asks: run `yolonot stats --session <id>` (or `--since today` when
   the session is unknown; the unfiltered output ranks sessions by asks), then
-  `yolonot log --session <id>` for the individual decisions and
-  `yolonot doctor` for escalation latency. Read the sections on escalation
-  timeouts, repeated asks, inconsistent escalation verdicts and scripts not
-  shown to the judge; report the counts and the commands. Do not parse
+  `yolonot suggest --list` to see repeated-ask buckets, human resolution counts
+  (`approved`, `once`, `rejected`), unseen scripts and exact repeated-ask
+  candidates, and `yolonot doctor` for escalation latency. Do not parse
   `decisions.jsonl` by hand.
-- `yolonot rules --trace`: active rules with their sources.
-- `yolonot profile`, `profile list`, `profile show <name>`: inspect profiles.
-- `yolonot risk {{HARNESS}}`: inspect tier-to-action mapping.
-- `yolonot judges`, `yolonot models`: inspect chain and model catalog.
+- `yolonot rules`: active static rules and LLM hints (`allow-hint`, `ask-hint`,
+  `context`) per file; `yolonot rules --trace`: every loaded rule and hint with
+  source path and line; `yolonot rules config|defaults|review|verify`: inspect
+  merged prompt JSON or review/verify custom hints with the active LLM.
+- `yolonot profile`: active profile and 5-tier risk map for {{HARNESS}};
+  `profile list`, `profile show <name>`, `profile {{HARNESS}}`: inspect profiles
+  and per-harness tier mappings.
+- `yolonot judges`, `yolonot models`: inspect judge chain, escalation status
+  and model catalog.
 - `yolonot models test <name>`: live provider request, not an offline check.
-- `yolonot prompt config|defaults|review|verify`: inspect merged hints/defaults
-  or review their quality; review/verify may call configured models.
-- `yolonot quiet`, `yolonot escalation`: inspect banner and second-opinion state.
-- `yolonot escalation test`: live second-opinion provider test.
-- `yolonot learning status`, `yolonot learning list`: inspect retained hints.
+- `yolonot judges escalation [test]`: inspect or live-test second-opinion
+  escalation.
+- `yolonot config quiet`: inspect banner state.
 - `yolonot migrate --dry-run`: preview legacy configuration migration.
 
-Use the installed binary’s command menu and command usage errors for flags. Removed
-verbs (`provider`, `decision`, `pre-check`, `classifier`, `local-allow`,
-`threshold`) are not current commands.
+Use the installed binary's command menu and command usage errors for flags.
+Retired verbs (`provider`, `decision`, `pre-check`, `classifier`,
+`local-allow`, `threshold`, `learning`, `effective`, `validate`, `prompt`,
+`risk`, `escalation`, `quiet`, `evolve`) are not current commands.
 
 ## Session decisions
 
@@ -102,11 +114,14 @@ When you run these yourself, the hook asks the user to confirm each one; on
 hosts without an ask (Codex) it is denied, so print the command for the user
 to run instead. Pass the command as one quoted argument.
 
-Approval is scoped to the project, session and current script contents. Deny
-removes equivalent approvals. Reset clears this project's session decisions
-and replay records; logs, learned history, pause and profile pins remain.
-Native host Allow once does not create a durable session approval or learning
-record. A host's allow does not imply permission to persist an approval.
+Approval is scoped to the project, session and current script contents. Calls
+that request host sandbox bypass (`[unsandboxed]` in `status` / `log`) skip
+`allow-cmd`/`fast_allow` and use an isolated session bucket
+(`approved_unsandboxed`) so a sandboxed approval never authorizes an
+unsandboxed replay. Deny removes equivalent approvals. Reset clears this
+project's session decisions and replay records; logs, pause and profile pins
+remain. Native host Allow once does not create a durable session approval. A
+host's allow does not imply permission to persist an approval.
 
 Pause is a total bypass of yolonot, session-wide rather than project-scoped.
 Only use on an explicit request to pause protection:
@@ -123,47 +138,55 @@ Do not silently make a persistent global change for a temporary request.
   for a host pin. `profile reset` supports the same scope flags.
   `profile create <name> --base=<existing>` and `profile delete <name>` manage
   custom profiles.
-- Risk: `yolonot risk {{HARNESS}} <tier> <allow|ask|deny|passthrough>`;
-  undo a cell with `yolonot risk {{HARNESS}} reset <tier>`.
+- Risk overrides: `yolonot profile {{HARNESS}} <tier> <allow|force_allow|ask|deny|passthrough>`
+  (`allow` is escalate-only and preserves a model's `ask`; `force_allow`
+  overrides a model's `ask` to `allow` on non-critical tiers; `critical` never
+  allows `allow` or `force_allow`); undo a cell with
+  `yolonot profile {{HARNESS}} reset <tier>` (or `<tier> reset`).
 - Judges: `yolonot judges add <model|fast_allow|exec:/absolute/path>`,
   `judges remove <n|entry>`, `judges move <n|entry> up|down`.
+- Escalation: `yolonot judges escalation on|off|setup|test` manages the
+  second-opinion model when the primary judge returns `ask`.
 - Models: `yolonot models add`, `models add typed`, `models remove <name>`.
   Addition is interactive. Removing a referenced model is refused.
-- `yolonot escalation on|off|setup`: second-opinion controls.
-- `yolonot quiet on|off`: allow banners only; enforcement is unchanged.
+- Quiet banners: `yolonot config quiet on|off` controls allow banners only;
+  enforcement is unchanged.
 - `yolonot config`: interactive editor for policy, failures, time budget,
-  learning, models, judges and prompts. Validate hand-edited JSON before use.
+  models, judges and prompts.
 
 Judges run in order after rules and session memory. Model risk is translated
 through the selected harness/profile policy. Failures follow configured failure
 policy; they do not universally fall through to host permissions. Unsupported
-native asks cannot be assumed to display a dialog. Inspect `effective` first.
+native asks cannot be assumed to display a dialog. Inspect `yolonot status --all`
+first.
 
-## Rules, hints and learning
+## Rules, hints and suggest
 
-`yolonot init` creates missing example rule files. `yolonot suggest` is an
-interactive review of history that can write rules; it needs the user's terminal.
+`yolonot init` creates missing example rule files. `yolonot suggest` analyzes
+`decisions.jsonl` — combining judge verdicts, unseen scripts, escalation
+timeouts and human ask resolutions (`approved`, `once`, `rejected`) — to
+recommend project/global rules or hints.
+- In an interactive user terminal, `yolonot suggest` opens a TUI picker.
+- From this skill or a non-interactive shell, run `yolonot suggest --list` (or
+  `yolonot suggest --json` / `--basic`) to inspect all findings, LLM
+  recommendations and repeated-ask candidates without blocking on a TTY.
+- Propose specific `.yolonot` `allow-hint`, `ask-hint`, `allow-cmd` or
+  `allow-path` entries backed by repeated consistent human approvals, and apply
+  only the rules or hints the user authorizes.
+
 Rule files are project `.yolonot` files and global `~/.yolonot/rules`.
 `allow-cmd`, `ask-cmd`, `deny-cmd` match command patterns; `allow-path`,
 `ask-path`, `deny-path` match executable/script paths. Rules may include a
 trailing quoted explanation. `allow-redirect` permits literal redirect targets
-for the fast allow judge. Use `rules --trace` to inspect discovered sources.
+for the fast allow judge. Use `yolonot rules --trace` to inspect discovered
+sources.
 
 `context`, `allow-hint`, `ask-hint` are model context, not deterministic rules.
-For a learn request, inspect `log --human` (its last section lists commands
-asked repeatedly and allowed each time, with the `yolonot approve` line that
-records a precedent) and existing project hints, propose specific patterns
-backed by repeated consistent answers, and apply only the hints the user
-authorizes. A script the judge could not see (`stats` reports these) is a
-case for an `allow-hint` describing the script, since allow rules never match
-chained commands. Do not generalize a wrapper or command prefix into
-unrestricted approval. Omit secrets and contradictory examples. Do not treat
-allow-once answers as training evidence. Confirm project/global scope if unclear.
-
-`yolonot learning on|off`, `learning retention <days>`, `learning limit <n>`,
-`learning forget '<exact command>'`, `learning clear`, `learning prune` manage
-stored precedent. Explain deletion scope before a requested destructive change;
-clearing precedent does not remove session decisions or explicit rules.
+A script the judge could not see (`SCRIPT NOT SHOWN` in `suggest` / `stats`) is
+a case for an `allow-path` or `allow-hint` describing the script, since
+`allow-cmd` rules never match chained commands. Do not generalize a wrapper or
+command prefix into unrestricted approval. Omit secrets and contradictory
+examples. Confirm project/global scope if unclear.
 
 ## Installation and upgrades
 
