@@ -200,3 +200,100 @@ func TestHookBudgetNoVerdictEmitsAskAndDoesNotApprove(t *testing.T) {
 		t.Fatal("budget exhaustion must ask without writing an approval")
 	}
 }
+
+func TestCheckHonorsHookTimeoutBudgetAndCacheSymlinkGuard(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Setenv("YOLONOT_HARNESS", "claude")
+
+	// 1. cmdCheckIn shares hookBudgetContext (HookTimeout: 1s) across slow judges.
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	SaveConfig(Config{
+		HookTimeout: 1,
+		Models: map[string]ModelConfig{
+			"slow": {URL: server.URL, Model: "slow", Timeout: 30},
+		},
+		Judges: JudgeList{{Use: "slow"}},
+	})
+	repo := t.TempDir()
+	start := time.Now()
+	checkOut := captureStdout(func() {
+		cmdCheckIn("custom-unmatched-cmd --flag", repo)
+	})
+	if time.Since(start) > 3*time.Second || !strings.Contains(checkOut, "budget exhausted") {
+		t.Fatalf("expected cmdCheckIn to stop at 1s HookTimeout budget, elapsed=%v:\n%s", time.Since(start), checkOut)
+	}
+
+	// 2. checkCacheWithScripts refuses symlinked or oversized (>64KB) cache entries,
+	// and openReadOnlyNoFollow refuses symlinks.
+	scriptPath := filepath.Join(repo, "run.py")
+	if err := os.WriteFile(scriptPath, []byte("print('hi')\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(repo, "link.py")
+	if err := os.Symlink(scriptPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := openReadOnlyNoFollow(linkPath); err == nil {
+		f.Close()
+		t.Fatalf("expected openReadOnlyNoFollow to refuse symlink %s", linkPath)
+	}
+
+	cmd := "python3 run.py"
+	saveCache(cmd, repo, &Decision{Decision: "allow", Risk: RiskLow, Reasoning: "ok"})
+	if d := checkCache(cmd, repo); d == nil || d.Decision != "allow" {
+		t.Fatalf("expected valid cache hit before tampering, got %+v", d)
+	}
+
+	hash := scriptHash(cmd, repo)
+	cacheFile := filepath.Join(cacheDir(), hash+".json")
+	victim := filepath.Join(t.TempDir(), "forged.json")
+	rawCache, err := os.ReadFile(cacheFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(victim, rawCache, 0600); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(cacheFile)
+	if err := os.Symlink(victim, cacheFile); err != nil {
+		t.Fatal(err)
+	}
+	if d := checkCache(cmd, repo); d != nil {
+		t.Fatalf("expected checkCache to refuse symlinked cache entry, got %+v", d)
+	}
+
+	os.Remove(cacheFile)
+	if err := os.WriteFile(cacheFile, make([]byte, 70*1024), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if d := checkCache(cmd, repo); d != nil {
+		t.Fatalf("expected checkCache to refuse oversized (>64KB) cache entry, got %+v", d)
+	}
+
+	// 3. EvaluateRulePriority enforces deny > ask > allow and sensitive suppression.
+	rules := []Rule{
+		{Action: "allow", Type: "cmd", Pattern: "cat *"},
+		{Action: "ask", Type: "cmd", Pattern: "cat secret*"},
+		{Action: "deny", Type: "cmd", Pattern: "cat secret-prod*"},
+	}
+	if tr := EvaluateRulePriority("cat secret-prod.txt", rules, []string{"*.txt"}); tr.Match == nil || tr.Match.Action != "deny" {
+		t.Fatalf("expected deny to win over ask/allow/sensitive, got %+v", tr)
+	}
+	if tr := EvaluateRulePriority("cat secret-dev.txt", rules, []string{"*.txt"}); tr.Match == nil || tr.Match.Action != "ask" {
+		t.Fatalf("expected ask to win over allow/sensitive, got %+v", tr)
+	}
+	if tr := EvaluateRulePriority("cat .env", rules, []string{".env"}); tr.Match != nil || tr.AllowCandidate == nil || !tr.Sensitive {
+		t.Fatalf("expected sensitive to suppress allow while recording AllowCandidate and Sensitive, got %+v", tr)
+	}
+}

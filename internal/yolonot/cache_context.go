@@ -26,7 +26,8 @@ func classifierContextFingerprint(cfg Config, hints WalkupHints, cwd string) str
 		Attach     bool
 		Wrappers   []string
 		Failure    FailurePolicy
-	}{3, projectRoot(cwd), models, cfg.Judges, cfg.Escalation, cfg.Policy, BuildSystemPrompt(cfg.Prompt, hints), DecisionHints(cfg.Prompt, hints), cfg.AttachOutsideRoot, cfg.Wrappers, cfg.Failure})
+		Sensitive  []string
+	}{3, projectRoot(cwd), models, cfg.Judges, cfg.Escalation, cfg.Policy, BuildSystemPrompt(cfg.Prompt, hints), DecisionHints(cfg.Prompt, hints), cfg.AttachOutsideRoot, cfg.Wrappers, cfg.Failure, LoadSensitivePatterns(cwd)})
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 

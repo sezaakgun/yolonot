@@ -61,9 +61,7 @@ func Run() {
 			fmt.Fprintf(os.Stderr, "Unknown harness %q\n", name)
 			os.Exit(2)
 		}
-		if os.Getenv("YOLONOT_HARNESS") == "" {
-			os.Setenv("YOLONOT_HARNESS", h.Name())
-		}
+		os.Setenv("YOLONOT_HARNESS", h.Name())
 	}
 	verb := ""
 	if len(os.Args) > 1 {
@@ -167,7 +165,7 @@ func Run() {
 			os.Exit(2)
 		}
 		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "Usage: yolonot check [--cwd <dir>] <command>")
+			fmt.Fprintln(os.Stderr, "Usage: yolonot check [--cwd <dir>] [--harness <name>] <command>")
 			os.Exit(1)
 		}
 		cmdCheckIn(strings.Join(args, " "), cwd)
@@ -307,7 +305,7 @@ func cmdDefault() {
 	fmt.Println("    approve/deny/reset  Manage this project's session decisions")
 	fmt.Println("    pause / resume      Bypass or restore yolonot for current session")
 	fmt.Println("  Policy & Rules:")
-	fmt.Println("    rules [--trace]     Show active rules, hints & sensitive patterns (also: review|verify|defaults)")
+	fmt.Println("    rules [--trace]     Show active rules, hints & sensitive patterns (also: discover|review|verify|defaults)")
 	fmt.Println("    profile             Manage risk profiles & per-harness tier overrides")
 	fmt.Println("    suggest [--list]    Analyze history & human approvals to recommend rules/hints")
 	fmt.Println("  Setup & Models:")
@@ -383,6 +381,7 @@ func cmdSetup() {
 		names = append(names, h.Name())
 	}
 	fmt.Printf("Setup complete. Restart %s to activate.\n", strings.Join(names, ", "))
+	printHostPermissionsNudge("")
 }
 
 func setupTargetsInstalled(targets []Harness) bool {

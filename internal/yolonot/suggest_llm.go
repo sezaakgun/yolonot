@@ -259,13 +259,14 @@ func cachedOrSmart(f evolveFinding, cache *suggestCache) (SmartSuggestion, bool)
 // truncateForDisplay trims a string for TUI labels so long prose or
 // glob patterns don't wrap into terminal noise. Adds ... when cut.
 func truncateForDisplay(s string, max int) string {
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
 	if max <= 3 {
-		return s[:max]
+		return string(runes[:max])
 	}
-	return s[:max-3] + "..."
+	return string(runes[:max-3]) + "..."
 }
 
 // smartActionToRule turns a SmartSuggestion into the literal text we

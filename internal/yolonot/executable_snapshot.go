@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 // Native executable snapshots are local approval evidence only. Binary bytes
@@ -55,7 +54,7 @@ func nativeExecutableIdentity(command, cwd string) (identity, token string) {
 	if err != nil || isSensitivePath(resolved) {
 		return "", token
 	}
-	f, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	f, err := openReadOnlyNoFollow(resolved)
 	if err != nil {
 		return "", token
 	}

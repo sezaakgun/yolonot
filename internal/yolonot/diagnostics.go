@@ -10,8 +10,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/pelletier/go-toml/v2"
 )
 
 type diagnosticCheck struct {
@@ -242,15 +240,25 @@ func broadAllowCmdWarning(pattern string) string {
 	}
 	stem := strings.TrimSpace(strings.TrimSuffix(p, "*"))
 	fields := strings.Fields(stem)
+	if len(fields) == 0 {
+		return ""
+	}
+	head := filepath.Base(fields[0])
 	if len(fields) == 1 {
-		if riskExample, bad := broadAllowHeads[fields[0]]; bad {
+		if riskExample, bad := broadAllowHeads[head]; bad {
 			return fmt.Sprintf("allow-cmd %s runs before the judge and also auto-approves %s; prefer allow-hint or a narrower subcommand pattern", pattern, riskExample)
 		}
 	}
-	if len(fields) == 2 {
-		pair := fields[0] + " " + fields[1]
+	if len(fields) >= 2 {
+		pair := head + " " + fields[1]
 		if pair == "uv run" || pair == "npm run" || pair == "pnpm run" || pair == "bun run" || pair == "go run" || pair == "git push" {
 			return fmt.Sprintf("allow-cmd %s auto-approves arbitrary or remote-mutating %s invocations before the judge", pattern, pair)
+		}
+		if (head == "git") && (fields[1] == "-C" || fields[1] == "-c") {
+			return fmt.Sprintf("allow-cmd %s matches every git subcommand invoked with %s; narrow to specific subcommands", pattern, fields[1])
+		}
+		if riskExample, bad := broadAllowHeads[head]; bad && strings.HasPrefix(fields[1], "-") {
+			return fmt.Sprintf("allow-cmd %s runs before the judge and also auto-approves %s (%s %s); prefer allow-hint or a script path rule", pattern, riskExample, head, fields[1])
 		}
 	}
 	return ""
@@ -405,136 +413,31 @@ func isBroadHostAllowRule(rule string) bool {
 	return false
 }
 
-func auditJSONPermissionsFile(harnessName, path string) []diagnosticCheck {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var raw map[string]interface{}
-	if json.Unmarshal(data, &raw) != nil {
-		return nil
-	}
+func hostPermissionChecks(targets []Harness, cwd string) []diagnosticCheck {
+	summary := DiscoverHostPermissions(cwd, targets...)
 	var checks []diagnosticCheck
-	var allowList []interface{}
-	if perms, ok := raw["permissions"].(map[string]interface{}); ok {
-		if mode, _ := perms["defaultMode"].(string); mode == "bypassPermissions" {
+	for _, f := range summary.HostFiles {
+		for _, alert := range f.PolicyAlerts {
+			checks = append(checks, diagnosticCheck{
+				Name:    alert.Category,
+				Harness: f.Harness,
+				Status:  "warning",
+				Detail:  sanitizeBanner(alert.Detail),
+			})
+		}
+		var broad []string
+		for _, r := range f.Rules {
+			if r.Action == "allow" && (r.BroadWarning != "" || isBroadHostAllowRule(r.Raw)) {
+				broad = append(broad, sanitizeBanner(r.Raw))
+			}
+		}
+		if len(broad) > 0 {
 			checks = append(checks, diagnosticCheck{
 				Name:    "host_permissions",
-				Harness: harnessName,
+				Harness: f.Harness,
 				Status:  "warning",
-				Detail:  fmt.Sprintf("defaultMode is bypassPermissions in %s (bypasses both host prompts and yolonot hooks)", path),
+				Detail:  fmt.Sprintf("broad host allow rule(s) in %s: %s (auto-runs when yolonot passes through or is paused)", sanitizeBanner(f.Path), strings.Join(broad, ", ")),
 			})
-		}
-		allowList, _ = perms["allow"].([]interface{})
-	}
-	if len(allowList) == 0 {
-		allowList, _ = raw["allow"].([]interface{})
-	}
-	var broad []string
-	for _, item := range allowList {
-		if s, ok := item.(string); ok && isBroadHostAllowRule(s) {
-			broad = append(broad, s)
-		}
-	}
-	if len(broad) > 0 {
-		checks = append(checks, diagnosticCheck{
-			Name:    "host_permissions",
-			Harness: harnessName,
-			Status:  "warning",
-			Detail:  fmt.Sprintf("broad host allow rule(s) in %s: %s (auto-runs when yolonot passes through or is paused)", path, strings.Join(broad, ", ")),
-		})
-	}
-	if sb, ok := raw["sandbox"].(map[string]interface{}); ok {
-		if enabled, ok := sb["enabled"].(bool); ok && !enabled {
-			checks = append(checks, diagnosticCheck{
-				Name:    "host_sandbox",
-				Harness: harnessName,
-				Status:  "warning",
-				Detail:  fmt.Sprintf("sandbox.enabled is false in %s", path),
-			})
-		}
-	}
-	return checks
-}
-
-func hostPermissionChecks(targets []Harness, cwd string) []diagnosticCheck {
-	home, _ := os.UserHomeDir()
-	projRoot := projectRoot(cwd)
-	var dirs []string
-	if cwd != "" {
-		dirs = append(dirs, cwd)
-	}
-	if projRoot != "" && projRoot != cwd {
-		dirs = append(dirs, projRoot)
-	}
-	var checks []diagnosticCheck
-	seen := map[string]bool{}
-	checkJSON := func(hName, p string) {
-		if p == "" || seen[hName+"\x00"+p] {
-			return
-		}
-		seen[hName+"\x00"+p] = true
-		checks = append(checks, auditJSONPermissionsFile(hName, p)...)
-	}
-	for _, h := range targets {
-		if h == nil {
-			continue
-		}
-		switch h.Name() {
-		case "claude":
-			dir := claudeConfigDir()
-			checkJSON("claude", filepath.Join(dir, "settings.json"))
-			checkJSON("claude", filepath.Join(dir, "settings.local.json"))
-			for _, d := range dirs {
-				checkJSON("claude", filepath.Join(d, ".claude", "settings.json"))
-				checkJSON("claude", filepath.Join(d, ".claude", "settings.local.json"))
-			}
-		case "codex":
-			tomlPaths := []string{filepath.Join(codexConfigDir(), "config.toml")}
-			for _, d := range dirs {
-				tomlPaths = append(tomlPaths, filepath.Join(d, ".codex", "config.toml"))
-			}
-			for _, p := range tomlPaths {
-				if seen["codex\x00"+p] {
-					continue
-				}
-				seen["codex\x00"+p] = true
-				data, err := os.ReadFile(p)
-				if err != nil {
-					continue
-				}
-				var parsed map[string]interface{}
-				if toml.Unmarshal(data, &parsed) != nil {
-					continue
-				}
-				if ap, _ := parsed["approval_policy"].(string); ap == "never" {
-					checks = append(checks, diagnosticCheck{
-						Name:    "host_permissions",
-						Harness: "codex",
-						Status:  "warning",
-						Detail:  fmt.Sprintf(`approval_policy is "never" in %s (Codex auto-runs passthrough/moderate commands without prompting)`, p),
-					})
-				}
-				if sm, _ := parsed["sandbox_mode"].(string); sm == "danger-full-access" {
-					checks = append(checks, diagnosticCheck{
-						Name:    "host_sandbox",
-						Harness: "codex",
-						Status:  "warning",
-						Detail:  fmt.Sprintf(`sandbox_mode is "danger-full-access" in %s (Codex host sandbox disabled)`, p),
-					})
-				}
-			}
-		case "antigravity":
-			if home != "" {
-				checkJSON("antigravity", filepath.Join(home, ".gemini", "config", "config.json"))
-			}
-		case "cursor":
-			if home != "" {
-				checkJSON("cursor", filepath.Join(home, ".cursor", "cli-config.json"))
-			}
-			for _, d := range dirs {
-				checkJSON("cursor", filepath.Join(d, ".cursor", "cli.json"))
-			}
 		}
 	}
 	return checks

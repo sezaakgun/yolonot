@@ -47,12 +47,13 @@ func cmdClassifier(args []string) {
 }
 
 func printClassifierUsage(w *os.File) {
-	fmt.Fprintln(w, "Usage: yolonot rules [--trace | defaults | config | review | verify]")
+	fmt.Fprintln(w, "Usage: yolonot rules [--trace | discover | defaults | config | review | verify]")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Inspect static rules and LLM classifier prompt customization.")
+	fmt.Fprintln(w, "Inspect static rules, host permissions, and LLM classifier prompt customization.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  --trace    Show every loaded rule and hint with its source file and line")
+	fmt.Fprintln(w, "  discover   Scan host harness settings (managed, user, project) for rules and hints")
 	fmt.Fprintln(w, "  defaults   Print the built-in system prompt and (empty) default hint lists as JSON")
 	fmt.Fprintln(w, "  config     Print the resolved hints (config + walk-up, $defaults expanded) as JSON")
 	fmt.Fprintln(w, "  review     Ask the active LLM provider to flag ambiguous or redundant custom hints")

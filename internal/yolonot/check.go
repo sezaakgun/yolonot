@@ -1,18 +1,18 @@
 package yolonot
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/sezaakgun/yolonot/internal/fastallow"
-	"github.com/sezaakgun/yolonot/internal/glob"
 )
 
-// parseCheckArgs extracts leading check flags (--cwd, --) and rejects unknown
-// leading flags so typos like --session-id are not silently treated as the
-// command to classify.
+// parseCheckArgs extracts leading check flags (--cwd, --harness, --) and rejects
+// unknown leading flags so typos like --session-id are not silently treated as
+// the command to classify.
 func parseCheckArgs(args []string) (rest []string, cwd string, err error) {
 	for len(args) > 0 {
 		a := args[0]
@@ -26,8 +26,29 @@ func parseCheckArgs(args []string) (rest []string, cwd string, err error) {
 			cwd, args = args[1], args[2:]
 		case strings.HasPrefix(a, "--cwd="):
 			cwd, args = strings.TrimPrefix(a, "--cwd="), args[1:]
+		case a == "--harness":
+			if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+				return nil, "", fmt.Errorf("yolonot check: --harness requires a harness name")
+			}
+			h := GetHarness(args[1])
+			if h == nil {
+				return nil, "", fmt.Errorf("yolonot check: unknown harness %q", args[1])
+			}
+			os.Setenv("YOLONOT_HARNESS", h.Name())
+			args = args[2:]
+		case strings.HasPrefix(a, "--harness="):
+			val := strings.TrimSpace(strings.TrimPrefix(a, "--harness="))
+			if val == "" {
+				return nil, "", fmt.Errorf("yolonot check: --harness requires a harness name")
+			}
+			h := GetHarness(val)
+			if h == nil {
+				return nil, "", fmt.Errorf("yolonot check: unknown harness %q", val)
+			}
+			os.Setenv("YOLONOT_HARNESS", h.Name())
+			args = args[1:]
 		case strings.HasPrefix(a, "-"):
-			return nil, "", fmt.Errorf("yolonot check: unknown flag %s (usage: yolonot check [--cwd <dir>] <command>)", a)
+			return nil, "", fmt.Errorf("yolonot check: unknown flag %s (usage: yolonot check [--cwd <dir>] [--harness <name>] <command>)", a)
 		default:
 			return args, cwd, nil
 		}
@@ -46,20 +67,16 @@ func cmdCheckIn(command, cwd string) {
 
 	rules := LoadRules(cwd)
 	sensitive := LoadSensitivePatterns(cwd)
+	trace := EvaluateRulePriority(command, rules, sensitive)
 
 	step := 1
 
 	// Step: Deny rules (same as hook.go step 0)
-	for _, r := range rules {
-		if r.Action == "deny" {
-			if (r.Type == "cmd" && matchCmd(r.Pattern, command)) ||
-				(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && glob.Match(r.Pattern, scriptPathRe.FindStringSubmatch(" " + command)[1])) {
-				fmt.Printf("  [%d] Deny rules:      DENY — matched deny-%s %s\n", step, r.Type, r.Pattern)
-				fmt.Println()
-				fmt.Printf("  → Result: DENY (layer: rule, absolute block)\n")
-				return
-			}
-		}
+	if trace.DenyMatch != nil {
+		fmt.Printf("  [%d] Deny rules:      DENY — matched deny-%s %s\n", step, trace.DenyMatch.Type, trace.DenyMatch.Pattern)
+		fmt.Println()
+		fmt.Printf("  → Result: DENY (layer: rule, absolute block)\n")
+		return
 	}
 	fmt.Printf("  [%d] Deny rules:      no match\n", step)
 	step++
@@ -84,37 +101,17 @@ func cmdCheckIn(command, cwd string) {
 		return
 	}
 
-	// Step: Allow/Ask rules (same as hook.go step 3). Use the SAME priority
-	// matcher the hook uses (deny > ask > allow, file-order-independent) so
-	// the preview can't report ALLOW on a command the gate would ASK — the
-	// first-match MatchRuleWith could pick an earlier allow over a later ask.
-	chains := hasChainOperator(command)
-	sensitiveFile := hasSensitivePathWith(command, sensitive)
-	skipAllow := chains || sensitiveFile
-
-	match := MatchRuleByPriority(command, rules, sensitive)
-
-	if skipAllow {
-		// Report why allow rules were skipped
+	// Step: Allow/Ask rules (same as hook.go step 3), using shared EvaluateRulePriority.
+	match := trace.Match
+	if trace.SkipAllow {
 		var reasons []string
-		if chains {
+		if trace.Chains {
 			reasons = append(reasons, "chain operators")
 		}
-		if sensitiveFile {
+		if trace.Sensitive {
 			reasons = append(reasons, "sensitive files")
 		}
-		// Check if there was an allow rule that would have matched without skipping
-		hasAllowCandidate := false
-		for _, r := range rules {
-			if r.Action == "allow" {
-				if (r.Type == "cmd" && matchCmd(r.Pattern, command)) ||
-					(r.Type == "path" && scriptPathRe.FindStringSubmatch(" "+command) != nil && glob.Match(r.Pattern, scriptPathRe.FindStringSubmatch(" " + command)[1])) {
-					hasAllowCandidate = true
-					break
-				}
-			}
-		}
-		if hasAllowCandidate {
+		if trace.AllowCandidate != nil {
 			fmt.Printf("  [%d] Allow rules:     skipped — command has %s\n", step, strings.Join(reasons, ", "))
 		} else if match != nil && match.Action == "ask" {
 			fmt.Printf("  [%d] Ask rules:       ASK — matched ask-%s %s\n", step, match.Type, match.Pattern)
@@ -150,7 +147,10 @@ func cmdCheckIn(command, cwd string) {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	in := &JudgeInput{Command: command, Cwd: cwd, Rules: rules, Config: checkCfg, Harness: ActiveHarness(), HookStart: time.Now(), DryRun: true}
+	hookStart := time.Now()
+	checkCtx, cancel := hookBudgetContext(context.Background(), hookStart)
+	defer cancel()
+	in := &JudgeInput{Command: command, Cwd: cwd, Rules: rules, Sensitive: sensitive, Config: checkCfg, Harness: ActiveHarness(), HookStart: hookStart, Context: checkCtx, DryRun: true}
 	var adopted *Verdict
 	var lastErr *judgeError
 	for _, spec := range specs {
@@ -171,7 +171,11 @@ func cmdCheckIn(command, cwd string) {
 			continue
 		}
 		if !ok {
-			fmt.Printf("      · %s — fall through\n", spec.Use)
+			if spec.Kind() == judgeFastAllow && trace.Sensitive {
+				fmt.Printf("      · %s — skipped (sensitive)\n", spec.Use)
+			} else {
+				fmt.Printf("      · %s — fall through\n", spec.Use)
+			}
 			continue
 		}
 		raw := v.Decision

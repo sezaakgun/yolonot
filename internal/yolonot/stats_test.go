@@ -606,16 +606,26 @@ func TestStep1SandboxBypassAndHarnessIntegrity(t *testing.T) {
 
 	SaveConfig(Config{
 		Models: map[string]ModelConfig{"test-llm": {URL: srv.URL, Model: "gpt-test"}},
-		Judges: JudgeList{{Use: "test-llm"}},
+		Judges: JudgeList{{Use: "fast_allow"}, {Use: "test-llm"}},
 	})
 
 	t.Setenv("YOLONOT_HARNESS", "claude")
+	// An unsandboxed `ls -la` must NOT auto-allow via `fast_allow` and must reach the LLM judge!
+	unsandboxedFastCmd, _ := json.Marshal(map[string]interface{}{
+		"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "s-iso", "cwd": cwd,
+		"tool_input": map[string]interface{}{"command": "ls -la", "dangerouslyDisableSandbox": true},
+	})
+	outFast := runHookRawInput(t, unsandboxedFastCmd)
+	if !strings.Contains(outFast, `"permissionDecision":"ask"`) || llmCalls != 1 {
+		t.Fatalf("unsandboxed command must bypass fast_allow and reach LLM (calls=%d): %s", llmCalls, outFast)
+	}
+
 	sandboxedPayload, _ := json.Marshal(map[string]interface{}{
 		"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "s-iso", "cwd": cwd,
 		"tool_input": map[string]interface{}{"command": "python3 run.py"},
 	})
 	out1 := runHookRawInput(t, sandboxedPayload)
-	if !strings.Contains(out1, `"permissionDecision":"allow"`) || llmCalls != 1 {
+	if !strings.Contains(out1, `"permissionDecision":"allow"`) || llmCalls != 2 {
 		t.Fatalf("expected sandboxed call to allow via LLM (calls=%d): %s", llmCalls, out1)
 	}
 
@@ -624,14 +634,14 @@ func TestStep1SandboxBypassAndHarnessIntegrity(t *testing.T) {
 		"tool_input": map[string]interface{}{"command": "python3 run.py", "dangerouslyDisableSandbox": true},
 	})
 	out2 := runHookRawInput(t, unsandboxedPayload)
-	if !strings.Contains(out2, `"permissionDecision":"ask"`) || llmCalls != 2 {
+	if !strings.Contains(out2, `"permissionDecision":"ask"`) || llmCalls != 3 {
 		t.Fatalf("unsandboxed call must bypass sandboxed session/cache and re-judge (calls=%d): %s", llmCalls, out2)
 	}
 	if !strings.Contains(lastPrompt, "[Sandbox: agent requested unsandboxed execution") {
 		t.Fatalf("LLM prompt missing sandbox bypass annotation:\n%s", lastPrompt)
 	}
 	decisions := ReadRecentDecisions(10)
-	if len(decisions) < 2 || decisions[0].BypassSandbox || !decisions[1].BypassSandbox {
+	if len(decisions) < 3 || !decisions[0].BypassSandbox || decisions[1].BypassSandbox || !decisions[2].BypassSandbox {
 		t.Fatalf("DecisionEntry.BypassSandbox mismatch: %+v", decisions)
 	}
 

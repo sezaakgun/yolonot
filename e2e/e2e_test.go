@@ -31,7 +31,12 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	yolonotBin = filepath.Join(dir, "yolonot")
-	build := exec.Command("go", "build", "-o", yolonotBin, "..")
+	buildArgs := []string{"build", "-o", yolonotBin}
+	if os.Getenv("GOCOVERDIR") != "" {
+		buildArgs = append(buildArgs, "-cover", "-coverpkg=github.com/sezaakgun/yolonot/...")
+	}
+	buildArgs = append(buildArgs, "..")
+	build := exec.Command("go", buildArgs...)
 	build.Stdout, build.Stderr = os.Stderr, os.Stderr
 	if err := build.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "build yolonot:", err)
@@ -97,13 +102,14 @@ func newSandbox(t *testing.T, policy string) *sandbox {
 	if policy != "" {
 		s.Rules(policy)
 	}
-	for _, k := range []string{"PATH", "TMPDIR", "LANG", "TERM"} {
+	for _, k := range []string{"PATH", "TMPDIR", "LANG", "TERM", "GOCOVERDIR"} {
 		if v, ok := os.LookupEnv(k); ok {
 			s.Env = append(s.Env, k+"="+v)
 		}
 	}
 	s.Env = append(s.Env,
 		"HOME="+home,
+		"YOLONOT_SYSTEM_ROOT="+filepath.Join(home, "sysroot"),
 		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 		"XDG_DATA_HOME="+filepath.Join(home, ".local/share"),
 		"XDG_STATE_HOME="+filepath.Join(home, ".local/state"),
@@ -709,6 +715,37 @@ func TestCrossHarnessBinaryE2E(t *testing.T) {
 			resumeGlobalCmd.Dir, resumeGlobalCmd.Env = wt1, s.Env
 			if out, err := resumeGlobalCmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "resumed globally") {
 				t.Fatalf("%s resume --global failed (err=%v):\n%s", h.name, err, string(out))
+			}
+
+			// Verify read-only `yolonot judges 2>&1` is not treated as a mutating self-policy verb,
+			// while leading-redirect `>/dev/null yolonot pause --global` is still caught as self-policy.
+			checkRedirCmd := exec.Command(yolonotBin, "check", "yolonot judges 2>&1")
+			checkRedirCmd.Dir, checkRedirCmd.Env = wt1, s.Env
+			if out, err := checkRedirCmd.CombinedOutput(); err != nil || strings.Contains(string(out), "self-policy") {
+				t.Errorf("%s check 'yolonot judges 2>&1' should not trigger self-policy (err=%v):\n%s", h.name, err, string(out))
+			}
+			checkLeadRedirCmd := exec.Command(yolonotBin, "check", ">/dev/null yolonot pause --global")
+			checkLeadRedirCmd.Dir, checkLeadRedirCmd.Env = wt1, s.Env
+			if out, err := checkLeadRedirCmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "DENY (layer: rule, self-policy)") {
+				t.Errorf("%s check '>/dev/null yolonot pause --global' should trigger self-policy deny (err=%v):\n%s", h.name, err, string(out))
+			}
+
+			// Verify `sensitive .env` matches both `cat .env` and quote-split `cat .e""nv` in the live binary.
+			s.write("work/main/.yolonot", "allow-hint \"E2E-MAIN-HINT\"\nsensitive .env\n")
+			for _, sensCmd := range []string{"cat .env", `cat .e""nv`} {
+				checkSens := exec.Command(yolonotBin, "check", "--harness", h.name, sensCmd)
+				checkSens.Dir, checkSens.Env = wt1, s.Env
+				if out, err := checkSens.CombinedOutput(); err != nil || !strings.Contains(string(out), "skipped — command has sensitive files") {
+					t.Errorf("%s check %q should detect sensitive .env (err=%v):\n%s", h.name, sensCmd, err, string(out))
+				}
+			}
+
+			// Verify `yolonot rules discover --json` discovers host permissions from the repo.
+			s.write("work/main/.cursor/cli.json", `{"permissions":{"allow":["Shell(pytest:*)"]}}`)
+			discoverCmd := exec.Command(yolonotBin, "rules", "discover", "--json")
+			discoverCmd.Dir, discoverCmd.Env = wt1, s.Env
+			if out, err := discoverCmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "allow-cmd pytest *") {
+				t.Errorf("%s rules discover --json unexpected (err=%v):\n%s", h.name, err, string(out))
 			}
 		})
 	}

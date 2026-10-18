@@ -4,10 +4,17 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+)
+
+var (
+	decisionLogMu       sync.Mutex
+	maxDecisionLogBytes int64 = 16 << 20 // 16 MiB per log file before rotating to decisions.jsonl.1
 )
 
 type DecisionEntry struct {
@@ -93,10 +100,30 @@ func LogDecision(entry DecisionEntry) {
 		entry.ToolUseID = currentToolUseID
 	}
 
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+
+	decisionLogMu.Lock()
+	defer decisionLogMu.Unlock()
+
 	dir := YolonotDir()
 	os.MkdirAll(dir, 0700)
 
 	path := decisionsPath()
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() {
+			return
+		}
+		if maxDecisionLogBytes > 0 && info.Size() >= maxDecisionLogBytes {
+			backup := path + ".1"
+			if binfo, berr := os.Lstat(backup); berr != nil || binfo.Mode().IsRegular() {
+				_ = os.Rename(path, backup)
+			}
+		}
+	}
+
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return
@@ -107,10 +134,6 @@ func LogDecision(entry DecisionEntry) {
 	// and commands frequently embed secrets (Bearer tokens, DB URIs).
 	os.Chmod(path, 0600)
 
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
 	// One write per record: O_APPEND makes a single write atomic, two
 	// writes from concurrent hooks interleave into a glued line + a blank.
 	f.Write(append(data, '\n'))
@@ -118,32 +141,34 @@ func LogDecision(entry DecisionEntry) {
 
 // ReadRecentDecisions reads the last n entries from the decision log.
 func ReadRecentDecisions(n int) []DecisionEntry {
-	f, err := os.Open(decisionsPath())
-	if err != nil {
+	if n <= 0 {
 		return nil
 	}
-	defer f.Close()
-
-	var all []string
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line != "" {
-			all = append(all, line)
+	path := decisionsPath()
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return nil
+	}
+	// Fast path for small tail reads (e.g. FindSessionID(50), cmdLog(20)) on large logs.
+	if n <= 200 {
+		if entries, ok := readTailDecisionsFromFile(path, n); ok {
+			return entries
 		}
 	}
 
-	// Take last n
-	start := 0
-	if len(all) > n {
-		start = len(all) - n
+	lines := readDecisionLinesFromFile(path)
+	if len(lines) < n {
+		if prev := readDecisionLinesFromFile(path + ".1"); len(prev) > 0 {
+			lines = append(prev, lines...)
+		}
 	}
-	recent := all[start:]
-
-	var entries []DecisionEntry
-	for _, line := range recent {
+	if len(lines) == 0 {
+		return nil
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	entries := make([]DecisionEntry, 0, len(lines))
+	for _, line := range lines {
 		var e DecisionEntry
 		if err := json.Unmarshal([]byte(line), &e); err == nil {
 			entries = append(entries, e)
@@ -152,7 +177,101 @@ func ReadRecentDecisions(n int) []DecisionEntry {
 	return entries
 }
 
-// cmdLog shows recent decisions.
+func readTailDecisionsFromFile(path string, n int) ([]DecisionEntry, bool) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return nil, false
+	}
+	window := int64(256 * 1024)
+	if want := int64(n) * 4096; want > window {
+		window = want
+	}
+	if fi.Size() <= window {
+		return nil, false
+	}
+	if _, err := f.Seek(fi.Size()-window, io.SeekStart); err != nil {
+		return nil, false
+	}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// Discard first partial line after seeking into the middle of the file.
+	if !scanner.Scan() {
+		return nil, false
+	}
+	var lines []string
+	for scanner.Scan() {
+		if line := scanner.Text(); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) < n {
+		return nil, false
+	}
+	lines = lines[len(lines)-n:]
+	entries := make([]DecisionEntry, 0, len(lines))
+	for _, line := range lines {
+		var e DecisionEntry
+		if err := json.Unmarshal([]byte(line), &e); err == nil {
+			entries = append(entries, e)
+		}
+	}
+	if len(entries) < n {
+		return nil, false
+	}
+	return entries, true
+}
+
+func readDecisionLinesFromFile(path string) []string {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		if line := scanner.Text(); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func countDecisionLinesFromFile(path string) int {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return 0
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	count := 0
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		if len(scanner.Bytes()) > 0 {
+			count++
+		}
+	}
+	return count
+}
+
 // cmdLog shows the last n decisions, optionally only one session's
 // (session is an id or an id prefix).
 func cmdLog(n int, session ...string) {
@@ -232,14 +351,8 @@ func cmdLog(n int, session ...string) {
 		fmt.Printf("\nTotal: %d decisions logged (session %s).\n", sessionTotal, sessionFilter)
 		return
 	}
-	f, err := os.Open(decisionsPath())
-	if err == nil {
-		total := 0
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			total++
-		}
-		f.Close()
+	total := countDecisionLinesFromFile(decisionsPath()) + countDecisionLinesFromFile(decisionsPath()+".1")
+	if total > 0 {
 		fmt.Printf("\nTotal: %d decisions logged.\n", total)
 	}
 }

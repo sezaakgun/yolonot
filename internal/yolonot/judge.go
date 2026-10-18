@@ -99,6 +99,7 @@ type JudgeInput struct {
 	Cwd       string
 	Canonical []byte // Claude-shape hook JSON, fed to exec judges on stdin
 	Rules     []Rule
+	Sensitive []string
 	Config    Config
 	Harness   Harness
 	HookStart time.Time
@@ -162,6 +163,9 @@ func runJudge(spec JudgeSpec, in *JudgeInput) (v Verdict, ok bool, err error) {
 	}
 	switch spec.Kind() {
 	case judgeFastAllow:
+		if currentBypassSandbox || hasSensitivePathWith(in.Command, in.Sensitive) {
+			return Verdict{}, false, nil
+		}
 		if pass, reason := fastallow.IsLocallySafeWith(in.Command, AllowRedirectPatterns(in.Rules)); pass {
 			return Verdict{Decision: "allow", Risk: RiskSafe, Reason: reason, Layer: "fast_allow"}, true, nil
 		}
@@ -190,7 +194,8 @@ func runJudge(spec JudgeSpec, in *JudgeInput) (v Verdict, ok bool, err error) {
 // snapshot so the cache can never key on bytes the model did not see.
 func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 	attached, withheld := collectScripts(in.Command, in.Cwd)
-	userPrompt := buildPromptFromCollected(in.Command, attached, withheld)
+	userPrompt := buildPromptFromCollectedWithSensitive(in.Command, attached, withheld, in.Sensitive)
+
 	// Oversize is checked before the provider: the abstain policy must
 	// apply even when no model is configured to receive the prompt.
 	if len(userPrompt) > maxClassifierPromptBytes {

@@ -480,7 +480,9 @@ func cmdHook() {
 				dropLineOrVariant(projSessionID, "asked", command)
 				LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "human", Decision: "allow", Source: "ask_approved"})
 			}
-			saveApprovedSnapshot(projSessionID, command, modAnswer.ApprovalHashes)
+			if selfPolicyVerb(command) == "" {
+				saveApprovedSnapshot(projSessionID, command, modAnswer.ApprovalHashes)
+			}
 		}
 		return
 	}
@@ -537,6 +539,13 @@ func cmdHook() {
 	// allow rules, session memory and judges never clear it. Global pause
 	// (--global) is hard-denied so an agent or skill can never execute it.
 	if verb := selfPolicyVerb(command); verb != "" {
+		if !modRun && !strings.HasSuffix(verb, "--global") {
+			if e := modLookupBound(sessionID, payload.ToolUseID, command, cwd); e != nil && e.Layer == "human" {
+				quietOnAllow = true
+				emitHook(hookResponse(e.Decision, e.Layer, e.Reason, command))
+				return
+			}
+		}
 		action := ActionAsk
 		reason := fmt.Sprintf("yolonot %s changes yolonot's own approvals; the user must run or confirm it", verb)
 		if !harnessSupportsAsk(harness) || strings.HasSuffix(verb, "--global") {
@@ -670,7 +679,7 @@ func cmdHook() {
 	// adopted classifier verdict. Session similarity and the script cache
 	// are consulted once, right before the first remote judge.
 	specs := config.JudgeSpecs()
-	in := &JudgeInput{Command: command, Cwd: cwd, Canonical: canonicalInput, Rules: rules,
+	in := &JudgeInput{Command: command, Cwd: cwd, Canonical: canonicalInput, Rules: rules, Sensitive: sensitive,
 		Config: config, Harness: ActiveHarness(), HookStart: hookStart, Context: hookContext}
 	beforeRemote := func() bool {
 		return hookMemoryLookup(hookContext, command, cwd, sessionID, projSessionID, contentStale)
@@ -699,25 +708,7 @@ func cmdHook() {
 			loggedDecision = ActionPassthrough
 		}
 		LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: v.Layer, Decision: loggedDecision, OrigDecision: v.Decision, Risk: v.Risk, Reasoning: v.Reason})
-		if passthrough {
-			codexRecordPre(modSessionID, modCommand, modCwd, modRuleAction, "", v.Layer, "", true)
-			emitHook("")
-			return
-		}
-		switch finalDecision {
-		case "allow":
-			if sessionID != "" {
-				saveApproved(projSessionID, command, cwd)
-			}
-			emitHook(hookResponse("allow", v.Layer, v.Reason, command))
-		case "deny":
-			emitHook(hookResponse("deny", v.Layer, v.Reason, command))
-		default:
-			if sessionID != "" {
-				AppendLine(projSessionID, "asked", command)
-			}
-			emitHook(hookResponse("ask", v.Layer, v.Reason, command))
-		}
+		emitFinalHookVerdict(finalDecision, passthrough, v.Layer, v.Reason, command, cwd, sessionID, projSessionID, nil, false)
 		return
 	}
 
@@ -768,34 +759,41 @@ func cmdHook() {
 	}
 	LogDecision(entry)
 
-	if passthrough {
-		codexRecordPre(modSessionID, modCommand, modCwd, modRuleAction, "", v.Layer, "", true)
-		emitHook("")
-		return
-	}
-	layer := v.Layer
-	switch finalDecision {
-	case "allow":
-		if sessionID != "" {
-			saveApprovedSnapshot(projSessionID, command, v.ApprovalHashes)
-		}
-		emitHook(hookResponse("allow", layer, d.Reasoning, command))
-	case "deny":
-		reason := d.Reasoning
+	reason := d.Reasoning
+	if finalDecision == "deny" {
 		if escOut.Outcome == "hardened" && escOut.Reasoning != "" {
-			// The harden is what turned this into a deny — show the
-			// rationale that caused it, not the milder primary one.
 			reason = escOut.Reasoning
 		}
 		if unresolvedReason != "" {
 			reason = unresolvedReason
 		}
+	}
+	emitFinalHookVerdict(finalDecision, passthrough, v.Layer, reason, command, cwd, sessionID, projSessionID, v.ApprovalHashes, true)
+}
+
+func emitFinalHookVerdict(finalDecision string, passthrough bool, layer, reason, command, cwd, sessionID, projSessionID string, approvalHashes []string, hasSnapshot bool) {
+	if passthrough {
+		codexRecordPre(modSessionID, modCommand, modCwd, modRuleAction, "", layer, "", true)
+		emitHook("")
+		return
+	}
+	switch finalDecision {
+	case "allow":
+		if sessionID != "" {
+			if hasSnapshot {
+				saveApprovedSnapshot(projSessionID, command, approvalHashes)
+			} else {
+				saveApproved(projSessionID, command, cwd)
+			}
+		}
+		emitHook(hookResponse("allow", layer, reason, command))
+	case "deny":
 		emitHook(hookResponse("deny", layer, reason, command))
 	default: // ask
 		if sessionID != "" {
 			AppendLine(projSessionID, "asked", command)
 		}
-		emitHook(hookResponse("ask", layer, d.Reasoning, command))
+		emitHook(hookResponse("ask", layer, reason, command))
 	}
 }
 
@@ -855,25 +853,7 @@ func hookMemoryLookup(ctx context.Context, command, cwd, sessionID, projSessionI
 		// primary decision in the audit trail.
 		Escalated: cached.Escalated, Attached: seen, Withheld: notSeen,
 	})
-	if passthrough {
-		codexRecordPre(modSessionID, modCommand, modCwd, modRuleAction, "", "cache", "", true)
-		emitHook("")
-		return true
-	}
-	switch finalDecision {
-	case "allow":
-		if sessionID != "" {
-			saveApproved(projSessionID, command, cwd)
-		}
-		emitHook(hookResponse("allow", "cache", cached.Reasoning, command))
-	case "deny":
-		emitHook(hookResponse("deny", "cache", cached.Reasoning, command))
-	default: // ask
-		if sessionID != "" {
-			AppendLine(projSessionID, "asked", command)
-		}
-		emitHook(hookResponse("ask", "cache", cached.Reasoning, command))
-	}
+	emitFinalHookVerdict(finalDecision, passthrough, "cache", cached.Reasoning, command, cwd, sessionID, projSessionID, nil, false)
 	return true
 }
 
@@ -1104,6 +1084,9 @@ func checkCacheWithScripts(command, cwd string) (*Decision, []string, []string) 
 	}
 	seen, notSeen := describeCollected(attached, withheld)
 	path := filepath.Join(cacheDir(), hash+".json")
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Size() > 64*1024 {
+		return nil, nil, nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, nil

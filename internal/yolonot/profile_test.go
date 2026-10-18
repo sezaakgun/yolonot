@@ -1,6 +1,13 @@
 package yolonot
 
 import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -387,5 +394,300 @@ func TestResolveActiveProfile_UnknownNameFallsBack(t *testing.T) {
 	p := ResolveActiveProfile(LoadConfig(), &ClaudeHarness{})
 	if p == nil || p.Name != DefaultProfileName {
 		t.Errorf("unknown profile should fall back to %s, got %v", DefaultProfileName, p)
+	}
+}
+
+func TestProfileCLILifecycleAndFlags(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	SaveConfig(Config{ConfigVersion: 1})
+
+	if _, err := parseProfileFlags([]string{"positional"}); err == nil {
+		t.Fatal("expected error on positional arg in parseProfileFlags")
+	}
+	if _, err := parseProfileFlags([]string{"--base"}); err == nil {
+		t.Fatal("expected error on flag without '=' in parseProfileFlags")
+	}
+	if _, err := parseProfileFlags([]string{"--unknown=allow"}); err == nil {
+		t.Fatal("expected error on unknown flag in parseProfileFlags")
+	}
+	flags, err := parseProfileFlags([]string{"--base=strict", "--low=allow"})
+	if err != nil || flags["base"] != "strict" || flags["low"] != "allow" {
+		t.Fatalf("unexpected parseProfileFlags result: %v, err=%v", flags, err)
+	}
+
+	out := captureStdout(func() {
+		cmdProfile([]string{"create", "ci-mode", "--base=strict", "--low=allow"})
+	})
+	if !strings.Contains(out, `Created custom profile "ci-mode"`) {
+		t.Fatalf("expected custom profile creation output, got:\n%s", out)
+	}
+
+	out = captureStdout(func() { cmdProfile([]string{"list"}) })
+	if !strings.Contains(out, "ci-mode") || !strings.Contains(out, "[custom]") || !strings.Contains(out, "[built-in]") {
+		t.Fatalf("expected profile list to include built-in and custom profiles, got:\n%s", out)
+	}
+
+	out = captureStdout(func() { cmdProfile([]string{"show", "ci-mode"}) })
+	if !strings.Contains(out, `Profile "ci-mode" [custom]`) {
+		t.Fatalf("expected custom profile show output, got:\n%s", out)
+	}
+	out = captureStdout(func() { cmdProfile([]string{"show", "fast"}) })
+	if !strings.Contains(out, `Profile "fast" [built-in]`) {
+		t.Fatalf("expected built-in profile show output, got:\n%s", out)
+	}
+
+	// Global, per-harness, and session profile pins + active status output.
+	captureStdout(func() { cmdProfile([]string{"use", "fast"}) })
+	captureStdout(func() { cmdProfile([]string{"use", "ci-mode", "--harness=claude"}) })
+	captureStdout(func() { cmdProfile([]string{"use", "strict", "--session", "--session-id=sess-1234567890"}) })
+
+	t.Setenv("YOLONOT_PROFILE", "balanced")
+	t.Setenv("YOLONOT_CLAUDE_PROFILE", "strict")
+	t.Setenv("CLAUDE_SESSION_ID", "sess-1234567890")
+	out = captureStdout(func() { cmdProfile(nil) })
+	for _, want := range []string{
+		"Active profile: fast (global)",
+		"claude     → ci-mode",
+		"YOLONOT_PROFILE=balanced",
+		"YOLONOT_CLAUDE_PROFILE=strict",
+		"Session pin (sess-123, mid-session): strict",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in active profile output, got:\n%s", want, out)
+		}
+	}
+
+	// Reset session, per-harness, and global overrides, then delete custom profile.
+	out = captureStdout(func() { cmdProfile([]string{"reset", "--session", "--session-id=sess-1234567890"}) })
+	if !strings.Contains(out, "Cleared session profile pin for sess-123.") {
+		t.Fatalf("unexpected session reset output: %s", out)
+	}
+	out = captureStdout(func() { cmdProfile([]string{"reset", "--harness=claude"}) })
+	if !strings.Contains(out, "Cleared profile override for claude.") {
+		t.Fatalf("unexpected harness reset output: %s", out)
+	}
+	out = captureStdout(func() { cmdProfile([]string{"reset", "--harness=claude"}) })
+	if !strings.Contains(out, "No override for claude.") {
+		t.Fatalf("unexpected second harness reset output: %s", out)
+	}
+	out = captureStdout(func() { cmdProfile([]string{"reset"}) })
+	if !strings.Contains(out, "Global profile reset") {
+		t.Fatalf("unexpected global reset output: %s", out)
+	}
+	out = captureStdout(func() { cmdProfile([]string{"reset"}) })
+	if !strings.Contains(out, "Global profile already at default") {
+		t.Fatalf("unexpected second global reset output: %s", out)
+	}
+
+	// Per-harness tier dispatch via cmdProfile ("set", "<harness>", "reset <harness>").
+	captureStdout(func() { cmdProfile([]string{"set", "claude", "low", "ask"}) })
+	captureStdout(func() { cmdProfile([]string{"claude"}) })
+	captureStdout(func() { cmdProfile([]string{"reset", "claude", "low"}) })
+
+	out = captureStdout(func() { cmdProfile([]string{"delete", "ci-mode"}) })
+	if !strings.Contains(out, `Deleted custom profile "ci-mode".`) {
+		t.Fatalf("unexpected delete output: %s", out)
+	}
+}
+
+func TestCLISubcommandsEndToEndInProcess(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	repo := filepath.Join(home, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok — safe explanation"}}]}`))
+	}))
+	defer llmSrv.Close()
+
+	// 1. Models & Escalation CLI lifecycle.
+	out := captureStdout(func() { cmdModels(nil) })
+	if !strings.Contains(out, "Models: none") {
+		t.Fatalf("expected empty models output, got: %s", out)
+	}
+	out = captureStdout(func() { cmdEscalation(nil) })
+	if !strings.Contains(out, "Escalation: not configured") {
+		t.Fatalf("expected unconfigured escalation output, got: %s", out)
+	}
+	captureStdout(func() { cmdEscalation([]string{"on"}) })
+	captureStdout(func() { cmdEscalation([]string{"off"}) })
+
+	cfg := Config{
+		ConfigVersion: 1,
+		Models: map[string]ModelConfig{
+			"primary-chat": {URL: llmSrv.URL + "/v1/chat/completions", Model: "gpt-test", Protocol: "chat", EnvKey: "OPENAI_API_KEY"},
+			"esc-chat":     {URL: llmSrv.URL + "/v1/chat/completions", Model: "gpt-esc", Protocol: "chat", EnvKey: "OPENAI_API_KEY"},
+			"unused-model": {URL: llmSrv.URL + "/v1/chat/completions", Model: "gpt-unused", Protocol: "chat"},
+		},
+		Judges:     []JudgeSpec{{Use: "primary-chat"}},
+		Escalation: &EscalationConfig{Model: "esc-chat"},
+	}
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	SaveConfig(cfg)
+
+	out = captureStdout(func() { cmdModels([]string{"list"}) })
+	if !strings.Contains(out, "primary-chat") || !strings.Contains(out, "judge #1") || !strings.Contains(out, "escalation") {
+		t.Fatalf("unexpected models list output:\n%s", out)
+	}
+	out = captureStdout(func() { cmdModels([]string{"test", "primary-chat"}) })
+	if !strings.Contains(out, "ok") {
+		t.Fatalf("expected models test ok, got: %s", out)
+	}
+	out = captureStdout(func() { cmdModels([]string{"remove", "unused-model"}) })
+	if !strings.Contains(out, "Removed unused-model.") {
+		t.Fatalf("expected model removal output, got: %s", out)
+	}
+
+	LogDecision(DecisionEntry{
+		Command:           "kubectl apply -f x.yaml",
+		Decision:          "allow",
+		Layer:             "llm",
+		Escalated:         true,
+		EscalationOutcome: "rescued",
+		EscalationMs:      120,
+	})
+	out = captureStdout(func() { cmdEscalation(nil) })
+	if !strings.Contains(out, "Escalation: ON") || !strings.Contains(out, "1 fired, 1 rescued") {
+		t.Fatalf("unexpected escalation status output:\n%s", out)
+	}
+	out = captureStdout(func() { cmdEscalation([]string{"off"}) })
+	if !strings.Contains(out, "Escalation: OFF") {
+		t.Fatalf("unexpected escalation off output: %s", out)
+	}
+	out = captureStdout(func() { cmdEscalation([]string{"on"}) })
+	if !strings.Contains(out, "Escalation: ON") {
+		t.Fatalf("unexpected escalation on output: %s", out)
+	}
+	out = captureStdout(func() { cmdEscalation([]string{"test"}) })
+	if !strings.Contains(out, "ok (") {
+		t.Fatalf("unexpected escalation test output: %s", out)
+	}
+
+	// 2. Pause & Resume CLI (global and session-scoped).
+	out = captureStdout(func() { cmdPause([]string{"--global"}) })
+	if !strings.Contains(out, "total safety-layer bypass") {
+		t.Fatalf("expected global pause confirmation prompt, got: %s", out)
+	}
+	out = captureStdout(func() { cmdPause([]string{"--global", "--confirm-bypass"}) })
+	if !strings.Contains(out, "paused globally") {
+		t.Fatalf("expected global pause activation, got: %s", out)
+	}
+	out = captureStdout(func() { cmdResume([]string{"--global"}) })
+	if !strings.Contains(out, "resumed globally") {
+		t.Fatalf("expected global resume, got: %s", out)
+	}
+	out = captureStdout(func() { cmdResume([]string{"--global"}) })
+	if !strings.Contains(out, "not paused globally") {
+		t.Fatalf("expected not paused globally message, got: %s", out)
+	}
+
+	captureStdout(func() { cmdPause([]string{"--session-id=sess-p1", "--confirm-bypass"}) })
+	out = captureStdout(func() { cmdResume([]string{"--session-id=sess-p1"}) })
+	if !strings.Contains(out, "resumed") {
+		t.Fatalf("expected session resume, got: %s", out)
+	}
+	out = captureStdout(func() { cmdResume([]string{"--session-id=sess-p1"}) })
+	if !strings.Contains(out, "not paused") {
+		t.Fatalf("expected not paused message on second resume, got: %s", out)
+	}
+
+	// 3. Session decisions (approve/deny/reset) & cmdExplain.
+	out = captureStdout(func() {
+		cmdSessionDecision("approve", []string{"--session-id=sess-p1", "--cwd=" + repo, "npm run deploy"})
+	})
+	if !strings.Contains(out, "approve in") {
+		t.Fatalf("unexpected cmdSessionDecision approve output: %s", out)
+	}
+	out = captureStdout(func() {
+		cmdSessionDecision("deny", []string{"--session-id=sess-p1", "--cwd=" + repo, "rm -rf dist"})
+	})
+	if !strings.Contains(out, "deny in") {
+		t.Fatalf("unexpected cmdSessionDecision deny output: %s", out)
+	}
+	captureStdout(func() {
+		cmdSessionDecision("reset", []string{"--session-id=sess-p1", "--cwd=" + repo})
+	})
+
+	out = captureStdout(func() { cmdExplain([]string{"rm", "-rf", "dist"}) })
+	if !strings.Contains(out, "safe explanation") {
+		t.Fatalf("unexpected cmdExplain output: %s", out)
+	}
+
+	// 4. Skill refresh, update error explanation, and provider connection helpers.
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(func() { cmdInstallSkillOnly(Harnesses()) })
+	if !strings.Contains(out, "Skill bundle refreshed.") {
+		t.Fatalf("unexpected cmdInstallSkillOnly output: %s", out)
+	}
+	_ = (&ClaudeHarness{}).Install("/usr/local/bin/yolonot")
+	refreshed := refreshSkillsForInstalled()
+	if len(refreshed) == 0 {
+		t.Fatalf("expected refreshSkillsForInstalled to refresh installed claude skill")
+	}
+
+	if got := explainFetchError(nil); got != "" {
+		t.Fatalf("expected empty explainFetchError(nil), got %q", got)
+	}
+	if got := explainFetchError(context.DeadlineExceeded); !strings.Contains(got, "timeout") {
+		t.Fatalf("expected timeout explanation, got %q", got)
+	}
+	if got := explainFetchError(&net.DNSError{Err: "no such host", Name: "api.github.com"}); !strings.Contains(got, "DNS") {
+		t.Fatalf("expected DNS explanation, got %q", got)
+	}
+	if got := explainFetchError(errors.New("github api returned status 403")); !strings.Contains(got, "rate-limited") {
+		t.Fatalf("expected 403 explanation, got %q", got)
+	}
+	if got := explainFetchError(errors.New("github api returned status 404")); !strings.Contains(got, "not found") {
+		t.Fatalf("expected 404 explanation, got %q", got)
+	}
+
+	// 5. Top-level Run() CLI dispatch across non-interactive subcommands.
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+	for _, argv := range [][]string{
+		{"yolonot", "version"},
+		{"yolonot", "help"},
+		{"yolonot", "init"},
+		{"yolonot", "status", "--all"},
+		{"yolonot", "status", "--json"},
+		{"yolonot", "log", "-n", "3"},
+		{"yolonot", "stats"},
+		{"yolonot", "profile", "list"},
+		{"yolonot", "profile", "claude", "low", "allow"},
+		{"yolonot", "profile", "claude", "reset"},
+		{"yolonot", "models", "list"},
+		{"yolonot", "judges", "list"},
+		{"yolonot", "judges", "add", "fast_allow"},
+		{"yolonot", "judges", "move", "1", "down"},
+		{"yolonot", "judges", "move", "2", "up"},
+		{"yolonot", "judges", "remove", "fast_allow"},
+		{"yolonot", "judges", "escalation"},
+		{"yolonot", "migrate", "--dry-run"},
+		{"yolonot", "rules"},
+		{"yolonot", "rules", "--trace"},
+		{"yolonot", "rules", "discover"},
+		{"yolonot", "suggest", "--list"},
+		{"yolonot", "suggest", "--json"},
+		{"yolonot", "doctor", "--harness=claude", "--json"},
+		{"yolonot", "audit", "--all"},
+		{"yolonot", "audit", "--json"},
+		{"yolonot", "config", "quiet", "on"},
+		{"yolonot", "config", "quiet", "off"},
+		{"yolonot", "check", "--cwd", repo, "ls -la"},
+		{"yolonot", "explain", "git status"},
+		{"yolonot", "uninstall"},
+	} {
+		os.Args = argv
+		_ = captureStdout(func() { Run() })
 	}
 }

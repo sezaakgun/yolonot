@@ -321,7 +321,9 @@ func cmdMod(args []string) {
 		case "allow-session":
 			if snapshotUnchanged {
 				dropLine(proj, "asked", r.Command)
-				saveApprovedSnapshot(proj, r.Command, entry.ApprovalHashes)
+				if selfPolicyVerb(r.Command) == "" {
+					saveApprovedSnapshot(proj, r.Command, entry.ApprovalHashes)
+				}
 				LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "allow", Source: "ask_approved", ToolUseID: r.ToolUseID})
 			}
 			entry.Decision, entry.Reason = "allow", "allowed for this session"

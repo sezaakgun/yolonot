@@ -517,10 +517,7 @@ func printImpactSummary(entries []DecisionEntry, total, allowCount, instantAllow
 		fmt.Printf("    Threats stopped: 0\n")
 	}
 	for _, inc := range collectThreatIncidents(entries) {
-		cmd := strings.ReplaceAll(inc.command, "\n", " ⏎ ")
-		if len(cmd) > 60 {
-			cmd = cmd[:57] + "..."
-		}
+		cmd := truncateStr(strings.ReplaceAll(inc.command, "\n", " ⏎ "), 60)
 		mult := ""
 		if inc.count > 1 {
 			mult = fmt.Sprintf("%dx ", inc.count)

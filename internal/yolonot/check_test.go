@@ -169,6 +169,20 @@ func TestParseCheckArgsAndCheckCwd(t *testing.T) {
 	if _, _, err := parseCheckArgs([]string{"--unknown-flag", "ls"}); err == nil {
 		t.Error("parseCheckArgs should reject unknown leading flag")
 	}
+	if _, _, err := parseCheckArgs([]string{"--harness=", "ls"}); err == nil {
+		t.Error("parseCheckArgs should reject empty --harness=")
+	}
+	if _, _, err := parseCheckArgs([]string{"--harness", "nonexistent", "ls"}); err == nil {
+		t.Error("parseCheckArgs should reject unknown harness")
+	}
+	t.Setenv("YOLONOT_HARNESS", "claude")
+	if _, _, err := parseCheckArgs([]string{"--harness", "codex", "ls"}); err != nil || os.Getenv("YOLONOT_HARNESS") != "codex" {
+		t.Fatalf("parseCheckArgs(--harness codex) should override YOLONOT_HARNESS, got env=%q err=%v", os.Getenv("YOLONOT_HARNESS"), err)
+	}
+	if _, _, err := parseCheckArgs([]string{"--harness=cursor", "ls"}); err != nil || os.Getenv("YOLONOT_HARNESS") != "cursor" {
+		t.Fatalf("parseCheckArgs(--harness=cursor) should override YOLONOT_HARNESS, got env=%q err=%v", os.Getenv("YOLONOT_HARNESS"), err)
+	}
+	t.Setenv("YOLONOT_HARNESS", "claude")
 
 	// Verify cmdCheckIn loads .yolonot rules from the explicit --cwd directory.
 	_, cleanup := withFakeHome(t)

@@ -490,6 +490,9 @@ func cmdInstall() {
 	} else {
 		fmt.Println("Restart your AI coding CLI to activate.")
 	}
+	if len(os.Args) <= 1 || os.Args[1] != "setup" {
+		printHostPermissionsNudge("")
+	}
 }
 
 // isFirstRun returns true when the user looks like they've never finished
@@ -499,7 +502,7 @@ func isFirstRun() bool {
 	if _, err := os.Stat(filepath.Join(YolonotDir(), "rules")); err == nil {
 		return false
 	}
-	if cfg := LoadConfig(); cfg.Provider.Model != "" {
+	if cfg := LoadConfig(); len(cfg.Models) > 0 || cfg.Provider.Model != "" {
 		return false
 	}
 	return true
@@ -978,6 +981,9 @@ func listOllamaModels() []string {
 func cmdRules() {
 	if len(os.Args) > 2 {
 		switch os.Args[2] {
+		case "discover":
+			cmdRulesDiscover(os.Args[3:])
+			return
 		case "defaults", "config", "review", "verify", "help", "-h", "--help":
 			cmdClassifier(os.Args[2:])
 			return
@@ -1062,6 +1068,7 @@ func cmdRules() {
 		fmt.Println()
 		fmt.Println("  Disable with 'not-sensitive *' or remove individual patterns with 'not-sensitive <pattern>'.")
 	}
+	printHostPermissionsNudge("")
 }
 
 // cmdRulesTrace shows every loaded rule with its source path + line number,

@@ -82,8 +82,10 @@ chat. Pass `--session-id <id>` explicitly to mutations and session profile pins.
   `decisions.jsonl` by hand.
 - `yolonot rules`: active static rules and LLM hints (`allow-hint`, `ask-hint`,
   `context`) per file; `yolonot rules --trace`: every loaded rule and hint with
-  source path and line; `yolonot rules config|defaults|review|verify`: inspect
-  merged prompt JSON or review/verify custom hints with the active LLM.
+  source path and line; `yolonot rules discover [--json]`: scan managed, user
+  and project host settings across Claude, Antigravity, Codex, Cursor and
+  OpenCode; `yolonot rules config|defaults|review|verify`: inspect merged prompt
+  JSON or review/verify custom hints with the active LLM.
 - `yolonot profile`: active profile and 5-tier risk map for {{HARNESS}};
   `profile list`, `profile show <name>`, `profile {{HARNESS}}`: inspect profiles
   and per-harness tier mappings.
@@ -191,6 +193,39 @@ a case for an `allow-path` or `allow-hint` describing the script, since
 `allow-cmd` rules never match chained commands. Do not generalize a wrapper or
 command prefix into unrestricted approval. Omit secrets and contradictory
 examples. Confirm project/global scope if unclear.
+
+### Syncing host & managed permissions (`/yolonot sync host permissions`)
+
+When the user asks to sync/import host permissions (or asks why a command
+allowed by their host or organization settings was prompted by yolonot):
+1. Run `yolonot rules discover --json` (or `yolonot rules discover` and
+   `yolonot rules`) to inspect all discovered `managed`, `user` and `project`
+   permission files (`managed-settings.json`, `.claude/settings*.json`,
+   `admin_settings.json`, `~/.gemini/config/projects/<uuid>.json`,
+   `~/.codex/rules/*.rules`, `.cursor/cli.json`, `opencode.json`) alongside
+   active yolonot rules and hints.
+2. Classify each discovered rule and `autoMode` hint using your own reasoning:
+   - **Import as `.yolonot` rule (`allow-path`, `allow-cmd`, `deny-cmd`, `ask-cmd`, `sensitive`)**:
+     Specific plugin/helper script globs (e.g. `allow-path */acme-plugin/*/scripts/*`,
+     `allow-path */acme-ci/*/scripts/*`), bounded subcommands, and all `deny`
+     or `sensitive` entries not already present. Recommend `~/.yolonot/rules`
+     for `managed`/`user` scope and `<repo>/.yolonot` for `project` scope.
+   - **Import or merge as prompt hint (`context`, `allow-hint`, `ask-hint`)**:
+     Compare discovered `autoMode.environment`, `autoMode.allow` and
+     `autoMode.soft_deny` prose against active hints; propose concise
+     non-duplicate `context`, `allow-hint` or `ask-hint` entries for missing
+     organizational or project context.
+   - **Skip — Too broad (explain why)**:
+     Never import broad multiplex or interpreter allow rules such as
+     `allow-cmd git push *`, `allow-cmd git -C *`, `allow-cmd curl *`,
+     `allow-cmd python3 *` or `allow-cmd *`. Explain why they would bypass the
+     judge on destructive or exfiltration subcommands, and offer narrower
+     subcommand rules or an `allow-hint` instead.
+   - **Skip — Already covered**:
+     Omit entries marked `exact_duplicate` or `covered_by_fast_allow` (e.g.
+     `gh pr view *`, `gh pr diff *`, `ls *`).
+3. Present the categorized plan clearly and only write to `~/.yolonot/rules` or
+   `<repo>/.yolonot` after the user confirms the target scope.
 
 ## Installation and upgrades
 

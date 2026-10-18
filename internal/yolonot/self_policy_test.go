@@ -34,10 +34,109 @@ func TestSelfPolicyVerb(t *testing.T) {
 		"yolonot status":                                  "",
 		"yolonot profile list":                            "",
 		"yolonot profile":                                 "",
+		"yolonot judges 2>&1":                                                                     "",
+		"cd ~/workspace; yolonot judges 2>&1 | head -20; yolonot judges escalation 2>&1 | head -12": "",
+		"yolonot judges >/dev/null 2>&1":               "",
+		"yolonot judges > /dev/null":                   "",
+		"yolonot judges 2> /dev/null":                  "",
+		"yolonot profile 2>&1":                         "",
+		"yolonot profile claude 2>&1":                  "",
+		"yolonot config quiet 2>&1":                    "",
+		"yolonot judges escalation on 2>&1":            "judges",
+		"yolonot judges > /dev/null escalation on":     "judges",
+		">/dev/null yolonot pause --global":            "pause --global",
+		"2>&1 yolonot pause --global":                  "pause --global",
+		"2>/dev/null yolonot approve 'rm -rf /'":       "approve",
+		"> /dev/null yolonot judges escalation on":     "judges",
+		"yolonot pause>/dev/null":                      "pause",
+		"yolonot>/dev/null pause":                      "pause",
+		"yolonot pause --global>/dev/null":             "pause --global",
+		"yolonot >| /dev/null pause --global":          "pause --global",
+		"sh -c 'yolonot pause --global' 2>&1":          "pause --global",
+		"bash -lc 'yolonot approve x' >/dev/null 2>&1": "approve",
+		"env -i yolonot pause --global":                "pause --global",
+		"/usr/bin/env -i FOO=1 yolonot pause":          "pause",
+		"command -- yolonot approve 'rm -rf /'":        "approve",
+		"nohup yolonot uninstall":                      "uninstall",
 	} {
 		if got := selfPolicyVerb(cmd); got != want {
 			t.Errorf("%q: got %q, want %q", cmd, got, want)
 		}
+	}
+}
+
+func TestWildcardPathRulesAndQuotedScriptPath(t *testing.T) {
+	rules := []Rule{
+		{Action: "allow", Type: "cmd", Pattern: "*/acme-plugin/*/scripts/run-check.sh*"},
+		{Action: "allow", Type: "path", Pattern: "*/acme-plugin/*/scripts/record-result.js"},
+	}
+
+	// 1. Direct & interpreter execution of allow-cmd */... matches
+	for _, cmd := range []string{
+		"/Users/test/acme-plugin/1.0/scripts/run-check.sh --run",
+		"bash /Users/test/acme-plugin/1.0/scripts/run-check.sh --run",
+		"node '/Users/test/acme-plugin/2.1.0/scripts/record-result.js' --status ok",
+	} {
+		m := MatchRuleByPriority(cmd, rules, nil)
+		if m == nil || m.Action != "allow" {
+			t.Errorf("MatchRuleByPriority(%q) = %+v, want allow", cmd, m)
+		}
+	}
+
+	// 2. echo with path in argument does NOT match allow-cmd */...
+	if m := MatchRuleByPriority("echo /Users/test/acme-plugin/1.0/scripts/run-check.sh", rules, nil); m != nil {
+		t.Errorf("echo argument should not match allow-cmd */..., got %+v", m)
+	}
+}
+
+func TestSelfPolicyModReplayDoesNotAskTwice(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	defer func() {
+		modRun = false
+		modSessionID = ""
+		modToolUseID = ""
+		currentBypassSandbox = false
+	}()
+	projectDir := t.TempDir()
+	cmd := "yolonot judges escalation on"
+	sid := "sess-self-mod"
+	toolID := "toolu_self_mod_1"
+	t.Setenv("YOLONOT_HARNESS", "claude")
+
+	// 1. First phase: Claude Mod (YOLONOT_MOD=1) prompts the user once.
+	t.Setenv("YOLONOT_MOD", "1")
+	p1 := makePrePayload(sid, cmd, projectDir)
+	p1.ToolUseID = toolID
+	out1 := runHookWithStruct(t, p1)
+	if d := parseResponse(t, out1).HookSpecificOutput.PermissionDecision; d != "ask" {
+		t.Fatalf("mod phase 1: got %q, want ask", d)
+	}
+
+	// 2. User approves in Claude Mod dialog (`yolonot mod resolve`).
+	t.Setenv("YOLONOT_MOD", "")
+	runModResolve(t, modResolve{SessionID: sid, ToolUseID: toolID, Cwd: projectDir, Command: cmd, Verdict: "allow-session"})
+
+	// 3. Second phase (50ms later): settings.json PreToolUse hook for the same tool_use_id replays allow instead of asking twice.
+	out2 := runHookWithStruct(t, p1)
+	if d := parseResponse(t, out2).HookSpecificOutput.PermissionDecision; d != "allow" {
+		t.Fatalf("settings.json hook replay for same tool_use_id: got %q, want allow", d)
+	}
+
+	// 4. PostToolUse marks the tool_use_id completed and does not persist selfPolicyVerb in session approved list.
+	post := p1
+	post.HookEventName = "PostToolUse"
+	_ = runHookWithStruct(t, post)
+	if ContainsLine(ProjectSessionID(sid, projectDir), "approved", cmd) {
+		t.Fatal("selfPolicyVerb command must not be persisted in session approved list")
+	}
+
+	// 5. A new tool_use_id for the same selfPolicyVerb command asks again.
+	p2 := makePrePayload(sid, cmd, projectDir)
+	p2.ToolUseID = "toolu_self_mod_2"
+	out3 := runHookWithStruct(t, p2)
+	if d := parseResponse(t, out3).HookSpecificOutput.PermissionDecision; d != "ask" {
+		t.Fatalf("subsequent tool_use_id: got %q, want ask", d)
 	}
 }
 
