@@ -212,4 +212,3 @@ func auth0Handler(tokens []string) (bool, string) {
 	}
 	return false, ""
 }
-

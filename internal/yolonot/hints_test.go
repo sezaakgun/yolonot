@@ -268,4 +268,3 @@ func TestWalkupWorktreeAndTrustedHomeParent(t *testing.T) {
 		t.Errorf("untrusted ~/Downloads/.yolonot must not load, got %v", dlHints.AllowHints)
 	}
 }
-

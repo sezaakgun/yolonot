@@ -327,8 +327,8 @@ func TestSessionProfile_RejectsPathTraversal(t *testing.T) {
 		"../../tmp/pwn",
 		"a/b",
 		"foo\\bar",
-		"a..b",         // contains '..'
-		"",             // empty
+		"a..b",                   // contains '..'
+		"",                       // empty
 		strings.Repeat("a", 200), // too long
 	}
 	for _, sid := range bad {

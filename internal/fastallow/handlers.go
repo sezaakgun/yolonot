@@ -817,10 +817,10 @@ var gitSafeActions = map[string]struct{}{
 	"rev-list": {}, "reflog": {}, "whatchanged": {},
 	"diff-tree": {}, "diff-files": {}, "diff-index": {}, "range-diff": {},
 	"format-patch": {}, "difftool": {},
-	"grep":         {},
-	"ls-files":     {}, "ls-tree": {}, "ls-remote": {}, "cat-file": {},
+	"grep":     {},
+	"ls-files": {}, "ls-tree": {}, "ls-remote": {}, "cat-file": {},
 	"verify-commit": {}, "verify-tag": {}, "name-rev": {}, "merge-base": {},
-	"show-ref":     {}, "show-branch": {},
+	"show-ref": {}, "show-branch": {},
 	"check-ignore": {}, "cherry": {}, "for-each-ref": {}, "count-objects": {},
 	"fsck":         {},
 	"var":          {},
@@ -836,10 +836,10 @@ var gitGlobalFlagsWithArg = map[string]struct{}{
 
 var gitGlobalFlagsNoArg = map[string]struct{}{
 	"--no-pager": {}, "--paginate": {}, "-p": {},
-	"--no-replace-objects": {}, "--bare":            {},
-	"--literal-pathspecs":  {}, "--glob-pathspecs":  {},
-	"--noglob-pathspecs":   {}, "--icase-pathspecs": {},
-	"--no-optional-locks":  {},
+	"--no-replace-objects": {}, "--bare": {},
+	"--literal-pathspecs": {}, "--glob-pathspecs": {},
+	"--noglob-pathspecs": {}, "--icase-pathspecs": {},
+	"--no-optional-locks": {},
 }
 
 func gitFindAction(tokens []string) (int, string) {
@@ -1206,10 +1206,10 @@ var ghSafeActions = map[string]struct{}{
 	"list": {}, "view": {}, "status": {}, "diff": {}, "checks": {},
 	"get": {}, "search": {}, "download": {}, "watch": {}, "verify": {},
 	"verify-asset": {}, "trusted-root": {},
-	"token":        {},
-	"logs":         {}, "ports": {},
+	"token": {},
+	"logs":  {}, "ports": {},
 	"field-list": {}, "item-list": {},
-	"check":      {},
+	"check": {},
 }
 
 var ghFlagsWithArg = map[string]struct{}{

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Pre-commit hook: enforce gofmt and go vet on staged Go files.
+set -eu
+
+staged_go=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
+if [ -z "$staged_go" ]; then
+	exit 0
+fi
+
+unformatted=$(gofmt -l $staged_go)
+if [ -n "$unformatted" ]; then
+	echo "gofmt needed on staged files (run: gofmt -w .):" >&2
+	echo "$unformatted" >&2
+	exit 1
+fi
+
+go vet ./...

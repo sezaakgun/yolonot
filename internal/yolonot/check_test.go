@@ -292,4 +292,3 @@ func TestCmdRiskResetBothWordOrdersAndPausedDiagnostics(t *testing.T) {
 	}
 	captureStdout(func() { cmdResume(nil) })
 }
-

@@ -39,7 +39,7 @@ func hasDangerousFlag(tokens []string, danger map[string]struct{}) bool {
 
 var awsGlobalFlagsWithArg = map[string]struct{}{
 	"--region": {}, "--profile": {}, "--output": {},
-	"--endpoint-url":       {},
+	"--endpoint-url":        {},
 	"--cli-connect-timeout": {}, "--cli-read-timeout": {},
 	"--ca-bundle": {}, "--color": {}, "--query": {},
 }
@@ -53,20 +53,20 @@ var awsSafeActionPrefixes = []string{
 
 var awsSafeActionsExact = map[string]struct{}{
 	"ls": {}, "wait": {}, "help": {}, "query": {}, "scan": {},
-	"tail":             {},
-	"receive-message":  {},
-	"batch-get-item":   {},
+	"tail":               {},
+	"receive-message":    {},
+	"batch-get-item":     {},
 	"transact-get-items": {},
-	"batch-get-image":  {},
-	"start-query":      {}, "stop-query": {},
+	"batch-get-image":    {},
+	"start-query":        {}, "stop-query": {},
 }
 
 var awsUnsafeExceptions = map[string]struct{}{
-	"assume-role":                  {},
-	"assume-role-with-saml":        {},
+	"assume-role":                   {},
+	"assume-role-with-saml":         {},
 	"assume-role-with-web-identity": {},
-	"get-secret-value":             {},
-	"start-image-scan":             {},
+	"get-secret-value":              {},
+	"start-image-scan":              {},
 }
 
 var awsUnsafeActionKeywords = map[string]struct{}{
@@ -87,16 +87,16 @@ var awsAlwaysSafeServices = map[string]struct{}{
 }
 
 var awsStsSafeActions = map[string]struct{}{
-	"get-caller-identity":           {},
-	"get-session-token":             {},
-	"get-access-key-info":           {},
-	"get-federation-token":          {},
-	"decode-authorization-message":  {},
+	"get-caller-identity":          {},
+	"get-session-token":            {},
+	"get-access-key-info":          {},
+	"get-federation-token":         {},
+	"decode-authorization-message": {},
 }
 
 // awsSafeCommands — specific (service, action) pairs.
 var awsSafeCommands = map[string]map[string]struct{}{
-	"s3":    {"ls": {}},
+	"s3": {"ls": {}},
 	"s3api": {
 		"list-buckets": {}, "list-objects": {}, "list-objects-v2": {},
 		"head-object": {}, "head-bucket": {},
@@ -126,8 +126,8 @@ var awsSafeCommands = map[string]map[string]struct{}{
 		"filter-log-events": {}, "get-log-events": {},
 	},
 	"ssm": {
-		"describe-parameters":    {},
-		"get-parameter":          {}, "get-parameters": {},
+		"describe-parameters": {},
+		"get-parameter":       {}, "get-parameters": {},
 		"get-parameters-by-path": {},
 	},
 	"secretsmanager": {"list-secrets": {}, "describe-secret": {}},
@@ -293,11 +293,11 @@ var gcloudFlagsWithArg = map[string]struct{}{
 var gcloudSafeActionKeywords = map[string]struct{}{
 	"describe": {}, "list": {}, "get": {}, "show": {},
 	"info": {}, "status": {}, "version": {},
-	"get-credentials":        {},
-	"list-tags":              {},
-	"list-grantable-roles":   {},
-	"read":                   {},
-	"configurations":         {},
+	"get-credentials":      {},
+	"list-tags":            {},
+	"list-grantable-roles": {},
+	"read":                 {},
+	"configurations":       {},
 }
 
 var gcloudSafeActionPrefixes = []string{"list-", "describe-", "get-"}
@@ -518,11 +518,11 @@ var azFlagsWithArg = map[string]struct{}{
 	"--assignee": {}, "--scope": {},
 	"--analytics-query": {}, "--wiql": {},
 	"--publisher": {}, "--offer": {}, "--sku": {}, "--urn": {},
-	"--start-time":  {},
-	"--end-time":    {},
-	"--resource":    {},
+	"--start-time":    {},
+	"--end-time":      {},
+	"--resource":      {},
 	"--resource-type": {},
-	"--resource-id": {},
+	"--resource-id":   {},
 }
 
 var azSafeActionKeywords = map[string]struct{}{
@@ -993,16 +993,16 @@ var kubectlSafeSubcommands = map[string]map[string]struct{}{
 
 var kubectlUnsafeSubcommands = map[string]map[string]struct{}{
 	"config": {
-		"set":            {},
-		"set-context":    {},
-		"set-cluster":    {},
+		"set":             {},
+		"set-context":     {},
+		"set-cluster":     {},
 		"set-credentials": {},
-		"delete-context": {},
-		"delete-cluster": {},
-		"delete-user":    {},
-		"use-context":    {},
-		"use":            {},
-		"rename-context": {},
+		"delete-context":  {},
+		"delete-cluster":  {},
+		"delete-user":     {},
+		"use-context":     {},
+		"use":             {},
+		"rename-context":  {},
 	},
 	"rollout": {"restart": {}, "pause": {}, "resume": {}, "undo": {}},
 }
@@ -1024,9 +1024,9 @@ var kubectlDangerousFlags = map[string]struct{}{
 	// Credential overrides — point kubectl at attacker-chosen identity
 	// material, some of which (token, client-certificate) can be used to
 	// exfiltrate when combined with a recording attacker server.
-	"--token":              {},
-	"--client-certificate": {},
-	"--client-key":         {},
+	"--token":                 {},
+	"--client-certificate":    {},
+	"--client-key":            {},
 	"--certificate-authority": {},
 }
 
@@ -1111,18 +1111,18 @@ func kubectlHandler(tokens []string) (bool, string) {
 
 var helmFlagsWithArg = map[string]struct{}{
 	"-n": {}, "--namespace": {},
-	"--kube-context":    {},
-	"--kube-apiserver":  {},
-	"--kube-as-user":    {},
-	"--kube-ca-file":    {},
-	"--kube-token":      {},
-	"--kubeconfig":      {},
-	"--registry-config":   {},
-	"--repository-cache":  {},
-	"--repository-config": {},
-	"--content-cache":     {},
-	"--burst-limit":       {},
-	"--qps":               {},
+	"--kube-context":         {},
+	"--kube-apiserver":       {},
+	"--kube-as-user":         {},
+	"--kube-ca-file":         {},
+	"--kube-token":           {},
+	"--kubeconfig":           {},
+	"--registry-config":      {},
+	"--repository-cache":     {},
+	"--repository-config":    {},
+	"--content-cache":        {},
+	"--burst-limit":          {},
+	"--qps":                  {},
 	"--kube-tls-server-name": {},
 }
 
@@ -1368,12 +1368,12 @@ var npmSafeActions = map[string]struct{}{
 	"help":        {},
 	"help-search": {},
 	"-v":          {}, "--version": {},
-	"get":     {},
-	"root":    {}, "prefix": {}, "bin": {},
+	"get":  {},
+	"root": {}, "prefix": {}, "bin": {},
 	"docs": {}, "home": {}, "bugs": {}, "repo": {},
-	"whoami":   {},
-	"ping":     {},
-	"explain":  {}, "why": {},
+	"whoami":  {},
+	"ping":    {},
+	"explain": {}, "why": {},
 	"pack":       {},
 	"fund":       {},
 	"doctor":     {},
@@ -1504,13 +1504,13 @@ func npmHandler(tokens []string) (bool, string) {
 // -----------------------------------------------------------------------------
 
 var pipSafeActions = map[string]struct{}{
-	"list":    {},
-	"freeze":  {},
-	"show":    {},
-	"search":  {},
-	"check":   {},
-	"config":  {},
-	"help":    {}, "-h": {}, "--help": {},
+	"list":   {},
+	"freeze": {},
+	"show":   {},
+	"search": {},
+	"check":  {},
+	"config": {},
+	"help":   {}, "-h": {}, "--help": {},
 	"version": {}, "-V": {}, "--version": {},
 	"debug":   {},
 	"cache":   {},
@@ -1574,28 +1574,28 @@ func pipHandler(tokens []string) (bool, string) {
 // -----------------------------------------------------------------------------
 
 var cargoSafeActions = map[string]struct{}{
-	"help":    {},
-	"-h":      {}, "--help": {},
+	"help": {},
+	"-h":   {}, "--help": {},
 	"version": {}, "-V": {}, "--version": {},
-	"search":          {},
-	"info":            {},
-	"tree":            {},
-	"metadata":        {},
-	"read-manifest":   {},
-	"locate-project":  {},
-	"pkgid":           {},
-	"verify-project":  {},
-	"check":           {}, "c": {},
-	"clippy":          {},
-	"fmt":             {},
-	"doc":             {},
-	"fetch":           {},
+	"search":         {},
+	"info":           {},
+	"tree":           {},
+	"metadata":       {},
+	"read-manifest":  {},
+	"locate-project": {},
+	"pkgid":          {},
+	"verify-project": {},
+	"check":          {}, "c": {},
+	"clippy":            {},
+	"fmt":               {},
+	"doc":               {},
+	"fetch":             {},
 	"generate-lockfile": {},
-	"update":          {},
-	"vendor":          {},
-	"login":           {},
-	"logout":          {},
-	"owner":           {},
+	"update":            {},
+	"vendor":            {},
+	"login":             {},
+	"logout":            {},
+	"owner":             {},
 }
 
 func cargoHandler(tokens []string) (bool, string) {
@@ -1619,9 +1619,9 @@ var brewSafeActions = map[string]struct{}{
 	"deps": {}, "uses": {}, "options": {},
 	"search": {}, "doctor": {}, "config": {}, "outdated": {},
 	"dr": {}, "-S": {},
-	"missing":   {},
-	"tap-info":  {},
-	"formulae":  {}, "casks": {},
+	"missing":  {},
+	"tap-info": {},
+	"formulae": {}, "casks": {},
 	"log":       {},
 	"cat":       {},
 	"commands":  {},

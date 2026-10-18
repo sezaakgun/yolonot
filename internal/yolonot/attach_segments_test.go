@@ -220,4 +220,3 @@ func TestAttachWorktreeBoundary(t *testing.T) {
 		t.Errorf("unrelated script outside repo family must be withheld:\n%s", prompt)
 	}
 }
-

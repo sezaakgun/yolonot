@@ -180,18 +180,18 @@ type fakeHarness struct {
 	riskMap map[string]string
 }
 
-func (f *fakeHarness) Name() string                              { return "fake-harness-for-tests" }
-func (f *fakeHarness) SettingsPath() string                      { return "" }
-func (f *fakeHarness) SessionIDFromEnv() string                  { return "" }
+func (f *fakeHarness) Name() string                               { return "fake-harness-for-tests" }
+func (f *fakeHarness) SettingsPath() string                       { return "" }
+func (f *fakeHarness) SessionIDFromEnv() string                   { return "" }
 func (f *fakeHarness) ParseHookInput([]byte) (HookPayload, error) { return HookPayload{}, nil }
-func (f *fakeHarness) FormatHookResponse(HookResponse) string    { return "" }
-func (f *fakeHarness) IsInstalled() bool                         { return false }
-func (f *fakeHarness) Install(string) error                      { return nil }
-func (f *fakeHarness) Uninstall() error                          { return nil }
-func (f *fakeHarness) InstallSkill() (string, error)             { return "", nil }
-func (f *fakeHarness) UninstallSkill() error                     { return nil }
-func (f *fakeHarness) IsDetected() bool                          { return false }
-func (f *fakeHarness) RiskMap() map[string]string                { return f.riskMap }
+func (f *fakeHarness) FormatHookResponse(HookResponse) string     { return "" }
+func (f *fakeHarness) IsInstalled() bool                          { return false }
+func (f *fakeHarness) Install(string) error                       { return nil }
+func (f *fakeHarness) Uninstall() error                           { return nil }
+func (f *fakeHarness) InstallSkill() (string, error)              { return "", nil }
+func (f *fakeHarness) UninstallSkill() error                      { return nil }
+func (f *fakeHarness) IsDetected() bool                           { return false }
+func (f *fakeHarness) RiskMap() map[string]string                 { return f.riskMap }
 func (f *fakeHarness) PostInstallNotes() []string                 { return nil }
 
 func unregisterHarness(h Harness) {

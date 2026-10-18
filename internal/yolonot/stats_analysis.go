@@ -595,4 +595,3 @@ func collectThreatIncidents(entries []DecisionEntry) []threatIncident {
 	}
 	return out
 }
-

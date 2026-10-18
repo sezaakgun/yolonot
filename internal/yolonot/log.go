@@ -11,28 +11,28 @@ import (
 )
 
 type DecisionEntry struct {
-	Timestamp        string   `json:"ts"`
-	SessionID        string   `json:"session_id"`
-	Command          string   `json:"command"`
-	Cwd              string   `json:"cwd"`
-	Project          string   `json:"project"`
-	Harness          string   `json:"harness,omitempty"`         // claude | codex | opencode | gemini
-	PermissionMode   string   `json:"permission_mode,omitempty"` // Claude Code only
-	BypassSandbox    bool     `json:"bypass_sandbox,omitempty"`  // agent requested unsandboxed execution
-	AgentID          string   `json:"agent_id,omitempty"`        // subagent or teammate the call came from
-	AgentType        string   `json:"agent_type,omitempty"`
-	ToolUseID        string   `json:"tool_use_id,omitempty"` // joins an ask to the human answer that followed
-	Attached         []string `json:"attached,omitempty"`    // scripts the judge saw
-	Withheld         []string `json:"withheld,omitempty"`    // scripts referenced but not shown, with the reason
-	Layer            string   `json:"layer"`
-	Decision         string   `json:"decision"`
-	OrigDecision     string   `json:"orig_decision,omitempty"`
-	Risk             string   `json:"risk,omitempty"` // safe | low | moderate | high | critical
-	Confidence       float64  `json:"confidence,omitempty"`
-	Short            string   `json:"short,omitempty"` // compact banner label (from LLM)
-	Reasoning    string  `json:"reasoning,omitempty"`
-	Source       string  `json:"source,omitempty"`
-	DurationMs   int64   `json:"duration_ms,omitempty"` // primary LLM call only; escalation time is escalation_ms
+	Timestamp      string   `json:"ts"`
+	SessionID      string   `json:"session_id"`
+	Command        string   `json:"command"`
+	Cwd            string   `json:"cwd"`
+	Project        string   `json:"project"`
+	Harness        string   `json:"harness,omitempty"`         // claude | codex | opencode | gemini
+	PermissionMode string   `json:"permission_mode,omitempty"` // Claude Code only
+	BypassSandbox  bool     `json:"bypass_sandbox,omitempty"`  // agent requested unsandboxed execution
+	AgentID        string   `json:"agent_id,omitempty"`        // subagent or teammate the call came from
+	AgentType      string   `json:"agent_type,omitempty"`
+	ToolUseID      string   `json:"tool_use_id,omitempty"` // joins an ask to the human answer that followed
+	Attached       []string `json:"attached,omitempty"`    // scripts the judge saw
+	Withheld       []string `json:"withheld,omitempty"`    // scripts referenced but not shown, with the reason
+	Layer          string   `json:"layer"`
+	Decision       string   `json:"decision"`
+	OrigDecision   string   `json:"orig_decision,omitempty"`
+	Risk           string   `json:"risk,omitempty"` // safe | low | moderate | high | critical
+	Confidence     float64  `json:"confidence,omitempty"`
+	Short          string   `json:"short,omitempty"` // compact banner label (from LLM)
+	Reasoning      string   `json:"reasoning,omitempty"`
+	Source         string   `json:"source,omitempty"`
+	DurationMs     int64    `json:"duration_ms,omitempty"` // primary LLM call only; escalation time is escalation_ms
 
 	// Escalation fields — set only when the escalation layer was configured
 	// and consulted (or deliberately skipped). Unattended runs have no

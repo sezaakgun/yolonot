@@ -533,4 +533,3 @@ func printImpactSummary(entries []DecisionEntry, total, allowCount, instantAllow
 	}
 	fmt.Println()
 }
-

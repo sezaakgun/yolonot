@@ -353,10 +353,10 @@ func TestCmdClassifierDispatch(t *testing.T) {
 	withIsolatedHome(t, "") // no provider needed for these subcommands
 
 	cases := []struct {
-		name        string
-		args        []string
-		wantStdout  string  // substring expected in captured stdout
-		wantStderr  string  // substring expected in captured stderr (or "")
+		name       string
+		args       []string
+		wantStdout string // substring expected in captured stdout
+		wantStderr string // substring expected in captured stderr (or "")
 	}{
 		{"no args defaults to config",
 			[]string{},

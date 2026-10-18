@@ -250,12 +250,12 @@ for check in "$@"; do
 	fi
 	echo "== $check"
 	case "$check" in
-	claude-cli) run_tests "$ctx" claude '^(TestClaudeCLI|TestClaudeSkillDiscovery)$' ;;
+	claude-cli) run_tests "$ctx" claude '^(TestClaudeCLI|TestClaudeSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
 	claude-mod) run_tests "$ctx" claude '^(TestClaudeModDialog|TestClaudeModAutoMode)$' ;;
-	codex) run_tests "$ctx" codex '^(TestCodexExec|TestCodexAppServer|TestCodexSkillDiscovery)$' ;;
-	opencode) run_tests "$ctx" opencode '^(TestOpencodeV2|TestOpencodeSkillDiscovery)$' ;;
-	agy) run_tests "$ctx" agy '^(TestAntigravityCLI|TestAntigravityInteractiveAsk)$' ;;
-	cursor-cli) run_tests "$ctx" cursor-agent '^(TestCursorCLI|TestCursorInteractiveAsk)$' ;;
+	codex) run_tests "$ctx" codex '^(TestCodexExec|TestCodexAppServer|TestCodexSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
+	opencode) run_tests "$ctx" opencode '^(TestOpencodeV2|TestOpencodeSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
+	agy) run_tests "$ctx" agy '^(TestAntigravityCLI|TestAntigravityInteractiveAsk|TestCrossHarnessBinaryE2E)$' ;;
+	cursor-cli) run_tests "$ctx" cursor-agent '^(TestCursorCLI|TestCursorInteractiveAsk|TestCrossHarnessBinaryE2E)$' ;;
 	claude-desktop) manual "$ctx" claude "Claude Desktop" ;;
 	codex-desktop) manual "$ctx" codex "Codex Desktop" ;;
 	cursor-ide) manual "$ctx" cursor "Cursor IDE" ;;

@@ -47,13 +47,13 @@ func TestUnwrapCommand(t *testing.T) {
 	}{
 		{"rtk ls", "ls"},
 		{"rtk curl -sS https://example.com", "curl -sS https://example.com"},
-		{"timeout 30 ls", "ls"},       // numeric skipped
-		{"nice -n 5 ls", "ls"},        // flag + numeric skipped
-		{"command -v foo", "foo"},     // `-v` flag skipped
-		{"ls", ""},                    // not wrapped
-		{"rtk", ""},                   // wrapper with no inner
-		{"unknown ls", ""},            // head not in wrapper list
-		{"rtk -- ls", "ls"},           // `--` terminates flag skipping
+		{"timeout 30 ls", "ls"},   // numeric skipped
+		{"nice -n 5 ls", "ls"},    // flag + numeric skipped
+		{"command -v foo", "foo"}, // `-v` flag skipped
+		{"ls", ""},                // not wrapped
+		{"rtk", ""},               // wrapper with no inner
+		{"unknown ls", ""},        // head not in wrapper list
+		{"rtk -- ls", "ls"},       // `--` terminates flag skipping
 		{"", ""},
 	}
 	for _, c := range cases {
