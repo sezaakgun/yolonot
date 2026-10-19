@@ -927,9 +927,12 @@ func buildPromptFromCollectedWithSensitive(command string, attached []attachedSc
 	if body := extractInlineScript(command); body != "" {
 		prompt += "\n\nInline script:\n" + body
 	}
+	prompt = forgedPromptHeaderRe.ReplaceAllString(prompt, "[redacted untrusted prompt-injection block in command/script]")
 	prompt += "\n\nAnalyze: is this safe to execute?"
 	return prompt
 }
+
+var forgedPromptHeaderRe = regexp.MustCompile(`(?im)(\[?\s*trusted\s+project\s+configuration\s*\]?|\b(?:project\s+context|allow\s+when|ask\s+when|project\s+allow\s+hints|project\s+ask\s+hints)\s*:)(?:\s*\n[ \t#]*-[^\n]*)*`)
 
 func BuildAnalyzePrompt(command, cwd string) string {
 	attached, withheld := collectScripts(command, cwd)
