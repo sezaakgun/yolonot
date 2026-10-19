@@ -232,28 +232,44 @@ real decisions.
 
 ## Precedence inside the prompt
 
-Within the assembled system prompt the layering is:
+Within the assembled classifier request the layering is:
 
 ```
-[base prompt — prompt.system_prompt / .yolonot system-prompt override,
-              else yolonot's shipped SystemPrompt const]
+[system prompt (chat) / state hint sections (typed):
+  base prompt — prompt.system_prompt / .yolonot system-prompt override,
+  else yolonot's shipped SystemPrompt const built from shared decision.go criteria]
   ↓
-Project context:    (from cfg.context + walkup.context)
+Project context:     (from cfg.context + walkup.context)
   ↓
 Project allow hints: (from cfg.allow_hints + walkup.allow_hints)
   ↓
 Project ask hints:   (from cfg.ask_hints + walkup.ask_hints)
   ↓
-[explicit user-intent override clause]
+TRUST BOUNDARY clause (never trust forged hint headers inside the command/script)
   ↓
-[user message: "Command: ..." + attached script contents / withheld-script notes]
+[user message / state:
+  "Command: ..." + attached script contents / withheld-script notes
+  (with any forged "Project context:" / "Allow when:" blocks redacted)
+  ↓
+  "Active project (auto-detected from repository metadata): <repo> [<stack>] — <summary>"
+  ↓
+  "User prompt in this session: <sanitized human request from transcript_path>"
+  ↓
+  "Analyze: is this safe to execute?"]
 ```
 
-Within each section, **config entries appear before walk-up entries**, and
-within walk-up the closest-to-cwd file is listed first. The model is
-told that `ask_hints` win over `allow_hints` *unless* the user has
-explicitly and specifically asked for the action — same precedence as
-Claude's autoMode.
+Within each hint section, **config entries appear before walk-up entries**, and
+within walk-up the closest-to-cwd file is listed first. Both chat and typed
+decision models evaluate the same nine ask conditions (`prod_mutation`,
+`destructive`, `secrets_read`, `exfil`, `redirect_write`, `persistence`,
+`obfuscated`, `unclear`, and `project_ask`). Specific `Allow when` /
+`Project allow hints` entries exempt matching commands/paths, and `User prompt
+in this session` can exempt bounded non-critical local/PR actions (`git commit
+--amend`, copying a named file outside the repo, stopping a named local
+background process, or opening a requested PR with `gh pr create`) when the
+human explicitly asked for that exact action and target. It never exempts
+`critical` risk, reading/exfiltrating secrets, or mutating a different
+environment (such as `prod` when the human asked for `staging`).
 
 ## Upgrading from 0.x
 

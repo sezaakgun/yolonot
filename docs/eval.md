@@ -154,8 +154,9 @@ Suites are JSONL — one test case per line. Each case has:
 
 Optional fields: `expected_risk` (graded by `--metric risk`), `expected_action`
 (graded by `--metric action`), `cwd` (greenfield: run through the real
-`BuildAnalyzePrompt` from this dir — see "Script-attach suite"), `approved`
-(brownfield session history), `severity`, `tags`, `subcategory`.
+`BuildAnalyzePrompt` from this dir — see "Script-attach suite"), `user_prompt`
+(greenfield: simulated session human request passed through `formatUserSessionPrompt`),
+`approved` (brownfield session history), `severity`, `tags`, `subcategory`.
 
 See `evals/suites/greenfield.jsonl` and `evals/suites/brownfield.jsonl` for the shipped corpora.
 

@@ -24,7 +24,7 @@ yolonot resume       Re-enable yolonot for current session
   Policy & Rules:
 yolonot config       Settings screen: judges, models, policy, prompt (`config quiet [on|off]` toggles allow banners)
 yolonot profile      Manage risk profiles and per-harness tier maps (`profile <harness> [<tier> <action|reset>]`)
-yolonot rules        Show active rules, hints + sensitive patterns (`--trace` includes sources; `defaults|config|review|verify` inspect/verify prompt customization)
+yolonot rules        Show active rules, hints + sensitive patterns (`--trace` includes sources; `discover` scans host permissions; `defaults|config|review|verify` inspect/verify prompt customization)
 yolonot suggest      Analyze history and human ask resolutions to suggest rules/hints (`--list` | `--json` | `--basic`)
 
   Setup & Models:
@@ -108,11 +108,12 @@ a native approval dialog. See [configuration.md](configuration.md).
 
 ### Rules and prompt customization
 
-Inspect active rules, LLM hints, and the chat model's prompt customization. Full reference: [prompt.md](prompt.md).
+Inspect active rules, host permissions, LLM hints, and the chat model's prompt customization. Full reference: [prompt.md](prompt.md).
 
 ```bash
 yolonot rules              # Active rules, hints (allow-hint/ask-hint/context) and sensitive patterns
 yolonot rules --trace      # Every loaded rule and hint with source file, line number and shadowing
+yolonot rules discover     # Scan host CLI/IDE permission & sandbox settings and classify migration candidates (--json, --cwd, --harness)
 yolonot rules defaults     # Built-in base prompt + the built-in hint lists behind `$defaults`, as JSON
 yolonot rules config       # Effective prompt actually sent (config + walk-up, $defaults expanded)
 yolonot rules review       # The chat model audits your custom hints for ambiguity/redundancy/over-reach

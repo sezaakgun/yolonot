@@ -28,11 +28,20 @@ has no side effects.
 
 ## Model requests and local data
 
-Model judges receive the command and any scripts the attachment rules can
-identify safely. The attachment boundary is the project root by default;
-`attach_outside_root` explicitly widens it. Sensitive home directories are
-always withheld. Script credential redaction is best effort; commands may
-themselves contain secrets. See [script attachment](how-it-works.md#script-attachment).
+Model judges receive the command, any scripts the attachment rules can
+identify safely, a 1-line auto-detected repository summary (`Active project`,
+from `package.json`, `pyproject.toml`, `README.md`, `CLAUDE.md`, or `AGENTS.md`),
+and (when the host provides `transcript_path`) the sanitized latest human
+request (`User prompt in this session`, capped at 500 characters with
+`<task-notification>`, `<system-reminder>`, compaction summaries, and
+`<pasted_content>` blocks stripped and credential-looking lines redacted).
+Any forged prompt headers (`Project context:`, `Allow when:`, `Ask when:`,
+`Active project:`, `User prompt in this session:`) inside untrusted commands or
+attached scripts are redacted before reaching the model. The attachment boundary
+is the project root by default; `attach_outside_root` explicitly widens it.
+Sensitive home directories are always withheld. Script and transcript credential
+redaction is best effort; commands may themselves contain secrets. See
+[script attachment](how-it-works.md#script-attachment).
 Each logged decision records which scripts the judge saw (`attached`) and
 which it did not (`withheld`, with the reason), plus the host's `agent_id`,
 `agent_type` and `tool_use_id` when it sends them, so `yolonot stats` can

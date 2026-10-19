@@ -133,4 +133,4 @@ not-sensitive password
 
 Available patterns (all commented out by default): `.env`, `.pem`, `.key`, `.crt`, `.ssh/`, `.aws/`, `.gnupg/`, `.kube/config`, `credentials`, `secrets`, `password`, `token`, `/etc/shadow`, `/etc/passwd`, `id_rsa`, `id_ed25519`, `.netrc`, `.pgpass`, and more.
 
-Use `yolonot rules` to see current status.
+Use `yolonot rules` to see current status, or `yolonot rules discover [--json] [--cwd <dir>] [--harness <name>]` to scan your host CLI/IDE permission files (`managed-settings.json`, `.claude/settings*.json`, `~/.codex/rules/*.rules`, `.cursor/cli.json`, `opencode.json`, Antigravity `config.json`) for existing allow/ask/deny rules and `autoMode` hints that can be synced into `.yolonot` or `~/.yolonot/rules`.

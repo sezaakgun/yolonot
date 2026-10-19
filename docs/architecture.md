@@ -10,17 +10,20 @@ yolonot/
 │   │   ├── run.go              # command switch + Verbosef + stripGlobalFlags + setup
 │   │   ├── hook.go             # PreToolUse hook handler pipeline
 │   │   ├── llm.go              # LLM client + prompts + claude -p support
+│   │   ├── llm_attach.go       # Script attachment, auto-detected project context, and transcript user-prompt sanitization
 │   │   ├── rules.go            # rule loading + chain/redirect/sensitive detection
+│   │   ├── discover.go         # `rules discover` host permission & sandbox policy scanner
+│   │   ├── open_nofollow_*.go  # O_NOFOLLOW safe file reader for scripts, transcripts, and snapshots
 │   │   ├── session.go          # approved/asked/denied session files
 │   │   ├── config.go           # config + settings.json + install targets + many cmd* handlers
 │   │   ├── classifier.go       # risk tiers + risk map resolution
 │   │   ├── config_v1.go        # model catalog, judge list encoding, v0 → v1 fold
 │   │   ├── judge.go            # the judge chain: fast_allow, exec hooks, typed and chat models
 │   │   ├── budget.go           # shared hook deadline and bounded external judges
-│   │   ├── decision.go         # typed decision-model backend (System One / OpenAI Decisions / Workers AI)
+│   │   ├── decision.go         # shared tier/ask-condition criteria + typed decision-model backend
 │   │   ├── escalation.go       # second-opinion model after the chain (`judges escalation`)
 │   │   ├── profile.go          # risk profiles, per-harness pins & tier maps (`profile` verb)
-│   │   ├── cmd_classifier.go   # `rules` prompt subcommands (defaults / config / review / verify)
+│   │   ├── cmd_classifier.go   # `rules` prompt subcommands (defaults / config / review / verify / discover)
 │   │   ├── suggest_llm.go      # `suggest` smart mode
 │   │   ├── models.go           # `models` and `migrate` verbs
 │   │   ├── tui.go              # text prompts (charmbracelet/huh)
@@ -68,8 +71,8 @@ whose verdict is permitted (`may`) wins. Four kinds, all in `judge.go`:
 |------|-------|------|----------|
 | built-in parser | `fast_allow` | `internal/fastallow` bash AST walk, no network | allow |
 | exec hook | `exec:<path>` | the binary with Claude's PreToolUse JSON on stdin (`runPreCheck`, 3 s timeout) | allow |
-| typed decision model | a catalog entry with a typed protocol (or legacy inferred URL) | one request with the risk-tier choice and nine yes/no conditions (`decision.go`) | allow / ask |
-| chat model | any other catalog name | the system prompt plus `Command: …` and attached scripts (`llm.go`) | allow / ask / deny |
+| typed decision model | a catalog entry with a typed protocol (or legacy inferred URL) | one request with the shared risk-tier criteria and nine independent yes/no ask conditions (`decision.go`) | allow / ask |
+| chat model | any other catalog name | the system prompt built from the same shared tier and ask-condition criteria (`decision.go` + `llm.go`), plus `Command: …`, attached scripts, auto-detected project context, and the sanitized session user prompt (`llm_attach.go`) | allow / ask / deny |
 
 Rules and session memory run before the chain; escalation, the unresolved
 policy and the risk map run once after it (`hook.go`). The pipeline order
