@@ -201,6 +201,7 @@ type EvalMetrics struct {
 	ClassMetrics          map[string]ClassMetrics   `json:"class_metrics"`
 	ConfusionMatrix       map[string]map[string]int `json:"confusion_matrix"`
 	Failures              []FailureInfo             `json:"failures"`
+	Results               []CaseResult              `json:"results,omitempty"`
 }
 
 func computeMetrics(results []CaseResult, cases []EvalCase) EvalMetrics {
@@ -335,6 +336,7 @@ func computeMetrics(results []CaseResult, cases []EvalCase) EvalMetrics {
 		ClassMetrics:          classMetrics,
 		ConfusionMatrix:       matrix,
 		Failures:              failures,
+		Results:               results,
 	}
 }
 

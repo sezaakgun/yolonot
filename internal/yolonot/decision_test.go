@@ -227,3 +227,22 @@ func TestCallDecisionMissingKeyIsNotParseError(t *testing.T) {
 		t.Fatalf("missing key must surface as unavailable, not a parse error: %v", err)
 	}
 }
+
+func TestSystemPromptMatchesDecisionCriteria(t *testing.T) {
+	for _, tier := range allRiskTiers {
+		if !strings.Contains(SystemPrompt, decisionTierCriteria[tier]) {
+			t.Errorf("SystemPrompt missing decisionTierCriteria[%q]", tier)
+		}
+	}
+	for _, c := range decisionAskConditions {
+		if c.id == "project_ask" {
+			continue
+		}
+		for _, want := range []string{c.id, c.question, c.yes, c.no} {
+			if !strings.Contains(SystemPrompt, want) {
+				t.Errorf("SystemPrompt missing %s fragment %q", c.id, want)
+			}
+		}
+	}
+}
+
