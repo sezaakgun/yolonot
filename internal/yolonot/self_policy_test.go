@@ -34,7 +34,7 @@ func TestSelfPolicyVerb(t *testing.T) {
 		"yolonot status":                                  "",
 		"yolonot profile list":                            "",
 		"yolonot profile":                                 "",
-		"yolonot judges 2>&1":                                                                     "",
+		"yolonot judges 2>&1":                             "",
 		"cd ~/workspace; yolonot judges 2>&1 | head -20; yolonot judges escalation 2>&1 | head -12": "",
 		"yolonot judges >/dev/null 2>&1":               "",
 		"yolonot judges > /dev/null":                   "",

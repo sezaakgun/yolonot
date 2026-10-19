@@ -245,4 +245,3 @@ func TestSystemPromptMatchesDecisionCriteria(t *testing.T) {
 		}
 	}
 }
-

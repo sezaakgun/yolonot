@@ -194,7 +194,7 @@ func runJudge(spec JudgeSpec, in *JudgeInput) (v Verdict, ok bool, err error) {
 // snapshot so the cache can never key on bytes the model did not see.
 func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 	attached, withheld := collectScripts(in.Command, in.Cwd)
-	userPrompt := buildPromptFromCollectedWithSensitive(in.Command, attached, withheld, in.Sensitive)
+	userPrompt := buildPromptFromCollectedWithSensitive(in.Command, in.Cwd, attached, withheld, in.Sensitive)
 
 	// Oversize is checked before the provider: the abstain policy must
 	// apply even when no model is configured to receive the prompt.
@@ -239,7 +239,7 @@ func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 		Decision: d.Decision, Risk: d.Risk, Short: d.Short, Reason: d.Reasoning,
 		Layer: spec.Use, Ms: ms, Dec: d, Attached: seen, Withheld: notSeen,
 		CacheKey:       hashCollected(in.Command, attached, withheld),
-		CacheContext:   classifierContextFingerprint(in.Config, hints, in.Cwd),
+		CacheContext:   classifierContextFingerprint(in.Config, hints, in.Command, in.Cwd),
 		ReplayBinding:  replayBinding,
 		ApprovalHashes: approvalHashes,
 		Prompt:         userPrompt, Sys: sysPrompt, CacheOK: true, Override: override,

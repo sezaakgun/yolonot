@@ -27,6 +27,7 @@ type HookPayload struct {
 	BypassSandbox  bool                   `json:"bypass_sandbox,omitempty"`
 	AgentID        string                 `json:"agent_id,omitempty"` // Claude Code, subagent and teammate calls
 	AgentType      string                 `json:"agent_type,omitempty"`
+	TranscriptPath string                 `json:"transcript_path,omitempty"`
 }
 
 func extractToolInputBypassSandbox(toolInput map[string]interface{}) bool {
@@ -92,6 +93,9 @@ var currentBypassSandbox bool
 // currentAgentID, currentAgentType and currentToolUseID mirror the same
 // payload fields into every decision logged by this invocation.
 var currentAgentID, currentAgentType, currentToolUseID string
+
+// currentTranscriptPath mirrors HookPayload.TranscriptPath for the active hook invocation.
+var currentTranscriptPath string
 
 // PermissionRequest is a second policy phase in Codex: it can approve a
 // host permission request, unlike PreToolUse's deny-only enforcement.
@@ -351,6 +355,7 @@ func cmdHook() {
 	currentPermissionMode = payload.PermissionMode
 	currentBypassSandbox = payload.BypassSandbox
 	currentAgentID, currentAgentType, currentToolUseID = payload.AgentID, payload.AgentType, payload.ToolUseID
+	currentTranscriptPath = payload.TranscriptPath
 	currentHookEventName = payload.HookEventName
 	modRun = os.Getenv("YOLONOT_MOD") == "1"
 	modSessionID, modToolUseID, modStart = payload.SessionID, payload.ToolUseID, hookStart

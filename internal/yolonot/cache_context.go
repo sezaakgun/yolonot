@@ -8,7 +8,7 @@ import (
 
 // Cache entries are valid only for the configuration and resolved hints the
 // deciding model saw. Credentials are never included in persisted metadata.
-func classifierContextFingerprint(cfg Config, hints WalkupHints, cwd string) string {
+func classifierContextFingerprint(cfg Config, hints WalkupHints, command, cwd string) string {
 	models := map[string]ModelConfig{}
 	for name, m := range cfg.Models {
 		m.APIKey = ""
@@ -27,7 +27,9 @@ func classifierContextFingerprint(cfg Config, hints WalkupHints, cwd string) str
 		Wrappers   []string
 		Failure    FailurePolicy
 		Sensitive  []string
-	}{3, projectRoot(cwd), models, cfg.Judges, cfg.Escalation, cfg.Policy, BuildSystemPrompt(cfg.Prompt, hints), DecisionHints(cfg.Prompt, hints), cfg.AttachOutsideRoot, cfg.Wrappers, cfg.Failure, LoadSensitivePatterns(cwd)})
+		ProjectCtx string
+		UserPrompt string
+	}{4, projectRoot(cwd), models, cfg.Judges, cfg.Escalation, cfg.Policy, BuildSystemPrompt(cfg.Prompt, hints), DecisionHints(cfg.Prompt, hints), cfg.AttachOutsideRoot, cfg.Wrappers, cfg.Failure, LoadSensitivePatterns(cwd), detectProjectContext(command, cwd), formatUserSessionPrompt(extractTranscriptUserPrompt(currentTranscriptPath))})
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
@@ -37,7 +39,7 @@ func currentCacheContext(command, cwd string) string {
 		return ""
 	}
 	hints := LoadHints(cwd)
-	return classifierContextFingerprint(cfg, hints, cwd)
+	return classifierContextFingerprint(cfg, hints, command, cwd)
 }
 
 type cachedDecision struct {

@@ -84,6 +84,7 @@ type cursorPayload struct {
 	Command        string   `json:"command"`
 	WorkspaceRoots []string `json:"workspace_roots"`
 	Sandbox        *bool    `json:"sandbox,omitempty"`
+	TranscriptPath string   `json:"transcript_path,omitempty"`
 }
 
 // ParseHookInput decodes Cursor's stdin JSON into the canonical HookPayload
@@ -115,13 +116,14 @@ func (c *CursorHarness) ParseHookInput(input []byte) (HookPayload, error) {
 	}
 	bypass := raw.Sandbox != nil && !*raw.Sandbox
 	return HookPayload{
-		HookEventName: event,
-		ToolName:      "Bash",
-		SessionID:     raw.ConversationID,
-		ToolUseID:     raw.ToolUseID,
-		Cwd:           cwd,
-		ToolInput:     map[string]interface{}{"command": raw.Command},
-		BypassSandbox: bypass,
+		HookEventName:  event,
+		ToolName:       "Bash",
+		SessionID:      raw.ConversationID,
+		ToolUseID:      raw.ToolUseID,
+		Cwd:            cwd,
+		ToolInput:      map[string]interface{}{"command": raw.Command},
+		BypassSandbox:  bypass,
+		TranscriptPath: raw.TranscriptPath,
 	}, nil
 }
 

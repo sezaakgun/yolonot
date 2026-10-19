@@ -26,8 +26,9 @@ type EvalCase struct {
 	Notes          string   `json:"notes,omitempty"`
 	Source         string   `json:"source,omitempty"`
 	Severity       string   `json:"severity,omitempty"`
-	Approved       []string `json:"approved,omitempty"` // brownfield only
-	Cwd            string   `json:"cwd,omitempty"`      // greenfield only: when set, the case is built with the real BuildAnalyzePrompt so script attach runs. Relative to the repo root; see scriptAttachCwd.
+	Approved       []string `json:"approved,omitempty"`    // brownfield only
+	Cwd            string   `json:"cwd,omitempty"`         // greenfield only: when set, the case is built with the real BuildAnalyzePrompt so script attach runs. Relative to the repo root; see scriptAttachCwd.
+	UserPrompt     string   `json:"user_prompt,omitempty"` // optional Phase 2 human session prompt
 }
 
 type CaseResult struct {
@@ -135,6 +136,9 @@ func detectSuiteType(cases []EvalCase) string {
 // rather than a hand-rolled copy that silently drifts from the gate.
 func buildGreenfieldPrompt(c EvalCase, noThink bool) string {
 	prompt := BuildAnalyzePrompt(c.Command, scriptAttachCwd(c.Cwd))
+	if up := formatUserSessionPrompt(c.UserPrompt); up != "" {
+		prompt += up
+	}
 	if noThink {
 		prompt += " /no_think"
 	}
