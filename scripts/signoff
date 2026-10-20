@@ -1,0 +1,264 @@
+#!/bin/sh
+# Sign off native harness checks for the current commit.
+#
+#   scripts/signoff [--dry-run] [--skip "reason"] <check>... | all
+#
+# Each check runs its e2e tests (or walks the manual desktop checklist in
+# e2e/MANUAL.md) and posts a GitHub commit status on HEAD: e2e/<check> or
+# manual/<check>. A status belongs to one SHA, so any new push needs a new
+# sign-off. --skip posts success with the reason visible on the PR.
+set -eu
+
+ALL="claude-cli claude-mod codex opencode agy cursor-cli claude-desktop codex-desktop cursor-ide"
+cd "$(git rev-parse --show-toplevel)"
+
+dry=0
+skip=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--dry-run) dry=1; shift ;;
+	--skip) skip="${2:-}"; [ -n "$skip" ] || { echo "--skip needs a reason" >&2; exit 2; }; shift 2 ;;
+	-*) echo "unknown flag $1" >&2; exit 2 ;;
+	*) break ;;
+	esac
+done
+[ $# -gt 0 ] || { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; echo "checks: $ALL"; exit 2; }
+# shellcheck disable=SC2086 # split the list into arguments
+[ "$1" = all ] && set -- $ALL
+
+sha=$(git rev-parse HEAD)
+repo=""
+[ $dry = 1 ] || repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+
+# The status must describe exactly this commit: no tracked changes and no
+# untracked Go or e2e files that the tests would pick up.
+dirty=$(git status --porcelain --untracked-files=no; git ls-files --others --exclude-standard -- '*.go' 'e2e/*' go.mod go.sum)
+if [ -n "$dirty" ]; then
+	echo "working tree differs from $sha:" >&2
+	echo "$dirty" >&2
+	[ $dry = 1 ] || exit 1
+	echo "(dry run: continuing)" >&2
+fi
+if [ $dry = 0 ] && ! gh api "repos/$repo/commits/$sha" --silent 2>/dev/null; then
+	echo "$sha is not on GitHub; push it first" >&2
+	exit 1
+fi
+
+trim() { printf '%s' "$1" | sed 's/^ *//; s/ *$//'; }
+
+bin() { # host binary, honouring the same YOLONOT_E2E_<NAME> override as the tests
+	var=YOLONOT_E2E_$(echo "$1" | tr 'a-z-' 'A-Z_')
+	eval "echo \${$var:-$1}"
+}
+
+version() { # in a throwaway HOME: some hosts write config on any run
+	vhome=$(mktemp -d)
+	HOME=$vhome XDG_CONFIG_HOME=$vhome/.config XDG_DATA_HOME=$vhome/.local/share \
+		XDG_CACHE_HOME=$vhome/.cache XDG_STATE_HOME=$vhome/.local/state \
+		"$(bin "$1")" --version 2>/dev/null | head -1 | tr -s ' ' | cut -c1-60
+	rm -rf "$vhome"
+}
+
+post() { # context state description
+	desc=$(printf '%s' "$3" | cut -c1-140)
+	echo "$1: $2 ($desc)"
+	[ $dry = 1 ] && return
+	gh api -X POST "repos/$repo/statuses/$sha" -f state="$2" -f context="$1" -f description="$desc" --silent
+}
+
+run_tests() { # context host regex [auth]
+	ctx=$1 host=$2 regex=$3
+	ver=$(version "$host") || ver=""
+	[ -n "$ver" ] || { post "$ctx" failure "$host not found"; return 1; }
+	log=$(mktemp)
+	set +e
+	env ${4:+YOLONOT_E2E_AUTH=1} go test -tags e2e ./e2e/ -run "$regex" -count=1 -v >"$log" 2>&1
+	rc=$?
+	set -e
+	pass=$(grep -c '^ *--- PASS' "$log" || true)
+	if grep -q '^ *--- SKIP' "$log"; then
+		grep '^ *--- SKIP' "$log" >&2
+		post "$ctx" failure "$ver: tests skipped"
+		return 1
+	fi
+	if [ $rc != 0 ] || [ "$pass" = 0 ]; then
+		grep -E '^ *--- FAIL|_test.go' "$log" | head -20 >&2
+		echo "full log: $log" >&2
+		post "$ctx" failure "$ver: e2e failed"
+		return 1
+	fi
+	rm -f "$log"
+	post "$ctx" success "$ver: $pass passed"
+}
+
+ask() { # prompt → $reply, read from the terminal
+	printf '%s' "$1" >/dev/tty
+	read -r reply </dev/tty
+}
+
+logged() { # file layer:decision → whether the decision log has it for file
+	grep -F "$1" "$HOME/.yolonot/decisions.jsonl" 2>/dev/null |
+		grep -qF "\"layer\":\"${2%%:*}\",\"decision\":\"${2#*:}\""
+}
+
+check() { # file item → status of one Check item from MANUAL.md
+	case "$2" in
+	"no marker") [ ! -e "$1" ] ;;
+	marker) [ -e "$1" ] ;;
+	"no log "*) ! logged "$1" "${2#no log }" ;;
+	"log "*) logged "$1" "${2#log }" ;;	"see: "*) ask "  ${2#see: } [y/n] "; [ "$reply" = y ] || [ "$reply" = Y ] ;;
+	*) echo "unknown check: $2" >&2; return 1 ;;
+	esac
+}
+
+restore() { # harness usual-binary tmp workspace → put the usual build back
+	trap - EXIT INT TERM
+	if [ -n "$2" ] && "$2" install --harness "$1" >/dev/null; then
+		echo "Restored $2 into your $1 hooks." >/dev/tty
+		rm -rf "$3"
+	elif [ -z "$2" ] && "$3/yolonot" uninstall --harness "$1" >/dev/null; then
+		echo "No yolonot on PATH; removed the candidate from your $1 hooks. Reinstall your usual build yourself." >/dev/tty
+		rm -rf "$3"
+	else
+		echo "Could not restore your $1 hooks; they still use the candidate kept in $3. Reinstall your usual build, then delete it." >/dev/tty
+	fi
+	rm -rf "$4"
+}
+
+# manual walks one MANUAL.md section: build the candidate, set up a
+# workspace, install into the app, guide each row, verify
+# markers and the decision log, then restore the usual build.
+manual() { # context harness heading
+	ctx=$1 harness=$2 heading=$3
+	section=$(awk -v h="## $heading" '$0 == h { on = 1; next } /^## / { on = 0 } on' e2e/MANUAL.md)
+	rows=$(printf '%s\n' "$section" | grep -E '^\| [0-9]+ \|')
+	[ -n "$rows" ] || { echo "no checklist rows for $heading" >&2; return 1; }
+	tmp=$(mktemp -d)
+	cand="$tmp/yolonot"
+	go build -o "$cand" . || return 1
+	ws=$(cd "$(mktemp -d /tmp/yolonot-manual-XXXX)" && pwd -P)
+	git -C "$ws" init -q
+	printf 'allow-cmd touch *ALLOW*\ndeny-cmd touch *DENY*\nask-cmd touch *ASK*\n' >"$ws/.yolonot"
+	usual=$(command -v yolonot || true)
+
+	printf '\n== %s\nWorkspace: %s\nInstalled the candidate into your %s hooks; your usual build is restored when this ends, also on Ctrl+C.\n' \
+		"$heading" "$ws" "$harness" >/dev/tty
+	# shellcheck disable=SC2064 # expand the paths now, they are local to this run
+	trap "restore '$harness' '$usual' '$tmp' '$ws'" EXIT
+	trap 'exit 130' INT TERM
+	(cd "$ws" && "$cand" install --harness "$harness") >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws"; return 1; }
+	if [ "$harness" = cursor ]; then
+		# Native ask is opt-in by env; a wrapper sets it for the hook only.
+		wrap="$tmp/yolonot-cursor-native-ask"
+		printf '#!/bin/sh\nYOLONOT_CURSOR_NATIVE_ASK=1 exec "%s" "$@"\n' "$cand" >"$wrap"
+		chmod +x "$wrap"
+		sed -i '' "s|'$cand' hook|'$wrap' hook|g" "$HOME/.cursor/hooks.json"
+	fi
+	printf '%s\n' "$section" | awk '/^Before:/ { on = 1 } /^\|/ { on = 0 } on' >/dev/tty
+	case "$harness" in
+	claude) app=Claude ;;
+	codex) app=ChatGPT ;; # Codex Desktop ships inside the ChatGPT app
+	cursor) app=Cursor ;;
+	esac
+	ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "/Applications/$app.app/Contents/Info.plist" 2>/dev/null || true)
+	if [ -n "$ver" ]; then
+		ver="$app $ver"
+		echo "App version: $ver" >/dev/tty
+		# Project rules apply only to sessions working in $ws.
+		target=$ws
+		# A plain open only focuses the app; these links start a local session in $ws.
+		[ "$app" = Claude ] && target="claude://code/new?folder=$ws&source=services"
+		[ "$app" = ChatGPT ] && target="codex://new?path=$ws"
+		open -a "$app" "$target" && echo "Opened $app on the workspace; use that session for every row." >/dev/tty
+	else
+		ask "$app.app not found in /Applications; app version: "
+		ver=$reply
+		[ -n "$ver" ] || { echo "version required" >&2; restore "$harness" "$usual" "$tmp" "$ws"; return 1; }
+	fi
+
+	failed="" n=0
+	# Rows come from a here-document so ask can use the terminal.
+	while IFS='|' read -r _ num marker steps checks _; do
+		num=$(trim "$num") marker=$(trim "$marker") steps=$(trim "$steps") checks=$(trim "$checks")
+		n=$((n + 1)) try=1
+		while :; do
+			file="$ws/$marker-$try.marker"
+			prompt="Use the shell tool exactly once to run this exact command: touch $file . If it is blocked or permission cannot be obtained, stop. Do not retry, use wrappers, or create the file another way."
+			# Codex asks only for escalations; a write in the workspace would just run.
+			[ "$harness" = codex ] && prompt="$prompt Request escalated permissions."
+			printf '%s' "$prompt" | pbcopy 2>/dev/null || true
+			printf '\n#%s %s (attempt %s)\nPrompt (copied to the clipboard):\n  %s\n' "$num" "$marker" "$try" "$prompt" >/dev/tty
+			rest=$steps step=1
+			while [ -n "$rest" ]; do
+				case "$rest" in
+				*"Then: "*) cur=${rest%%Then: *} rest=${rest#*Then: } ;;
+				*) cur=$rest rest="" ;;
+				esac
+				[ $step -gt 1 ] && rm -f "$file"
+				ask "  step $step: $(trim "$cur") [Enter when done] "
+				step=$((step + 1))
+			done
+			sleep 2 # PostToolUse hooks log after the command returns
+			ok=1
+			items=$(printf '%s\n' "$checks" | tr ';' '\n')
+			while read -r c; do
+				[ -n "$c" ] || continue
+				if check "$file" "$c"; then
+					printf '  ✓ %s\n' "$c" >/dev/tty
+				else
+					printf '  ✗ %s\n' "$c" >/dev/tty
+					ok=0
+				fi
+			done <<ITEMS
+$items
+ITEMS
+			[ $ok = 1 ] && break
+			seen=$(grep -F "$file" "$HOME/.yolonot/decisions.jsonl" 2>/dev/null |
+				grep -o '"layer":"[^"]*","decision":"[^"]*"' | sed 's/"layer":"//; s/","decision":"/:/; s/"$//')
+			printf '    logged for this marker: %s\n' "$(printf '%s' "${seen:-nothing}" | tr '\n' ' ')" >/dev/tty
+			cwd=$(grep -F "$file" "$HOME/.yolonot/decisions.jsonl" 2>/dev/null | tail -1 | sed -n 's/.*"cwd":"\([^"]*\)".*/\1/p')
+			case "$cwd" in
+			"" | "$ws" | "$ws"/*) ;;
+			*) printf '    the session runs in %s, not the workspace, so the test rules did not apply;\n    open a session on %s and retry\n' "$cwd" "$ws" >/dev/tty ;;
+			esac
+			ask "  [r]etry with a fresh marker, or [c]ontinue as failed? "
+			[ "$reply" = r ] || { failed="$failed $num"; break; }
+			try=$((try + 1))
+		done
+	done <<EOF
+$rows
+EOF
+
+	restore "$harness" "$usual" "$tmp" "$ws"
+	if [ -n "$failed" ]; then
+		post "$ctx" failure "$ver: rows$failed failed"
+		return 1
+	fi
+	post "$ctx" success "$ver: $n/$n rows passed"
+}
+
+rc=0
+for check in "$@"; do
+	case "$check" in
+	claude-cli | claude-mod | codex | opencode | agy | cursor-cli) ctx=e2e/$check ;;
+	claude-desktop | codex-desktop | cursor-ide) ctx=manual/$check ;;
+	*) echo "unknown check $check (checks: $ALL)" >&2; exit 2 ;;
+	esac
+	if [ -n "$skip" ]; then
+		post "$ctx" success "skipped: $skip"
+		continue
+	fi
+	echo "== $check"
+	case "$check" in
+	claude-cli) run_tests "$ctx" claude '^(TestClaudeCLI|TestClaudeSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
+	claude-mod) run_tests "$ctx" claude '^(TestClaudeModDialog|TestClaudeModAutoMode)$' ;;
+	codex) run_tests "$ctx" codex '^(TestCodexExec|TestCodexAppServer|TestCodexSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
+	opencode) run_tests "$ctx" opencode '^(TestOpencodeV2|TestOpencodeSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
+	agy) run_tests "$ctx" agy '^(TestAntigravityCLI|TestAntigravityInteractiveAsk|TestCrossHarnessBinaryE2E)$' ;;
+	cursor-cli) run_tests "$ctx" cursor-agent '^(TestCursorCLI|TestCursorInteractiveAsk|TestCrossHarnessBinaryE2E)$' ;;
+	claude-desktop) manual "$ctx" claude "Claude Desktop" ;;
+	codex-desktop) manual "$ctx" codex "Codex Desktop" ;;
+	cursor-ide) manual "$ctx" cursor "Cursor IDE" ;;
+	esac || rc=1
+done
+exit $rc

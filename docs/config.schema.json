@@ -1,0 +1,450 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "yolonot configuration",
+  "description": "Structural schema. yolonot doctor also checks references, protocol compatibility and policy names.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "config_version": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "models": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9._:-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/model"
+      }
+    },
+    "judges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/judge"
+      }
+    },
+    "escalation": {
+      "$ref": "#/$defs/escalation"
+    },
+    "prompt": {
+      "$ref": "#/$defs/prompt"
+    },
+    "policy": {
+      "$ref": "#/$defs/policy"
+    },
+    "quiet_on_allow": {
+      "type": "boolean"
+    },
+    "wrappers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "attach_outside_root": {
+      "type": "boolean"
+    },
+    "hook_timeout": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 55
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "unavailable": {
+          "enum": [
+            "ask",
+            "deny",
+            "passthrough"
+          ]
+        },
+        "parse": {
+          "enum": [
+            "ask",
+            "deny",
+            "passthrough"
+          ]
+        },
+        "invalid_config": {
+          "enum": [
+            "ask",
+            "deny",
+            "passthrough"
+          ]
+        },
+        "oversize": {
+          "enum": [
+            "ask",
+            "deny",
+            "passthrough"
+          ]
+        },
+        "timeout": {
+          "enum": [
+            "ask",
+            "deny",
+            "passthrough"
+          ]
+        }
+      }
+    },
+    "learning": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "retention_days": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_entries": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "provider": {
+      "$ref": "#/$defs/model"
+    },
+    "decision": {
+      "$ref": "#/$defs/model"
+    },
+    "classifier": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "context": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allow_hints": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "ask_hints": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "system_prompt": {
+              "type": "string"
+            },
+            "impl": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "pre_check": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "local_allow": {
+      "type": "boolean"
+    },
+    "profile": {
+      "type": "string"
+    },
+    "profile_override": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "custom_profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/profile"
+      }
+    },
+    "risk_maps": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/risk_map"
+      }
+    }
+  },
+  "$defs": {
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "env_key": {
+          "type": "string"
+        },
+        "api_key": {
+          "type": "string",
+          "deprecated": true,
+          "description": "Read for migration; config saves remove inline keys."
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600
+        },
+        "protocol": {
+          "enum": [
+            "",
+            "chat",
+            "anthropic",
+            "claude-cli",
+            "systemone",
+            "decisions",
+            "workers-ai"
+          ]
+        }
+      }
+    },
+    "judge": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "use": {
+              "type": "string",
+              "minLength": 1
+            },
+            "may": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "allow",
+                  "ask",
+                  "deny"
+                ]
+              },
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "use"
+          ]
+        }
+      ]
+    },
+    "prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allow_hints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ask_hints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "system_prompt": {
+          "type": "string"
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "type": "string"
+        },
+        "profiles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/profile"
+          }
+        },
+        "harness": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "profile": {
+                "type": "string"
+              },
+              "risk_map": {
+                "$ref": "#/$defs/risk_map"
+              }
+            }
+          }
+        }
+      }
+    },
+    "risk_map": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "safe": {
+          "enum": [
+            "allow",
+            "force_allow",
+            "override_allow",
+            "ask",
+            "deny",
+            "passthrough"
+          ]
+        },
+        "low": {
+          "enum": [
+            "allow",
+            "force_allow",
+            "override_allow",
+            "ask",
+            "deny",
+            "passthrough"
+          ]
+        },
+        "moderate": {
+          "enum": [
+            "allow",
+            "force_allow",
+            "override_allow",
+            "ask",
+            "deny",
+            "passthrough"
+          ]
+        },
+        "high": {
+          "enum": [
+            "allow",
+            "force_allow",
+            "override_allow",
+            "ask",
+            "deny",
+            "passthrough"
+          ]
+        },
+        "critical": {
+          "enum": [
+            "allow",
+            "ask",
+            "deny",
+            "passthrough"
+          ]
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "safe": {
+          "enum": [
+            "allow",
+            "ask",
+            "deny"
+          ]
+        },
+        "low": {
+          "enum": [
+            "allow",
+            "ask",
+            "deny"
+          ]
+        },
+        "moderate": {
+          "enum": [
+            "allow",
+            "ask",
+            "deny"
+          ]
+        },
+        "high": {
+          "enum": [
+            "allow",
+            "ask",
+            "deny"
+          ]
+        },
+        "critical": {
+          "enum": [
+            "allow",
+            "ask",
+            "deny"
+          ]
+        }
+      },
+      "required": [
+        "safe",
+        "low",
+        "moderate",
+        "high",
+        "critical"
+      ]
+    },
+    "escalation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "unresolved": {
+          "enum": [
+            "ask",
+            "deny"
+          ]
+        },
+        "provider": {
+          "$ref": "#/$defs/model"
+        }
+      }
+    }
+  }
+}

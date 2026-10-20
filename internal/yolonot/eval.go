@@ -26,8 +26,9 @@ type EvalCase struct {
 	Notes          string   `json:"notes,omitempty"`
 	Source         string   `json:"source,omitempty"`
 	Severity       string   `json:"severity,omitempty"`
-	Approved       []string `json:"approved,omitempty"` // brownfield only
-	Cwd            string   `json:"cwd,omitempty"`      // greenfield only: when set, the case is built with the real BuildAnalyzePrompt so script attach runs. Relative to the repo root; see scriptAttachCwd.
+	Approved       []string `json:"approved,omitempty"`    // brownfield only
+	Cwd            string   `json:"cwd,omitempty"`         // greenfield only: when set, the case is built with the real BuildAnalyzePrompt so script attach runs. Relative to the repo root; see scriptAttachCwd.
+	UserPrompt     string   `json:"user_prompt,omitempty"` // optional Phase 2 human session prompt
 }
 
 type CaseResult struct {
@@ -135,6 +136,9 @@ func detectSuiteType(cases []EvalCase) string {
 // rather than a hand-rolled copy that silently drifts from the gate.
 func buildGreenfieldPrompt(c EvalCase, noThink bool) string {
 	prompt := BuildAnalyzePrompt(c.Command, scriptAttachCwd(c.Cwd))
+	if up := formatUserSessionPrompt(c.UserPrompt); up != "" {
+		prompt += up
+	}
 	if noThink {
 		prompt += " /no_think"
 	}
@@ -201,6 +205,7 @@ type EvalMetrics struct {
 	ClassMetrics          map[string]ClassMetrics   `json:"class_metrics"`
 	ConfusionMatrix       map[string]map[string]int `json:"confusion_matrix"`
 	Failures              []FailureInfo             `json:"failures"`
+	Results               []CaseResult              `json:"results,omitempty"`
 }
 
 func computeMetrics(results []CaseResult, cases []EvalCase) EvalMetrics {
@@ -335,6 +340,7 @@ func computeMetrics(results []CaseResult, cases []EvalCase) EvalMetrics {
 		ClassMetrics:          classMetrics,
 		ConfusionMatrix:       matrix,
 		Failures:              failures,
+		Results:               results,
 	}
 }
 
@@ -533,6 +539,7 @@ type EvalOptions struct {
 	MaxTokens      int
 	NoThink        bool
 	WithHints      bool   // include user classifier hints (~/.yolonot/config.json + .yolonot walk-up) in the system prompt; off by default for reproducibility
+	DecisionHints  string // the same hints as state text for typed models; set from WithHints
 	Metric         string // "" or "decision" → grade allow/ask (default); "risk" → grade safe/low/moderate/high/critical against expected_risk
 	// EscalationModel arms cascade mode: primary responses that trigger the
 	// hook's escalation (escalationTrigger, reference harness = active) are
@@ -625,6 +632,9 @@ func runCase(c EvalCase, cfg LLMConfig, systemPrompt string, suiteType string, o
 			maxTokens = 256
 		} else {
 			userPrompt = buildGreenfieldPrompt(c, opts.NoThink)
+			if isDecisionConfig(cfg) {
+				userPrompt += opts.DecisionHints
+			}
 		}
 
 		start := time.Now()
@@ -719,6 +729,11 @@ func runCascade(cases []EvalCase, primary []CaseResult, escCfg LLMConfig, system
 func resolveLLMConfig(modelSpec string) LLMConfig {
 	var cfg LLMConfig
 
+	// A catalog name from config.json wins over the built-in aliases.
+	if user := LoadConfig(); user.Models[modelSpec].URL != "" {
+		return user.ModelLLM(modelSpec)
+	}
+
 	switch {
 	// Claude CLI (subscription)
 	case strings.HasPrefix(modelSpec, "claude-cli/"):
@@ -728,21 +743,21 @@ func resolveLLMConfig(modelSpec string) LLMConfig {
 	case modelSpec == "gpt-4o-mini" || modelSpec == "gpt-4o" ||
 		modelSpec == "gpt-4.1-mini" || modelSpec == "gpt-4.1-nano" || modelSpec == "gpt-4.1" ||
 		modelSpec == "o4-mini" || modelSpec == "o3-mini" ||
-		strings.HasPrefix(modelSpec, "gpt-5"):
+		strings.HasPrefix(modelSpec, "gpt-5") || strings.HasPrefix(modelSpec, "gpt-6"):
 		cfg.Model = modelSpec
 		cfg.URL = "https://api.openai.com/v1/chat/completions"
 		cfg.APIKey = os.Getenv("OPENAI_API_KEY")
 	// Anthropic models
 	case modelSpec == "claude-haiku":
-		cfg.Model = "claude-3-5-haiku-20241022"
+		cfg.Model = "claude-haiku-5-5"
 		cfg.URL = "https://api.anthropic.com/v1/messages"
 		cfg.APIKey = os.Getenv("ANTHROPIC_API_KEY")
 	case modelSpec == "claude-sonnet":
-		cfg.Model = "claude-sonnet-4-20250514"
+		cfg.Model = "claude-sonnet-5-5"
 		cfg.URL = "https://api.anthropic.com/v1/messages"
 		cfg.APIKey = os.Getenv("ANTHROPIC_API_KEY")
 	case modelSpec == "claude-opus":
-		cfg.Model = "claude-opus-4-0-20250514"
+		cfg.Model = "claude-opus-5-5"
 		cfg.URL = "https://api.anthropic.com/v1/messages"
 		cfg.APIKey = os.Getenv("ANTHROPIC_API_KEY")
 	// xAI models
@@ -754,6 +769,21 @@ func resolveLLMConfig(modelSpec string) LLMConfig {
 	case strings.HasPrefix(modelSpec, "ollama/"):
 		cfg.Model = modelSpec[len("ollama/"):]
 		cfg.URL = "http://localhost:11434/v1/chat/completions"
+	// TypeSafe Jev (decision model, typed judgments)
+	case strings.HasPrefix(modelSpec, "decisions/"):
+		// OpenAI Decisions API: decisions/gpt-6-luna
+		cfg.Model = modelSpec[len("decisions/"):]
+		cfg.URL = openAIDecisionsURL
+		cfg.APIKey = os.Getenv("OPENAI_API_KEY")
+	case strings.HasPrefix(modelSpec, "systemone/"):
+		// OpenRouter System One: systemone/typesafe/jev-1.13, systemone/microsoft/microsoft-decision-1
+		cfg.Model = modelSpec[len("systemone/"):]
+		cfg.URL = openRouterSystemOneURL
+		cfg.APIKey = os.Getenv("OPENROUTER_API_KEY")
+	case strings.HasPrefix(modelSpec, "jev"):
+		cfg.Model = modelSpec
+		cfg.URL = decisionDefaultURL
+		cfg.APIKey = os.Getenv("TYPESAFE_API_KEY")
 	// OpenRouter
 	case strings.HasPrefix(modelSpec, "openrouter/"):
 		cfg.Model = modelSpec[len("openrouter/"):]
@@ -761,7 +791,7 @@ func resolveLLMConfig(modelSpec string) LLMConfig {
 		cfg.APIKey = os.Getenv("OPENROUTER_API_KEY")
 	default:
 		cfg.Model = modelSpec
-		cfg.URL = envOr("LLM_URL", "https://api.openai.com/v1/chat/completions")
+		cfg.URL = "https://api.openai.com/v1/chat/completions"
 		cfg.APIKey = os.Getenv("OPENAI_API_KEY")
 	}
 
@@ -790,9 +820,9 @@ func cmdEval(opts EvalOptions) {
 		fmt.Println("  --metric decision|risk   Grade allow/ask (default) or risk tier (safe..critical, requires expected_risk in suite)")
 		fmt.Println("  --escalation-model <m>   Cascade mode: re-judge would-ask verdicts with this model, report <model>+esc side by side (greenfield only)")
 		fmt.Println()
-		fmt.Println("Models: gpt-5.4-mini, gpt-5.4-nano, gpt-4o-mini,")
+		fmt.Println("Models: gpt-6-luna, gpt-5.4-mini, gpt-4o-mini,")
 		fmt.Println("        claude-haiku, claude-sonnet,")
-		fmt.Println("        grok-4-1-fast-reasoning, grok-4-1-fast-non-reasoning,")
+		fmt.Println("        grok-4.3, grok-4.7,")
 		fmt.Println("        ollama/<model>, openrouter/<model>, or any OpenAI-compatible name")
 		return
 	}
@@ -870,7 +900,8 @@ func cmdEval(opts EvalOptions) {
 			// suite scores stay reproducible across machines.
 			evalCfg := LoadConfig()
 			attachOutsideRoot = evalCfg.AttachOutsideRoot
-			systemPrompt = BuildSystemPrompt(evalCfg.Classifier, LoadHints())
+			systemPrompt = BuildSystemPrompt(evalCfg.Prompt, LoadHints())
+			opts.DecisionHints = DecisionHints(evalCfg.Prompt, LoadHints())
 		} else {
 			systemPrompt = SystemPrompt
 		}
@@ -886,7 +917,7 @@ func cmdEval(opts EvalOptions) {
 
 			cfg := resolveLLMConfig(modelSpec)
 			if opts.Timeout > 0 {
-				os.Setenv("LLM_TIMEOUT", fmt.Sprintf("%d", opts.Timeout))
+				cfg.Timeout = opts.Timeout
 			}
 
 			var results []CaseResult

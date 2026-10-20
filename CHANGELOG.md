@@ -5,7 +5,215 @@ All notable changes to yolonot are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] — 2026-10-18
+
+### 1.0.0 — the config contract
+
+Config v1. One shape, stable from here: a model catalog, a judge chain that
+names models, one prompt block, one policy block. 0.x files keep working:
+they are read in memory and never rewritten until you run `yolonot migrate`
+(interactive commands offer it once; writing commands ask first). The 0.x
+reader stays through 1.x and goes away in 2.0. Full table in
+[docs/upgrading.md](docs/upgrading.md).
+
+### Added
+- **Host sandbox bypass isolation (`[unsandboxed]`).** When a harness payload requests unsandboxed execution (`dangerouslyDisableSandbox: true` in Claude, `BypassSandbox: true` in Antigravity, `sandbox: false` in Cursor, or `sandbox_permissions: "require_escalated"` / `with_escalated_permissions: true` in Codex), yolonot skips `.yolonot` `allow-cmd`/`allow-path` rules and `fast_allow`, isolates session approvals (`approved_unsandboxed`), script cache keys, and Claude mod replay bindings from prior sandboxed runs, annotates LLM judge prompts with `[Sandbox: agent requested unsandboxed execution (host sandbox bypass)]`, tags `yolonot log` rows with `[unsandboxed]`, and excludes unsandboxed calls from `yolonot suggest` rule/hint promotion.
+- **Cross-harness lifecycle & human resolution parity.** OpenCode V2's plugin subscribes to `permission.asked` / `permission.replied` (`once`, `always`, `reject`) and forwards `PermissionReplied` to `yolonot hook` to record `allow_once`, `ask_approved` (with session approval) or `ask_rejected` (with session deny). Codex `PreToolUse` → `PermissionRequest` pairs for the same command deduplicate via `.codexpre` without double-calling the LLM or double-logging in `decisions.jsonl` / `stats`, while still re-evaluating newly added `deny` rules on `PermissionRequest`.
+- **Impact & incident summary (`yolonot stats`).** `yolonot stats` now opens with an `Impact:` block reporting `Auto-approved` (instant local allows vs AI-judged allows), `Speed saved` (estimated prompt interruptions avoided and average AI latency), and `Threats stopped` (commands blocked or caught, followed by up to 5 recent `BLOCKED` / `HARDENED` incidents with layer and reason), and caps project breakdowns to the top 10 projects.
+- **Separated health diagnostics (`yolonot doctor`) vs security/policy audit (`yolonot audit`).** `yolonot doctor` checks installation, `config.json` validity, host versions, configured models, judge chain, and escalation latency (with a 1-line summary pointer when security/policy warnings exist). `yolonot audit` lints overly broad `allow-cmd` patterns (`bash *`, `sh *`, `python *`, `git *`, `docker *`, `kubectl *`, etc.), warns on `attach_outside_root`, deduplicated `force_allow` / `high=allow` cells, and active paused sessions, and performs a read-only audit of host permission/sandbox configs across Claude (`.claude/settings*.json` broad `Bash(...)` allows, `bypassPermissions`, sandbox state), Codex (`config.toml` `approval_policy="never"`, `danger-full-access`), Antigravity (`~/.gemini/config/config.json` `autoApprove`, disabled sandbox) and Cursor (`cli-config.json` broad `Shell(...)` allows).
+- **`force_allow` (`override_allow`) risk-map action.** Non-critical risk-map cells (`safe`, `low`, `moderate`, `high`) now accept `force_allow` (or `override_allow`) to explicitly override a classifier's `ask` decision into `allow`. Default `allow` remains escalate-only; `critical` never accepts `allow` or `force_allow`.
+- **Global pause (`yolonot pause --global --confirm-bypass` / `yolonot resume --global`).** Pauses yolonot across all sessions via `~/.yolonot/paused` (auto-expiring after 24 hours), surfaced in `yolonot`, `status`, `doctor`, and `audit`, and hard-denied (`layer: self`) if invoked by an agent or skill.
+- **Consolidated v1 CLI & `suggest` workflow.** `yolonot` help is grouped into four sections (`Inspect & Diagnose`, `Session Control`, `Policy & Rules`, `Setup & Models`) with overlapping subcommands merged: `status` absorbs `effective` (`yolonot status [--all] [--json] [--harness <h>]`, capping default approved display to 15 items); `rules` absorbs `prompt` (`yolonot rules [--trace | defaults | config | review | verify]`, displaying both rules and hints); `profile` absorbs `risk` (`yolonot profile [<harness> [<tier> <action|reset>]]`); `judges` absorbs `escalation` (`yolonot judges [escalation [on|off|setup|test]]`); `config` absorbs `quiet` (`yolonot config quiet [on|off]`); and `suggest` absorbs `learning` / `log --human` (`yolonot suggest [--list | --json] [--basic]`), enriching findings with human resolution counts (`approved`, `once`, `rejected`) and repeated-ask candidates without injecting raw historical commands into live judge prompts.
+- **Script attachment across command lists, heredocs, and variable paths.** The positional proof now runs per
+  simple command, follows one literal `cd <dir>`, expands `~`/`$HOME` and simple `$VAR` paths assigned earlier in the command (`D=/path/to/repo && $D/run.sh`), strips heredoc bodies before scanning tokens, taints only the specific target file modified by an earlier segment (`cat > a.py && python b.py` withholds `a.py` and still attaches `b.py`), and stops at untrackable constructs. `yolonot check [--cwd <dir>]` prints which
+  scripts the judge saw and why the rest were withheld; the decision log keeps
+  the same lists (`attached`, `withheld`).
+- **Linked git worktree and trusted `$HOME` ancestor discovery.** Linked git worktrees (`.git` file pointing to `worktrees/<name>`) now resolve to their main repository root for `.yolonot` rule/hint discovery, project session scoping, and script attachment boundaries. Rule and hint walk-up also continues through trusted parent directories under `$HOME` (excluding `$HOME` itself, `~/Downloads`, and `~/tmp`).
+- **Self-diagnosis of a noisy session.** `yolonot stats --session <id|current>`,
+  `--since today|24h|7d` and `--project <name>`; escalation errors split by kind
+  with the p50/p90 of answered calls against the configured timeout; asks by
+  main thread vs subagent; commands asked twice in one session; commands the
+  second model answered differently; asks whose script the judge could not see;
+  what you did with each ask (exact `tool_use_id` join, else same command shape
+  within ten minutes, reporting only); the sessions with the most asks. `yolonot
+  log --session <id>` and an escalation outcome column; `yolonot doctor` reports
+  escalation latency against its timeout; `yolonot audit` flags deny/ask globs ending in `/*`
+  that match every absolute path; the bare `yolonot` prints one line when today
+  crossed 10 asks or 5 escalation timeouts.
+- **Suggested candidates.** `yolonot suggest` (`--list` / `--json`) ends with the commands this
+  project asked about at least twice and you allowed each time, with the
+  `yolonot approve` line for session approval, and buckets asks whose script was unseen and asks lost to an escalation timeout
+  separately while telling the model what the judges saw for each example.
+- The decision log records `agent_id`, `agent_type` and `tool_use_id` when the
+  host sends them (Claude Code subagent and teammate calls).
+- Two default ask hints: bypassing hooks, signing or verification
+  (`--no-verify`, `core.hooksPath`, `--no-gpg-sign`) and launching another
+  coding agent non-interactively (`claude -p`, `codex exec`, …). Changing the
+  defaults invalidates the script cache once.
+- Strict config validation, JSON Schema and ready-to-edit examples; configurable
+  failure actions, shared hook deadline and explicit provider protocols.
+- Project-scoped CLI approve/deny/reset, native skills for all five supported adapters,
+  and context-aware script caches.
+- `doctor`, `audit` and `status --all` / `status --json` diagnostics, including JSON output and optional model probes.
+- Antigravity CLI adapter. yolonot Gemini CLI support is retired; new installs
+  exclude it, while legacy diagnostics and uninstall remain available.
+- OpenCode V2 plugin lifecycle and native ask support; Codex PermissionRequest
+  integration and hook-trust diagnostics. Current version and verification
+  matrix: [docs/harnesses.md](docs/harnesses.md).
+- **Model catalog.** `models` in config.json: named entries (`url`,
+  `model`, `env_key`, `timeout`), chat or typed by URL. `yolonot models
+  [add [typed]|remove|test]`. The name is what banners and
+  `decisions.jsonl` show: `🧑‍🚀 gemini -> npm test`, `jev+esc`.
+- **Judge chain.** `judges` is an ordered list of `fast_allow`,
+  `exec:<path>` and model names; the first permitted verdict wins. Object
+  form `{"use": "jev", "may": ["allow"]}` narrows a judge. `yolonot judges
+  [add|remove|move]`. Escalation is not a judge: it runs once after the
+  chain on a verdict that would surface an ask, then the unresolved
+  policy, then the risk map.
+- **Typed decision models.** TypeSafe Jev (`jev-latest`,
+  `TYPESAFE_API_KEY`), OpenRouter System One (`typesafe/jev-1.13`,
+  `microsoft/microsoft-decision-1`, `OPENROUTER_API_KEY`), the OpenAI
+  Decisions API (`gpt-6-luna`, `OPENAI_API_KEY`, questions translated to
+  its schema; a refusal folds to ask) or any custom System One URL. One
+  request per command: a risk-tier choice plus nine yes/no conditions,
+  folded into the same verdict JSON the chat prompt produces. `context`,
+  `allow_hints` and `ask_hints` ride along as state sections and the ninth
+  condition fires when an ask hint matches; `system_prompt` stays
+  chat-only. Cloudflare
+  Workers AI preset for Clef / Clef-flash (`CLOUDFLARE_API_TOKEN`, account
+  id in the URL, Workers AI envelope unwrapped); any local System One server
+  (Kev, Clef via SGLang) works as a Custom entry. Eval:
+  `--model <catalog name>`, `jev-latest`, `systemone/<id>`,
+  `decisions/<id>`. Jev on the greenfield suite: 92.0% accuracy, 100%
+  dangerous catch, 0 errors, ~300ms p50 (gemini-2.5-flash-lite 88.1%,
+  deepseek-v4-flash 80.1%).
+- **`yolonot config` settings screen.** One page, four sections. JUDGES:
+  the chain as editable rows (move, remove, permitted decisions, add,
+  presets). MODELS: the catalog and exec hooks (test, replace, remove,
+  add), escalation, unresolved policy. POLICY: the active profile with its
+  five tiers (edit a tier; a built-in becomes a custom copy), create /
+  switch / delete profiles, per-harness profile pins and tier overrides,
+  script attachment outside the root, quiet, global and project rules.
+  PROMPT: context, allow and ask hints (one line each in `$EDITOR`,
+  `$defaults` kept), system prompt override. Every row shows its value and
+  a status hint; arrow keys and Esc navigate, and the mouse works
+  everywhere except text fields: hover highlights, click opens or picks,
+  wheel moves, every menu has a clickable "← back" (option groups a
+  "✓ done"). Save writes once with a `.bak`. Bare `yolonot` in a terminal on an installed setup opens it;
+  piped stdin prints the text status.
+- **`yolonot migrate [--dry-run|--undo]`** and `yolonot prompt` (was
+  `classifier`).
+- **Claude Code mod** (`yolonot install --mod`, Claude Code 2.1.296+). A
+  function-hooks module under `~/.yolonot/mod/`: a verdict line with layer
+  and timing under every shell command, a four-way ask dialog (allow once,
+  allow this session, explain, deny), refusal of `bash -c`/heredoc retries
+  of a denied command. `yolonot explain <cmd>` backs the Explain button. The classic hook replays the
+  mod's verdict per `tool_use_id` (session `.mod` file) instead of judging
+  twice. See [docs/harnesses.md](docs/harnesses.md#claude-code-mod).
+- **Precedents and `/yolonot learn`.** Your answers to asks (allow this
+  session, deny) are kept in `~/.yolonot/precedents.jsonl`; the closest
+  ones from the same repository are added to every judge call's hints, for
+  chat and typed models alike. `yolonot log --human` lists them per
+  project; the `/yolonot learn` skill turns them into `allow-hint` /
+  `ask-hint` lines for the project `.yolonot`, with the harness's own
+  model doing the distilling. "Allow once" answers are never learned from.
+
+### Changed
+- The settings screen's "what may this judge decide" chooser lists every
+  combination (allow-only, allow+deny, ask+deny, deny-only, ...) and opens
+  on the judge's current value instead of always on Default.
+- `prompt.*` replaces `classifier.*` (`impl` and the unused classifier
+  registry are gone); `policy.{profile,profiles,harness}` replaces
+  `profile`, `custom_profiles`, `profile_override`, `risk_maps`.
+- Env overrides `LLM_MODEL`, `LLM_URL`, `LLM_TIMEOUT`, `LLM_ESCALATION_*`,
+  `DECISION_*` and `YOLONOT_CLASSIFIER` are removed; endpoints are config
+  only. `YOLONOT_*` switches are unchanged.
+- Log layer `llm` → the model name; `pre_check (name)` → `exec:name`.
+  `yolonot suggest` and `stats` read both.
+- `fast_allow` verdicts carry risk tier `safe` and pass through the risk
+  map like every other judge (no change under the built-in profiles).
+- `yolonot check` prints the judge chain, then the escalation step.
+- Provider picker model suggestions refreshed (Claude 5.5, GPT-6, Grok 4.7).
+- Setup: step 3 picks and names a chat model, 3b offers TypeSafe Jev as a
+  typed model, 4 writes the chain `fast_allow → typed → chat`.
+
+- `yolonot init` no longer seeds active rules. The old template allowed
+  `cat *`, `ls *` and friends globally, which let `cat ~/.ssh/id_rsa` through
+  before any judge; those commands are what `fast_allow` is for. Both rule
+  files now start as commented examples. Existing rule files are untouched.
+- Catalog names derived from OpenRouter ids drop the `:variant` routing tag
+  (`apodex-1.1-mini:free` → `apodex-1.1-mini`); ollama tags stay.
+
+### Removed
+- Verbs `provider`, `decision`, `pre-check`, `classifier`, `local-allow`,
+  `threshold` (each prints its replacement and exits 2). Log field
+  `returned_as` (declared, never written).
+
+### Fixed
+- An agent can no longer grant itself approval: when it runs `yolonot approve`,
+  `deny`, `reset`, `learning`, `pause`, `resume`, `uninstall` or a policy
+  change, the hook always asks (deny on Codex), including through global flags
+  and `sh -c`. `approve`/`deny`/`learning forget` reject a command split into
+  several words instead of storing a broader joined command.
+- Precedents rebuilt from the decision log only use entries marked eligible
+  when written, so labels that older versions inferred from completions are
+  not imported. Codex completions after a deferred ask are no longer logged as
+  human approvals.
+- Claude mod: judges with the session's current directory, leaves subagent and
+  teammate calls to the classic hook (which sees their real cwd, so a call is
+  judged once), fails closed when `yolonot hook` crashes, times out or answers
+  unreadably, and quotes its binary path.
+- Claude install writes exec-form hooks only for Claude 2.1.295+ and the quoted
+  shell form otherwise; Cursor hook commands quote the binary path.
+- Antigravity denies a `run_command` it cannot read instead of leaving it to
+  the host; `YOLONOT_DISABLED` is honored before parsing.
+- Failure-policy passthrough banners are sanitized and provider error bodies
+  are capped. `yolonot check` applies the same deny-to-ask rule as the hook.
+  Profile pins given as `agy` are stored as `antigravity`.
+- Settings: returns to its screen after `$EDITOR`, and refuses to save over a
+  config changed on disk while it was open.
+- Documentation now distinguishes host credential environments, explicit human
+  answers, rule priority and configurable failure behavior; Claude installation
+  surfaces the Desktop model-key setup caveat.
+- Claude mod: preserve one-time/session grant scope across duplicate hooks,
+  close replay after tool completion, and bind native ELF/Mach-O executable
+  paths independently of model script attachment. Unanswered asks and failed
+  dialogs no longer fabricate human/session denials.
+- Report missing model credential variables before making a provider request;
+  distinguish provider HTTP 401/403 errors and avoid duplicate Explain prefixes.
+- Codex installation migrates deprecated `features.codex_hooks` to canonical
+  `features.hooks`, preserving TOML and avoiding repeated deprecation warnings.
+- Native one-time approvals no longer silently become yolonot session grants
+  or learned precedents; explicit session approval remains available.
+- Hook rules, sensitive patterns, model hints and cache context use payload cwd,
+  including hosts that launch global hooks outside the command's project.
+- Claude mod replay checks current rules and binds verdicts to the command,
+  cwd and exact inspected script snapshot. Rejections are enforced in the
+  core so pause and new rules apply consistently to wrapped retries.
+- Typed responses reject missing/null answers, wrong types, out-of-range
+  probabilities and non-success HTTP responses. Model names cannot shadow
+  exec judges or reserved log layers; empty exec entries are rejected.
+- Similarity, judge failover and escalation share a 55-second decision
+  deadline, including HTTP and subprocess calls. Exhaustion asks or denies
+  according to adapter capabilities without caching an approval.
+- Codex install preserves valid TOML without duplicate feature tables;
+  OpenCode honors successful empty hook output. Targeted install/uninstall
+  leaves other harnesses and the Claude mod alone.
+- Dry-run checks include project precedents. Legacy migration preserves
+  explicit escalation timeouts and distinct model credentials.
+- Settings scroll on small terminals, keep mouse targets aligned, show the
+  active escalation model and stage rule edits until Save. Failed config
+  writes roll rules back. Re-running setup keeps typed models ahead of chat
+  while preserving local judges and model restrictions.
+- `models list` and `judges list` work as read-only aliases on legacy config.
+- Concurrent hooks could glue two `decisions.jsonl` records onto one line
+  (record + newline were two writes); one atomic append now. `yolonot log`
+  shows multiline commands on one row (`⏎`) and honours `yolonot log <n>`.
+- `setup` and `models add` no longer print "Cancelled." twice; a cancelled
+  setup exits 1. Esc on the Custom endpoint's URL or model prompt cancels
+  instead of advancing to the next prompt. Arrow keys everywhere in
+  `yolonot config`: → opens or selects like ⏎, ← goes back like Esc; each
+  menu and prompt shows its keys.
 
 ## [0.23.0] — 2026-07-22
 
@@ -40,7 +248,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expands `\n` to real newlines so a one-line directive can carry a multi-line
   prompt. A cloned-repo override replaces the whole safety base (larger blast
   radius than a hint) — `deny-cmd` rules still fire first and a broken override
-  passes through to the host, never a silent allow. See docs/llm-customization.md.
+  passes through to the host, never a silent allow. See [docs/prompt.md](docs/prompt.md).
 - **`yolonot classifier verify`.** Proves a custom `system_prompt` still yields
   parseable verdicts: a static check that the JSON verdict contract survived the
   rewrite, then a live round-trip of real probes (`ls`, `rm -rf /`,
@@ -286,7 +494,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layers (profile, RiskMap, harness) don't affect this metric, so it
   isolates prompt-quality signal. Cases without `expected_risk` are
   skipped with a count; brownfield suites are skipped entirely.
-- See [docs/llm-customization.md](docs/llm-customization.md) for the full
+- See [docs/prompt.md](docs/prompt.md) for the full
   schema, examples, and security notes.
 
 ### Changed

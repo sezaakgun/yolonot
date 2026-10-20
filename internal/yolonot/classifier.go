@@ -1,7 +1,6 @@
 package yolonot
 
 import (
-	"context"
 	"os"
 	"strings"
 )
@@ -36,78 +35,12 @@ func isValidRisk(s string) bool {
 	return false
 }
 
-// ClassifyMeta carries the contextual signals a classifier may want beyond
-// the command itself. Extending this struct is source-compatible for
-// implementations — unknown fields are ignored.
-type ClassifyMeta struct {
-	Cwd          string
-	GitRoot      string
-	ApprovedCmds []string // previously approved commands, for brownfield comparison
-}
-
-// RiskResult is the canonical output of any Classifier. The harness layer
-// consumes this uniformly regardless of which backend produced it.
-type RiskResult struct {
-	Decision  string // "allow" or "ask" — classifier never emits "deny" (rules only)
-	Risk      string // one of allRiskTiers
-	Short     string // ≤60 char banner label
-	Reason    string // one-line explanation, written to decisions.jsonl
-	Backend   string // classifier name, for log attribution (e.g. "llm")
-	LatencyMs int64  // observed wall time of the Classify call
-}
-
-// Classifier is the pluggable risk-tagging backend. Phase 1 ships a single
-// implementation (LLMClassifier wrapping the existing CallLLM flow). Future
-// phases — heuristic AST-based, distilled ML, KNN-over-embeddings — drop in
-// as sibling files with no changes to harness / hook / rules code.
-//
-// Contract:
-//   - Classify must be deterministic-modulo-backend: calling twice with the
-//     same (cmd, meta) and same config should return the same tier, or at
-//     least the same action under the harness risk map. Stochastic backends
-//     (LLMs) meet this loosely; deterministic ones (heuristics) meet it
-//     strictly.
-//   - Empty Command is undefined behaviour; callers filter those out.
-//   - Errors are advisory. On error, callers fall through to the next layer
-//     (today: transparent / native permissions). Classifiers should NOT
-//     fail-closed themselves — the hook pipeline decides fallback policy.
-type Classifier interface {
-	Name() string
-	Classify(ctx context.Context, cmd string, meta ClassifyMeta) (RiskResult, error)
-}
-
-// registeredClassifiers holds all backends known to yolonot, populated at
-// init-time by each classifier file. Order is registration order; ties
-// broken by first-registered. Mirrors the harness registry pattern.
-var registeredClassifiers []Classifier
-
-// RegisterClassifier adds a Classifier to the registry. Called from each
-// backend's init().
-func RegisterClassifier(c Classifier) {
-	registeredClassifiers = append(registeredClassifiers, c)
-}
-
-// GetClassifier returns the classifier with the given name, or nil. Used
-// by ActiveClassifier for config/env lookup and by tests for assertions.
-func GetClassifier(name string) Classifier {
-	for _, c := range registeredClassifiers {
-		if c.Name() == name {
-			return c
-		}
-	}
-	return nil
-}
-
-// Classifiers returns the registered backends in registration order. Used
-// by the eval runner and CLI listing.
-func Classifiers() []Classifier { return registeredClassifiers }
-
 // ResolveRiskMap returns the effective tier→action mapping for a harness.
 // Layers, highest precedence last:
 //  1. Shipped defaults from the harness's RiskMap().
 //  2. Active profile (per-harness override or global), translated through
 //     the harness's ask-fallback rules.
-//  3. ~/.yolonot/config.json "risk_maps" override for that harness.
+//  3. ~/.yolonot/config.json policy.harness.<name>.risk_map cells.
 //  4. YOLONOT_<HARNESS>_RISK_<TIER>=<action> env vars (per-session).
 //
 // Values are validated against the {allow, ask, deny, passthrough} set and
@@ -128,15 +61,16 @@ func ResolveRiskMap(h Harness) map[string]string {
 			out[tier] = action
 		}
 	}
-	if cfg.RiskMaps != nil {
-		if overrides, ok := cfg.RiskMaps[h.Name()]; ok {
+	if overrides := cfg.harnessPolicy(h.Name()).RiskMap; len(overrides) > 0 {
+		{
 			for tier, action := range overrides {
+				action = normalizeRiskAction(action)
 				if !isValidRisk(tier) {
 					Verbosef("ResolveRiskMap: unknown tier %q in config for %s, ignored", tier, h.Name())
 					continue
 				}
-				if !isValidAction(action) {
-					Verbosef("ResolveRiskMap: unknown action %q for %s/%s, ignored", action, h.Name(), tier)
+				if !isValidActionForTier(tier, action) {
+					Verbosef("ResolveRiskMap: invalid action %q for %s/%s, ignored", action, h.Name(), tier)
 					continue
 				}
 				out[tier] = action
@@ -147,9 +81,9 @@ func ResolveRiskMap(h Harness) map[string]string {
 	for _, tier := range allRiskTiers {
 		envKey := "YOLONOT_" + upperName + "_RISK_" + strings.ToUpper(tier)
 		if v := os.Getenv(envKey); v != "" {
-			v = strings.ToLower(strings.TrimSpace(v))
-			if !isValidAction(v) {
-				Verbosef("ResolveRiskMap: env %s=%q unknown action, ignored", envKey, v)
+			v = normalizeRiskAction(strings.ToLower(strings.TrimSpace(v)))
+			if !isValidActionForTier(tier, v) {
+				Verbosef("ResolveRiskMap: env %s=%q invalid action, ignored", envKey, v)
 				continue
 			}
 			out[tier] = v
@@ -175,40 +109,26 @@ func abstainAction(h Harness) string {
 	return ActionAsk
 }
 
+func normalizeRiskAction(s string) string {
+	if s == "override_allow" {
+		return ActionForceAllow
+	}
+	return s
+}
+
 // isValidAction reports whether a risk-map value is a known action.
 func isValidAction(s string) bool {
-	switch s {
-	case ActionAllow, ActionAsk, ActionDeny, ActionPassthrough:
+	switch normalizeRiskAction(s) {
+	case ActionAllow, ActionForceAllow, ActionAsk, ActionDeny, ActionPassthrough:
 		return true
 	}
 	return false
 }
 
-// ActiveClassifier returns the backend yolonot should route classification
-// through. Resolution:
-//  1. YOLONOT_CLASSIFIER env var (explicit override — handy for CI / offline)
-//  2. config.json "classifier" field
-//  3. "llm" (historical default; matches Phase 1 ship)
-//  4. First registered backend (last-resort for broken configs)
-//
-// Returns nil only if nothing is registered.
-func ActiveClassifier() Classifier {
-	if name := os.Getenv("YOLONOT_CLASSIFIER"); name != "" {
-		if c := GetClassifier(name); c != nil {
-			return c
-		}
+func isValidActionForTier(tier, s string) bool {
+	s = normalizeRiskAction(s)
+	if s == ActionForceAllow && tier == RiskCritical {
+		return false
 	}
-	cfg := LoadConfig()
-	if cfg.Classifier.Impl != "" {
-		if c := GetClassifier(cfg.Classifier.Impl); c != nil {
-			return c
-		}
-	}
-	if c := GetClassifier("llm"); c != nil {
-		return c
-	}
-	if len(registeredClassifiers) > 0 {
-		return registeredClassifiers[0]
-	}
-	return nil
+	return isValidAction(s)
 }

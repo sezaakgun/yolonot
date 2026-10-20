@@ -420,3 +420,22 @@ func TestIsLocallySafe_ReasonFormat(t *testing.T) {
 		})
 	}
 }
+
+func TestAddWrappersAndWrappers(t *testing.T) {
+	AddWrappers("", "  my-test-wrapper  ")
+	defer delete(wrapperCommands, "my-test-wrapper")
+
+	found := false
+	for _, w := range Wrappers() {
+		if w == "my-test-wrapper" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected my-test-wrapper in Wrappers()")
+	}
+	if ok, _ := IsLocallySafe("my-test-wrapper git status"); !ok {
+		t.Fatal("expected custom wrapper around read-only command to be locally safe")
+	}
+}

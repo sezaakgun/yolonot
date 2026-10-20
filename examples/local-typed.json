@@ -1,0 +1,22 @@
+{
+  "config_version": 1,
+  "models": {
+    "local-gate": {
+      "url": "http://127.0.0.1:8000/classify",
+      "model": "your-local-model",
+      "protocol": "systemone",
+      "timeout": 10
+    }
+  },
+  "judges": [
+    "fast_allow",
+    "local-gate"
+  ],
+  "failure": {
+    "unavailable": "deny",
+    "parse": "deny",
+    "invalid_config": "deny",
+    "oversize": "deny",
+    "timeout": "deny"
+  }
+}

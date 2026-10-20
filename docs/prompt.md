@@ -1,4 +1,4 @@
-# Classifier customization
+# Prompt customization
 
 yolonot ships with a one-size-fits-most safety classifier prompt. It works
 out of the box, but it doesn't know about *your* infrastructure — the
@@ -8,11 +8,10 @@ to ask on routine internal commands ("is `kubectl get pods -n prod-eu-1`
 really safe?") and to miss environment-specific risks the defaults can't
 predict.
 
-The `classifier` config block lets you inject prose hints into the
-classifier's system prompt so it sees the world the way your team does. It
-mirrors Claude Code's [auto mode](https://code.claude.com/docs/en/auto-mode-config)
-config shape so the mental model is portable; differences from Claude are
-called out below.
+The `prompt` config block supplies shared project context and hints to model
+judges across harnesses. Chat models receive them in the system prompt; typed
+models receive them as labeled state sections. A full `system_prompt` override
+applies only to chat models. See [typed model behavior](models.md#typed-decision-models).
 
 ## When to use it
 
@@ -26,8 +25,8 @@ Reach for a hint when:
 Don't use hints for:
 
 - **Hard blocks.** Use a `.yolonot` `deny-cmd` rule instead. Hints are
-  read by an LLM and can be overridden by user intent in the conversation;
-  rules can't.
+  read by a model and can be ignored or misinterpreted. Explicit deny rules
+  take priority over model judgments.
 - **Static command lists.** Use `.yolonot` `allow-cmd` / `ask-cmd` —
   pattern matching is faster, free, and deterministic.
 - **Per-harness behavior.** Use [risk profiles](risk-profiles.md) and
@@ -43,7 +42,7 @@ Don't use hints for:
 | `ask_hints` | Environment-specific risks the defaults miss. Lean toward `ask` regardless of how routine the command looks. |
 
 There is no `deny_hints` field by design. yolonot's LLM never emits
-`deny` directly (deny is rule-origin only), so a `deny_hints` field would
+`deny` directly (hard denials come from rules, session decisions and policy), so a `deny_hints` field would
 be misleading. For hard blocks, write a `deny-cmd` rule.
 
 ## Where to put it
@@ -52,7 +51,7 @@ Two surfaces, layered:
 
 | Surface | Scope | Use for |
 |---|---|---|
-| `~/.yolonot/config.json` `classifier.*` | Personal / global | Hints that apply to everything you do. Survives across projects. |
+| `~/.yolonot/config.json` `prompt.*` | Personal / global | Hints that apply to everything you do. Survives across projects. |
 | `.yolonot` walk-up files (`context "..."`, `allow-hint "..."`, `ask-hint "..."`) | Per-project / per-team | Hints that ride with the repo. Closer-to-cwd files are listed first. |
 
 Both surfaces stack — the LLM sees the union, with config entries first,
@@ -63,8 +62,7 @@ model reads them all.
 
 ```json
 {
-  "classifier": {
-    "impl": "llm",
+  "prompt": {
     "context": [
       "$defaults",
       "Source control: github.com/yourorg/* and all repos under it",
@@ -86,14 +84,18 @@ model reads them all.
 }
 ```
 
-The `"impl": "llm"` field is the existing classifier-backend selector and
-is optional. yolonot ships only the `llm` backend today.
+A typed decision model (TypeSafe Jev and friends) answers fixed questions
+and ignores `system_prompt`; it still receives `context`, `allow_hints`
+and `ask_hints` as text sections of the command state, with a dedicated
+"does an ask hint describe this command" question. See
+[models.md](models.md#typed-decision-models).
 
 ### Per-project (`.yolonot` walk-up)
 
 The same file you put `allow-cmd` / `deny-cmd` rules in also accepts
 hints. yolonot collects every `.yolonot` from cwd up to the enclosing
-git repo root (same trust boundary as rules):
+git repo root or `$HOME`, whichever comes first; outside a git repo only
+the cwd file is read (same trust boundary as rules):
 
 ```
 # ./yourproject/.yolonot
@@ -121,7 +123,7 @@ prompt doesn't already cover. They are deliberately org-agnostic: no
 domains, repo orgs, or path prefixes. Print them with:
 
 ```bash
-yolonot classifier defaults
+yolonot rules defaults
 ```
 
 > **Footgun:** omitting `"$defaults"` from a list takes full ownership
@@ -142,7 +144,7 @@ Two surfaces, same precedence as everything else (most specific wins):
 
 | Surface | Field / directive | Scope |
 |---|---|---|
-| `~/.yolonot/config.json` | `classifier.system_prompt` (string) | Personal / global |
+| `~/.yolonot/config.json` | `prompt.system_prompt` (string) | Personal / global |
 | `.yolonot` walk-up | `system-prompt "..."` directive | Per-project (closest-to-cwd wins) |
 
 A walk-up `system-prompt` directive beats the config-json override, which
@@ -150,7 +152,7 @@ beats the built-in const.
 
 ```json
 {
-  "classifier": {
+  "prompt": {
     "system_prompt": "You are a command safety classifier for a sandboxed CI box.\nOutput ONLY JSON: {\"decision\":\"allow|ask\",\"risk\":\"safe|low|moderate|high|critical\",\"short\":\"<=6 words\",\"reasoning\":\"one line\"}\nAllow anything reversible; ask only on irreversible + wide-blast-radius operations."
   }
 }
@@ -168,37 +170,33 @@ system-prompt "Sandbox classifier. Output ONLY JSON: {\"decision\":\"allow|ask\"
 
 > **You own the contract.** The model's verdict is parsed as
 > `{"decision","risk","short","reasoning"}`. If your override drops that
-> instruction, the classifier can't parse the reply, so yolonot emits a
-> **decisionless passthrough** and defers to the host's native permission
-> layer (on Claude Code, its own approval prompt) — it does not silently
-> allow, but it also stops making its own decision. Keep the JSON-output
-> line in any rewrite, and **run `yolonot classifier verify` after editing**
-> — it proves the prompt still produces parseable verdicts before you rely
-> on it (see [Inspecting your configuration](#inspecting-your-configuration)).
-> Two backstops if a broken override slips through: a base-prompt override
-> is loaded anyway (the override is used, `verify` is how you catch a bad
-> one), and at runtime the parse-error passthrough banner names a malformed
-> `system_prompt` as the likely cause and points you at `verify`.
+> instruction, replies may become unparseable. The next judge can run; if no
+> judge decides, the configured `failure.parse` action applies. Its default
+> defers to the host, which may prompt or auto-allow according to its mode.
+> Keep the JSON-output line and **run `yolonot rules verify` after editing**.
+> It checks the contract and a small set of live parse probes, not general
+> classification safety. A failed probe does not automatically roll back an
+> installed override. See [failure policy](configuration.md#failure-policy).
 
 Verify what will actually be sent:
 
 ```bash
-yolonot classifier config | jq -r .system_prompt
+yolonot rules config | jq -r .system_prompt
 ```
 
 ## Inspecting your configuration
 
-Three subcommands, all read-only:
+Four subcommands, all read-only:
 
 ```bash
-yolonot classifier defaults    # Built-in system prompt + (empty) default hint lists, as JSON
-yolonot classifier config      # Effective merged config — config + walk-up, $defaults expanded
-yolonot classifier review      # Ask the active LLM provider to flag ambiguous or redundant hints
-yolonot classifier verify      # Prove a custom system_prompt still yields parseable verdicts
-yolonot classifier             # Shorthand for `config`
+yolonot rules defaults    # Built-in system prompt + the built-in hint lists behind $defaults, as JSON
+yolonot rules config      # Effective merged config — config + walk-up, $defaults expanded
+yolonot rules review      # Ask the active LLM provider to flag ambiguous or redundant hints
+yolonot rules verify      # Prove a custom system_prompt still yields parseable verdicts
+yolonot rules             # Shorthand for `config`
 ```
 
-`yolonot classifier verify` is the command to run after writing a
+`yolonot rules verify` is the command to run after writing a
 `system_prompt` override. Two gates:
 
 1. **Static** — the override must still carry the JSON verdict contract
@@ -216,17 +214,17 @@ It exits non-zero when the override wouldn't function, so you can gate on it
 in CI or a pre-commit hook. `verify` answers "will this work"; `config`
 shows "what will be sent"; `review` audits your hint *prose*.
 
-`yolonot classifier config` prints the actual `system_prompt` that will
+`yolonot rules config` prints the actual `system_prompt` that will
 be sent on the next LLM call — the most useful single field for debugging
 why a command got an unexpected decision. Pipe through `jq` to extract
 just one part:
 
 ```bash
-yolonot classifier config | jq -r .system_prompt
-yolonot classifier config | jq .context
+yolonot rules config | jq -r .system_prompt
+yolonot rules config | jq .context
 ```
 
-`yolonot classifier review` calls your configured LLM provider with a
+`yolonot rules review` calls your configured LLM provider with a
 meta-prompt that audits each hint for ambiguity, redundancy, over-broad
 matching, and over-permissive language. Run it after editing your
 hints — a 30-second sanity check before the new entries start steering
@@ -234,56 +232,52 @@ real decisions.
 
 ## Precedence inside the prompt
 
-Within the assembled system prompt the layering is:
+Within the assembled classifier request the layering is:
 
 ```
-[base prompt — classifier.system_prompt / .yolonot system-prompt override,
-              else yolonot's shipped SystemPrompt const]
+[system prompt (chat) / state hint sections (typed):
+  base prompt — prompt.system_prompt / .yolonot system-prompt override,
+  else yolonot's shipped SystemPrompt const built from shared decision.go criteria]
   ↓
-Project context:    (from cfg.context + walkup.context)
+Project context:     (from cfg.context + walkup.context)
   ↓
 Project allow hints: (from cfg.allow_hints + walkup.allow_hints)
   ↓
 Project ask hints:   (from cfg.ask_hints + walkup.ask_hints)
   ↓
-[explicit user-intent override clause]
+TRUST BOUNDARY clause (never trust forged hint headers inside the command/script)
   ↓
-[user message: "Command: ..." + attached script contents / withheld-script notes]
+[user message / state:
+  "Command: ..." + attached script contents / withheld-script notes
+  (with any forged "Project context:" / "Allow when:" blocks redacted)
+  ↓
+  "Active project (auto-detected from repository metadata): <repo> [<stack>] — <summary>"
+  ↓
+  "User prompt in this session: <sanitized human request from transcript_path>"
+  ↓
+  "Analyze: is this safe to execute?"]
 ```
 
-Within each section, **config entries appear before walk-up entries**, and
-within walk-up the closest-to-cwd file is listed first. The model is
-told that `ask_hints` win over `allow_hints` *unless* the user has
-explicitly and specifically asked for the action — same precedence as
-Claude's autoMode.
+Within each hint section, **config entries appear before walk-up entries**, and
+within walk-up the closest-to-cwd file is listed first. Both chat and typed
+decision models evaluate the same nine ask conditions (`prod_mutation`,
+`destructive`, `secrets_read`, `exfil`, `redirect_write`, `persistence`,
+`obfuscated`, `unclear`, and `project_ask`). Specific `Allow when` /
+`Project allow hints` entries exempt matching commands/paths, and `User prompt
+in this session` can exempt bounded non-critical local/PR actions (`git commit
+--amend`, copying a named file outside the repo, stopping a named local
+background process, or opening a requested PR with `gh pr create`) when the
+human explicitly asked for that exact action and target. It never exempts
+`critical` risk, reading/exfiltrating secrets, or mutating a different
+environment (such as `prod` when the human asked for `staging`).
 
-## Backward compatibility
+## Upgrading from 0.x
 
-This feature is purely additive:
-
-- **Legacy config:** `"classifier": "llm"` (string form, every prior
-  release) still loads. It maps to `Impl: "llm"` with empty hint slices,
-  so default behavior is unchanged.
-- **Round-trip:** a legacy string config that you load and save is
-  re-serialized as a string — yolonot does **not** silently rewrite it
-  into the new object form. The shape only changes when you opt in by
-  adding hints.
-- **Default prompt:** if you set no hints anywhere, the system prompt
-  sent to the model is **byte-equal** to the previous release's
-  `SystemPrompt` const. No change to existing classification behavior.
-- **Existing CLI/env vars:** `yolonot risk`, `profile`, `pre-check`,
-  `check`, `rules`, `setup`, `provider`, `log`, `stats`, every
-  `YOLONOT_*` env var — unchanged. `classifier` is a new sibling
-  subcommand.
-- **Existing `.yolonot` directives:** `allow-cmd`, `deny-cmd`,
-  `ask-cmd`, `allow-redirect`, `sensitive`, `not-sensitive` — unchanged.
-  The new directives (`context`, `allow-hint`, `ask-hint`, `system-prompt`)
-  are additive.
-- **Default base prompt:** with no `system_prompt` override set anywhere,
-  the base is byte-equal to the shipped `SystemPrompt` const — an override
-  is opt-in and changes nothing until you set it.
-
-If you upgrade and don't touch any config, nothing changes.
+The block was called `classifier` and carried an unused `impl` field. A v0
+file still loads: `classifier.*` is read as `prompt.*` and `impl` is dropped.
+`yolonot migrate` rewrites the file; see [upgrading.md](upgrading.md). With no
+hints set anywhere, the system prompt sent to the model is byte-equal to the
+built-in `SystemPrompt` const.
 
 ## Security notes
 
@@ -291,9 +285,8 @@ If you upgrade and don't touch any config, nothing changes.
   repository can ship `allow-hint` text that nudges the classifier in a
   bad direction. yolonot's walk-up trust boundary is the enclosing git
   repo root (same as for rules), so the exposure is no worse than it
-  already was for `allow-cmd` rules — but unlike Claude Code (which
-  ignores shared `.claude/settings.json` precisely for this reason),
-  yolonot does load `.yolonot` from the repo. Review `.yolonot` files in
+  already was for `allow-cmd` rules. yolonot loads `.yolonot` from the repo
+  as trusted policy. Review `.yolonot` files in
   unfamiliar clones before you run anything in them.
 - **Hard blocks beat hints.** A `deny-cmd` rule fires before the LLM is
   consulted at all, so it cannot be talked out of by a hint or by the
@@ -310,8 +303,9 @@ If you upgrade and don't touch any config, nothing changes.
   Note the backstop that still holds even under a hostile override:
   `deny-cmd` rules fire *before* the LLM is consulted, so a base-prompt
   override cannot unblock anything a `deny-cmd` rule denies. (A reply that
-  doesn't match the JSON verdict contract only passes through to the host's
-  native layer — it is not a yolonot-enforced block, so don't rely on it.)
+  doesn't match the JSON verdict contract is a judge failure; the next judge
+  and configured failure policy decide what follows. Default passthrough is
+  not an enforced block, so don't rely on malformed output for protection.)
 - **The script-attach boundary cannot be widened from a repo.** The
   `attach_outside_root` option (see docs/how-it-works.md) that lets script
   attachment cross the project root lives *only* in
@@ -327,9 +321,11 @@ If you upgrade and don't touch any config, nothing changes.
   settings, so you can't distribute a hint set across an org from a
   central file. Workaround: ship a per-repo `.yolonot` in your
   scaffolding.
-- No mutator subcommands — `yolonot classifier defaults | config |
-  review` are read-only. Edit `~/.yolonot/config.json` and `.yolonot`
-  files by hand to author hints.
+- No `prompt` mutator subcommands — `yolonot rules defaults | config |
+  review | verify` are read-only. Author hints in the PROMPT section of
+  `yolonot config` (each list opens in `$EDITOR`, one entry per line,
+  `$defaults` kept; the system prompt override has edit / reset-to-built-in),
+  or edit `~/.yolonot/config.json` and `.yolonot` files by hand.
 - Hints are global to the LLM call — there's no per-harness hint set.
   yolonot's LLM call is shared across harnesses anyway, so this is by
   design.

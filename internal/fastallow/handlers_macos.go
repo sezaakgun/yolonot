@@ -149,15 +149,15 @@ func scutilHandler(tokens []string) (bool, string) {
 // with -g/-d, print them in cleartext — they are not read-only-safe. They
 // must go through the LLM/user layer, never fast-allow.
 var securitySafeSubcommands = map[string]struct{}{
-	"help":                       {},
-	"verify-cert":                {},
-	"error":                      {},
-	"leaks":                      {},
-	"list-smartcards":            {},
-	"translocate-policy-check":   {},
-	"translocate-status-check":   {},
-	"translocate-original-path":  {},
-	"requirement-evaluate":       {},
+	"help":                      {},
+	"verify-cert":               {},
+	"error":                     {},
+	"leaks":                     {},
+	"list-smartcards":           {},
+	"translocate-policy-check":  {},
+	"translocate-status-check":  {},
+	"translocate-original-path": {},
+	"requirement-evaluate":      {},
 }
 
 func securityHandler(tokens []string) (bool, string) {

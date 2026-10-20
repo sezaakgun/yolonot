@@ -1,6 +1,8 @@
 package yolonot
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -86,7 +88,7 @@ Output ONLY JSON: {"action": "<one of the six>", "text": "<prose or glob>", "rea
 // not load-bearing safety.
 func suggestSmart(f evolveFinding) (SmartSuggestion, bool) {
 	llm := GetLLMConfig()
-	if llm.URL == "" || llm.Model == "" {
+	if llm.URL == "" || llm.Model == "" || requireChatModel(llm) != nil {
 		return SmartSuggestion{}, false
 	}
 
@@ -107,16 +109,28 @@ func suggestSmart(f evolveFinding) (SmartSuggestion, bool) {
 func buildSuggestUserPrompt(f evolveFinding) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Bucket pattern: %q\n", f.Pattern)
-	fmt.Fprintf(&b, "Occurrences: %d (weighted %.1f)\n\n", f.Count, f.Weighted)
-	b.WriteString("Example commands:\n")
-	for _, ex := range f.Examples {
-		cmd := ex
-		if len(cmd) > 180 {
-			cmd = cmd[:177] + "..."
+	if f.Category != "" {
+		fmt.Fprintf(&b, "Why it was collected: %s — %s\n", f.Category, f.Desc)
+	}
+	fmt.Fprintf(&b, "Occurrences: %d (weighted %.1f)\n", f.Count, f.Weighted)
+	if f.Approved > 0 || f.Once > 0 || f.Rejected > 0 {
+		fmt.Fprintf(&b, "Human resolutions: %d approved, %d allow-once, %d rejected\n", f.Approved, f.Once, f.Rejected)
+	}
+	b.WriteString("\nExample commands:\n")
+	for i, ex := range f.Examples {
+		fmt.Fprintf(&b, "  - %s\n", truncateStr(ex, 180))
+		if i < len(f.Context) && f.Context[i] != "" {
+			fmt.Fprintf(&b, "    what the judges saw: %s\n", f.Context[i])
 		}
-		fmt.Fprintf(&b, "  - %s\n", cmd)
 	}
 	return b.String()
+}
+
+// suggestCacheKey ties a cached answer to the prompt it answered, so a
+// richer prompt for the same pattern does not replay an older verdict.
+func suggestCacheKey(f evolveFinding) string {
+	sum := sha256.Sum256([]byte(buildSuggestUserPrompt(f)))
+	return f.Pattern + "|" + hex.EncodeToString(sum[:4])
 }
 
 // parseSmartSuggestion tolerates the same model quirks ParseDecision
@@ -223,7 +237,7 @@ func saveSuggestCache(c suggestCache) {
 // each new judgment so a Ctrl+C mid-session doesn't lose progress.
 // The cache TTL is 30 days; older entries are ignored and refreshed.
 func cachedOrSmart(f evolveFinding, cache *suggestCache) (SmartSuggestion, bool) {
-	if entry, ok := cache.Patterns[f.Pattern]; ok {
+	if entry, ok := cache.Patterns[suggestCacheKey(f)]; ok {
 		if isCacheFresh(entry.TS) {
 			return SmartSuggestion{Action: entry.Action, Text: entry.Text, Reason: entry.Reason}, true
 		}
@@ -232,7 +246,7 @@ func cachedOrSmart(f evolveFinding, cache *suggestCache) (SmartSuggestion, bool)
 	if !ok {
 		return s, false
 	}
-	cache.Patterns[f.Pattern] = cachedSuggestion{
+	cache.Patterns[suggestCacheKey(f)] = cachedSuggestion{
 		Action: s.Action,
 		Text:   s.Text,
 		Reason: s.Reason,
@@ -245,13 +259,14 @@ func cachedOrSmart(f evolveFinding, cache *suggestCache) (SmartSuggestion, bool)
 // truncateForDisplay trims a string for TUI labels so long prose or
 // glob patterns don't wrap into terminal noise. Adds ... when cut.
 func truncateForDisplay(s string, max int) string {
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
 	if max <= 3 {
-		return s[:max]
+		return string(runes[:max])
 	}
-	return s[:max-3] + "..."
+	return string(runes[:max-3]) + "..."
 }
 
 // smartActionToRule turns a SmartSuggestion into the literal text we

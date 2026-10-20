@@ -18,7 +18,7 @@ func TestClaudeHarnessRegistered(t *testing.T) {
 }
 
 func TestClaudeHarnessName(t *testing.T) {
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	if h.Name() != "claude" {
 		t.Errorf("Name() = %s, want claude", h.Name())
 	}
@@ -29,7 +29,7 @@ func TestClaudeHarnessSettingsPath(t *testing.T) {
 	os.Setenv("HOME", dir)
 	defer os.Unsetenv("HOME")
 
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	want := filepath.Join(dir, ".claude", "settings.json")
 	if got := h.SettingsPath(); got != want {
 		t.Errorf("SettingsPath() = %s, want %s", got, want)
@@ -40,14 +40,14 @@ func TestClaudeHarnessSessionIDFromEnv(t *testing.T) {
 	os.Setenv("CLAUDE_SESSION_ID", "sid-123")
 	defer os.Unsetenv("CLAUDE_SESSION_ID")
 
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	if got := h.SessionIDFromEnv(); got != "sid-123" {
 		t.Errorf("SessionIDFromEnv() = %s, want sid-123", got)
 	}
 }
 
 func TestClaudeHarnessParseHookInputStdin(t *testing.T) {
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	raw := `{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"sid","cwd":"/tmp","tool_input":{"command":"ls"}}`
 	p, err := h.ParseHookInput([]byte(raw))
 	if err != nil {
@@ -65,7 +65,7 @@ func TestClaudeHarnessParseHookInputPermissionMode(t *testing.T) {
 	// Claude Code sends permission_mode in the hook payload; the field must
 	// round-trip onto HookPayload so downstream layers can detect
 	// bypassPermissions (--dangerously-skip-permissions) sessions.
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	raw := `{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"sid","cwd":"/tmp","tool_input":{"command":"ls"},"permission_mode":"bypassPermissions"}`
 	p, err := h.ParseHookInput([]byte(raw))
 	if err != nil {
@@ -79,7 +79,7 @@ func TestClaudeHarnessParseHookInputPermissionMode(t *testing.T) {
 func TestClaudeHarnessParseHookInputPermissionModeAbsent(t *testing.T) {
 	// Payloads without permission_mode (older Claude builds, other harnesses)
 	// must parse cleanly with PermissionMode left empty.
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	raw := `{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"sid","cwd":"/tmp","tool_input":{"command":"ls"}}`
 	p, err := h.ParseHookInput([]byte(raw))
 	if err != nil {
@@ -102,7 +102,7 @@ func TestClaudeHarnessParseHookInputEnvFallback(t *testing.T) {
 		os.Unsetenv("CLAUDE_SESSION_ID")
 	}()
 
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	p, err := h.ParseHookInput(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestClaudeHarnessParseHookInputEnvFallback(t *testing.T) {
 
 func TestClaudeHarnessParseHookInputEmpty(t *testing.T) {
 	os.Unsetenv("CLAUDE_TOOL_INPUT")
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	p, err := h.ParseHookInput(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -130,14 +130,14 @@ func TestClaudeHarnessParseHookInputEmpty(t *testing.T) {
 func TestClaudeHarnessParseHookInputInvalidJSON(t *testing.T) {
 	// Malformed stdin must surface as an error so the pipeline aborts
 	// rather than silently skipping via the zero-payload guard.
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	if _, err := h.ParseHookInput([]byte("{not json")); err == nil {
 		t.Fatal("ParseHookInput on malformed JSON must return error, got nil")
 	}
 }
 
 func TestClaudeHarnessFormatHookResponseRoundTrip(t *testing.T) {
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	r := HookResponse{}
 	r.HookSpecificOutput.HookEventName = "PreToolUse"
 	r.HookSpecificOutput.PermissionDecision = "allow"
@@ -159,7 +159,7 @@ func TestClaudeHarnessInstallUninstall(t *testing.T) {
 	defer os.Unsetenv("HOME")
 	os.MkdirAll(filepath.Join(dir, ".claude"), 0755)
 
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	if h.IsInstalled() {
 		t.Fatal("should not be installed initially")
 	}
@@ -181,7 +181,7 @@ func TestClaudeHarnessInstallUninstall(t *testing.T) {
 	if !strings.Contains(s, "PreToolUse") || !strings.Contains(s, "PostToolUse") {
 		t.Errorf("settings missing hook events: %s", s)
 	}
-	if !strings.Contains(s, `"matcher": "Bash"`) {
+	if !strings.Contains(s, `"matcher": "Bash|PowerShell"`) {
 		t.Errorf("settings missing Bash matcher: %s", s)
 	}
 
@@ -198,7 +198,7 @@ func TestClaudeHarnessInstallSkill(t *testing.T) {
 	os.Setenv("HOME", dir)
 	defer os.Unsetenv("HOME")
 
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	path, err := h.InstallSkill()
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestClaudeHarnessIsDetected(t *testing.T) {
 	os.Setenv("HOME", t.TempDir())
 	defer os.Unsetenv("HOME")
 
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	if !h.IsDetected() {
 		t.Error("claude harness should always be detected when HOME resolves")
 	}

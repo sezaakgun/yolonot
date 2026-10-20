@@ -1,6 +1,7 @@
 package yolonot
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -54,12 +55,12 @@ func (o escalationOutcome) summary() string {
 	return o.Decision + "/" + o.Risk
 }
 
-// adoptableTiers returns the subset of {safe, low} that the active risk
-// map resolves to a real allow. Under strict/paranoid profiles this
+// adoptableTiers returns the subset of non-critical tiers that the active
+// risk map resolves to a real allow. Under strict/paranoid profiles this
 // shrinks or empties — and with it the escalation rescue window.
 func adoptableTiers(h Harness) map[string]bool {
 	out := map[string]bool{}
-	for _, t := range []string{RiskSafe, RiskLow} {
+	for _, t := range []string{RiskSafe, RiskLow, RiskModerate, RiskHigh} {
 		if final, pass := applyRiskMap(h, "allow", t); !pass && final == "allow" {
 			out[t] = true
 		}
@@ -129,7 +130,13 @@ func truncateStr(s string, n int) string {
 // run's script-cache write — otherwise the un-rescued ask freezes into the
 // cross-session cache and the one-shot rescue never re-fires.
 func maybeEscalate(h Harness, cfg Config, d *Decision, sysPrompt, userPrompt string, hookStart time.Time) (out escalationOutcome, cacheOK bool) {
+	return maybeEscalateContext(context.Background(), h, cfg, d, sysPrompt, userPrompt, hookStart)
+}
+
+func maybeEscalateContext(parent context.Context, h Harness, cfg Config, d *Decision, sysPrompt, userPrompt string, hookStart time.Time) (out escalationOutcome, cacheOK bool) {
 	cacheOK = true
+	ctx, cancel := hookBudgetContext(parent, hookStart)
+	defer cancel()
 
 	esc := GetEscalationConfig()
 	switch reason := escalationGateReason(cfg, esc); reason {
@@ -148,7 +155,7 @@ func maybeEscalate(h Harness, cfg Config, d *Decision, sysPrompt, userPrompt str
 		}
 		return out, cacheOK
 	}
-	if time.Since(hookStart) > escalationHookBudget {
+	if ctx.Err() != nil || (!hookStart.IsZero() && time.Since(hookStart) > escalationHookBudget) {
 		out.Outcome = "skipped:budget"
 		// Transient, like an error: don't freeze the un-escalated verdict
 		// into the cross-session cache — a faster future run should get
@@ -158,6 +165,7 @@ func maybeEscalate(h Harness, cfg Config, d *Decision, sysPrompt, userPrompt str
 
 	out.Fired = true
 	out.Model = esc.Model
+	esc.Context = ctx
 	start := time.Now()
 	text, err := escalationCallLLM(esc, sysPrompt, userPrompt, 4096)
 	out.Ms = time.Since(start).Milliseconds()
@@ -192,7 +200,7 @@ func escalationTrigger(h Harness, d *Decision) (fire bool, skip string) {
 		return false, ""
 	}
 	wouldBe, wouldPass := applyRiskMap(h, d.Decision, d.Risk)
-	uncertain := d.Decision == "ask" || (!wouldPass && wouldBe == "ask")
+	uncertain := (!wouldPass && wouldBe == "ask") || (d.Decision == "ask" && wouldBe != "allow")
 	if !uncertain {
 		return false, ""
 	}
@@ -275,7 +283,7 @@ func escalationUnresolvedDeny(cfg Config, out escalationOutcome, d *Decision) (b
 		d.Decision, primaryRisk, out.summary())
 }
 
-// cmdEscalation implements `yolonot escalation [on|off|setup|test]`.
+// cmdEscalation implements `yolonot judges escalation [on|off|setup|test]`.
 func cmdEscalation(args []string) {
 	cfg := LoadConfig()
 
@@ -286,51 +294,47 @@ func cmdEscalation(args []string) {
 
 	switch strings.ToLower(args[0]) {
 	case "on", "true", "1", "yes", "y":
-		if cfg.Escalation == nil {
-			if esc := GetEscalationConfig(); esc.URL != "" && esc.Model != "" {
-				fmt.Println("Escalation is configured via LLM_ESCALATION_* env vars (no config block to toggle).")
-				fmt.Println("It is on unless YOLONOT_ESCALATION=off is set in the environment.")
-				return
-			}
-			fmt.Println("Escalation is not configured yet. Run: yolonot escalation setup")
+		if cfg.Escalation == nil || cfg.Escalation.Model == "" {
+			fmt.Println("Escalation is not configured yet. Run: yolonot judges escalation setup")
+			return
+		}
+		if !requireV1(&cfg) {
 			return
 		}
 		cfg.Escalation.Disabled = false
-		SaveConfig(cfg)
+		mustSaveConfig(cfg)
 		fmt.Printf("Escalation: ON — %s consulted before surfacing an ask.\n", GetEscalationConfig().Model)
 	case "off", "false", "0", "no", "n":
-		if cfg.Escalation == nil {
-			if esc := GetEscalationConfig(); esc.URL != "" && esc.Model != "" {
-				fmt.Println("Escalation is configured via LLM_ESCALATION_* env vars.")
-				fmt.Println("Disable it with: export YOLONOT_ESCALATION=off")
-				return
-			}
+		if cfg.Escalation == nil || cfg.Escalation.Model == "" {
 			fmt.Println("Escalation is not configured; nothing to turn off.")
 			return
 		}
-		// Keep the provider block — re-enabling must not need a re-setup.
+		if !requireV1(&cfg) {
+			return
+		}
+		// Keep the model reference — re-enabling must not need a re-setup.
 		cfg.Escalation.Disabled = true
-		SaveConfig(cfg)
-		fmt.Println("Escalation: OFF — provider config kept; re-enable with: yolonot escalation on")
+		mustSaveConfig(cfg)
+		fmt.Println("Escalation: OFF — model reference kept; re-enable with: yolonot judges escalation on")
 	case "setup":
-		selected, ok := pickProvider(cfg, true)
+		if !requireV1(&cfg) {
+			return
+		}
+		name, ok := pickEscalationModel(&cfg)
 		if !ok {
 			return
 		}
-		if cfg.Escalation == nil {
-			cfg.Escalation = &EscalationConfig{}
-		}
-		cfg.Escalation.Provider = selected
-		cfg.Escalation.Disabled = false
-		SaveConfig(cfg)
-		fmt.Printf("\nEscalation provider set: %s via %s\n", selected.Model, selected.URL)
-		testProviderConnection(selected)
+		setEscalationModel(&cfg, name)
+		mustSaveConfig(cfg)
+		m := cfg.Models[name]
+		fmt.Printf("\nEscalation model set: %s (%s via %s)\n", name, m.Model, m.URL)
+		testProviderConnection(m)
 	case "test":
 		// Non-interactive connection test (CI preflight): resolves config
 		// including env overrides and inheritance, exits 0/1.
 		esc := GetEscalationConfig()
 		if esc.URL == "" || esc.Model == "" {
-			fmt.Fprintln(os.Stderr, "escalation: not configured (no provider in config.json and no LLM_ESCALATION_URL/LLM_ESCALATION_MODEL)")
+			fmt.Fprintln(os.Stderr, "escalation: not configured (no escalation.model in config.json)")
 			os.Exit(1)
 		}
 		fmt.Printf("Resolved: %s via %s\n", esc.Model, esc.URL)
@@ -352,7 +356,7 @@ func cmdEscalation(args []string) {
 	}
 }
 
-// printEscalationStatus renders the bare `yolonot escalation` view.
+// printEscalationStatus renders the escalation section in `yolonot judges` and `yolonot judges escalation`.
 func printEscalationStatus(cfg Config) {
 	esc := GetEscalationConfig()
 
@@ -360,12 +364,12 @@ func printEscalationStatus(cfg Config) {
 	case esc.URL == "" || esc.Model == "":
 		fmt.Println("Escalation: not configured")
 		fmt.Println("  A second, bigger model consulted before surfacing an ask.")
-		fmt.Println("  Set up with: yolonot escalation setup")
+		fmt.Println("  Set up with: yolonot judges escalation setup")
 		return
 	case escalationGateReason(cfg, esc) == "env-off":
 		fmt.Println("Escalation: OFF (YOLONOT_ESCALATION=off in this environment)")
 	case escalationGateReason(cfg, esc) == "disabled":
-		fmt.Println("Escalation: OFF (configured; enable with: yolonot escalation on)")
+		fmt.Println("Escalation: OFF (configured; enable with: yolonot judges escalation on)")
 	default:
 		fmt.Println("Escalation: ON")
 	}
@@ -374,12 +378,13 @@ func printEscalationStatus(cfg Config) {
 	fmt.Println("  Trigger:    primary classifier uncertain (would ask), except critical")
 	fmt.Printf("  Unresolved: %s\n", EscalationUnresolved(cfg))
 	if prim := GetLLMConfig(); prim.URL == esc.URL && prim.Model == esc.Model {
-		fmt.Println("  ⚠ Escalation resolves to the SAME provider+model as the primary —")
+		fmt.Println("  ⚠ Escalation resolves to the SAME endpoint+model as the chat judge —")
 		fmt.Println("    asking the same model twice is not a second opinion.")
 	}
 
 	fired, rescued, hardened := 0, 0, 0
-	for _, e := range ReadRecentDecisions(200) {
+	recent := ReadRecentDecisions(200)
+	for _, e := range recent {
 		// Cache replays carry Escalated without an outcome — live fires
 		// only, same filter as `yolonot stats`.
 		if e.Escalated && e.EscalationOutcome != "" {
@@ -393,8 +398,12 @@ func printEscalationStatus(cfg Config) {
 		}
 	}
 	if fired > 0 {
-		fmt.Printf("  Recent:     %d fired, %d rescued, %d hardened (last 200 decisions)\n", fired, rescued, hardened)
+		es := collectEscalationStats(recent)
+		fmt.Printf("  Recent:     %d fired, %d rescued, %d hardened, %d timed out (last 200 decisions)\n", fired, rescued, hardened, es.timeouts)
+		if warn := escalationLatencyWarning(es, resolveTimeoutSeconds(esc, 10)); warn != "" {
+			fmt.Printf("  ⚠ %s\n", warn)
+		}
 	}
 	fmt.Println()
-	fmt.Println("Usage: yolonot escalation [on|off|setup|test]")
+	fmt.Println("Usage: yolonot judges escalation [on|off|setup|test]")
 }
