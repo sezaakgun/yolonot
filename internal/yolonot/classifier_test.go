@@ -90,7 +90,7 @@ func TestAbstainAction(t *testing.T) {
 }
 
 func TestClaudeHarnessDefaultRiskMap(t *testing.T) {
-	m := (&ClaudeHarness{}).RiskMap()
+	m := (newClaudeHarness()).RiskMap()
 	cases := map[string]string{
 		RiskSafe: ActionAllow, RiskLow: ActionAllow, RiskModerate: ActionAsk,
 		RiskHigh: ActionAsk, RiskCritical: ActionAsk,
@@ -103,7 +103,7 @@ func TestClaudeHarnessDefaultRiskMap(t *testing.T) {
 }
 
 func TestGeminiHarnessDefaultRiskMap(t *testing.T) {
-	m := (&GeminiHarness{}).RiskMap()
+	m := (newGeminiHarness()).RiskMap()
 	cases := map[string]string{
 		RiskSafe: ActionAllow, RiskLow: ActionAllow, RiskModerate: ActionAsk,
 		RiskHigh: ActionAsk, RiskCritical: ActionAsk,
@@ -119,7 +119,7 @@ func TestGeminiHarnessDefaultRiskMap(t *testing.T) {
 // their default RiskMap — deny stays rule-origin only. Regression guard
 // for the "LLM never denies on ask-capable harnesses" invariant.
 func TestAskCapableHarnessesNeverDefaultDeny(t *testing.T) {
-	for _, h := range []Harness{&ClaudeHarness{}, &GeminiHarness{}} {
+	for _, h := range []Harness{newClaudeHarness(), newGeminiHarness()} {
 		for tier, action := range h.RiskMap() {
 			if action == ActionDeny {
 				t.Errorf("%s default RiskMap[%s]=deny — ask-capable harnesses must not deny from LLM", h.Name(), tier)
@@ -129,7 +129,7 @@ func TestAskCapableHarnessesNeverDefaultDeny(t *testing.T) {
 }
 
 func TestCodexHarnessDefaultRiskMap(t *testing.T) {
-	m := (&CodexHarness{}).RiskMap()
+	m := (newCodexHarness()).RiskMap()
 	cases := map[string]string{
 		RiskSafe: ActionAllow, RiskLow: ActionAllow, RiskModerate: ActionPassthrough,
 		RiskHigh: ActionDeny, RiskCritical: ActionDeny,
@@ -151,7 +151,7 @@ func TestResolveRiskMap_EnvOverridesConfig(t *testing.T) {
 	}})
 
 	t.Setenv("YOLONOT_CLAUDE_RISK_MODERATE", "allow")
-	m := ResolveRiskMap(&ClaudeHarness{})
+	m := ResolveRiskMap(newClaudeHarness())
 	if m[RiskModerate] != ActionAllow {
 		t.Errorf("env should win: got %q, want %q", m[RiskModerate], ActionAllow)
 	}

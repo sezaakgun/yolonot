@@ -943,9 +943,7 @@ func dockerHandler(tokens []string) (bool, string) {
 				}
 				return true, base + " " + action + " " + sub
 			}
-			if _, bad := dockerUnsafeSubcommands[action][sub]; bad {
-				return false, ""
-			}
+			return false, ""
 		}
 	}
 
@@ -989,6 +987,7 @@ var kubectlSafeSubcommands = map[string]map[string]struct{}{
 	},
 	"auth":    {"can-i": {}, "whoami": {}},
 	"rollout": {"status": {}, "history": {}},
+	"plugin":  {"list": {}},
 }
 
 var kubectlUnsafeSubcommands = map[string]map[string]struct{}{
@@ -1067,7 +1066,7 @@ func kubectlHandler(tokens []string) (bool, string) {
 				if _, safe := subs[t]; safe {
 					return true, base + " " + action + " " + t
 				}
-				break
+				return false, ""
 			}
 		}
 	}
@@ -1302,12 +1301,7 @@ func terraformHandler(tokens []string) (bool, string) {
 				if _, safe := subs[t]; safe {
 					return true, base + " " + action + " " + t
 				}
-				if bad, ok := terraformUnsafeSubcommands[action]; ok {
-					if _, isBad := bad[t]; isBad {
-						return false, ""
-					}
-				}
-				break
+				return false, ""
 			}
 		}
 	}

@@ -530,7 +530,7 @@ func astHasChain(file *syntax.File) bool {
 func hasChainOperatorFallback(command string) bool {
 	for i := 0; i < len(command); i++ {
 		switch command[i] {
-		case '|', ';', '`':
+		case '|', ';', '`', '\n':
 			return true
 		case '&':
 			// Any `&` — either `&&` chain or backgrounded job (`cmd &`).
@@ -1154,7 +1154,7 @@ func splitSegments(command string) []string {
 	for _, op := range []string{"&&", "||"} {
 		s = strings.ReplaceAll(s, op, "\x00")
 	}
-	for _, ch := range []byte{';', '|'} {
+	for _, ch := range []byte{';', '|', '\n'} {
 		s = strings.ReplaceAll(s, string(ch), "\x00")
 	}
 	var segments []string
@@ -1268,15 +1268,21 @@ func selfPolicyCandidateArgvDepth(command string, depth int) [][]string {
 // form of it, runs one that writes approvals, denials, or policy. Global
 // flags may sit before the verb.
 func selfPolicyVerb(command string) string {
-	always := map[string]bool{"approve": true, "deny": true, "reset": true, "pause": true, "resume": true, "uninstall": true, "mod": true}
+	always := map[string]bool{"approve": true, "deny": true, "reset": true, "pause": true, "resume": true, "install": true, "uninstall": true, "setup": true, "migrate": true, "upgrade": true, "mod": true}
 	withArgs := map[string]bool{"profile": true, "judges": true, "judge": true, "models": true, "model": true, "config": true}
 	readOnly := map[string]bool{"list": true, "ls": true, "show": true, "status": true}
 	wrappers := map[string]bool{"sudo": true, "env": true, "command": true, "exec": true, "nohup": true, "nice": true, "time": true}
+	wrapperValueFlags := map[string]bool{"-u": true, "--unset": true, "-C": true, "--chdir": true, "-S": true, "--split-string": true, "-n": true, "-g": true, "--group": true}
 	best := ""
 	for _, f := range selfPolicyCandidateArgv(command) {
 		for len(f) > 0 {
-			head := filepath.Base(strings.Trim(f[0], `"'`))
-			if strings.Contains(f[0], "=") {
+			tok0 := strings.Trim(f[0], `"'(){};`)
+			if tok0 == "" {
+				f = f[1:]
+				continue
+			}
+			head := filepath.Base(tok0)
+			if strings.Contains(tok0, "=") {
 				f = f[1:]
 				continue
 			}
@@ -1288,17 +1294,24 @@ func selfPolicyVerb(command string) string {
 					if flag == "--" {
 						break
 					}
+					if wrapperValueFlags[flag] && len(f) > 0 && !strings.HasPrefix(f[0], "-") {
+						f = f[1:]
+					}
 				}
 				continue
 			}
 			break
 		}
-		if len(f) == 0 || filepath.Base(strings.Trim(f[0], `"'`)) != "yolonot" {
+		if len(f) == 0 || filepath.Base(strings.Trim(f[0], `"'(){};`)) != "yolonot" {
 			continue
 		}
 		var words []string
 		hasGlobal := false
-		for _, w := range stripShellRedirects(f[1:]) {
+		for _, rawW := range stripShellRedirects(f[1:]) {
+			w := strings.Trim(rawW, `"'(){};`)
+			if w == "" {
+				continue
+			}
 			if w == "--global" || w == "-g" {
 				hasGlobal = true
 			}

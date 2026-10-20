@@ -296,39 +296,17 @@ func translateProfileAction(h Harness, tier, act string) string {
 	if h == nil {
 		return ActionAsk
 	}
-	if h.Name() == "opencode" || h.Name() == "cursor" {
-		// Adding native asks must not silently relax these adapters' existing
-		// hard-deny floor. Explicit per-tier overrides can still change it.
-		if tier == RiskHigh || tier == RiskCritical {
-			return ActionDeny
-		}
-		if harnessSupportsAsk(h) {
-			return ActionAsk
-		}
+	rm := h.RiskMap()
+	if (tier == RiskHigh || tier == RiskCritical) && rm[tier] == ActionDeny {
+		return ActionDeny
 	}
 	if harnessSupportsAsk(h) {
 		return ActionAsk
 	}
-	switch h.Name() {
-	case "claude", "gemini":
-		return ActionAsk
-	case "codex", "cursor":
-		// Codex/Cursor: passthrough on lower tiers (host's native engine
-		// can prompt), hard-deny on high+critical (won't be downgraded).
-		if tier == RiskHigh || tier == RiskCritical {
-			return ActionDeny
-		}
-		return ActionPassthrough
-	case "opencode":
-		// OpenCode plugin shim has no passthrough — empty stdout = allow.
-		// Below high we surface as allow (visible in config); high+ deny.
-		if tier == RiskHigh || tier == RiskCritical {
-			return ActionDeny
-		}
-		return ActionAllow
-	default:
-		return ActionAsk
+	if def := rm[RiskModerate]; def == ActionAllow || def == ActionPassthrough || def == ActionDeny {
+		return def
 	}
+	return ActionAsk
 }
 
 // validProfileName matches CLI-safe profile identifiers. Lowercase ASCII,

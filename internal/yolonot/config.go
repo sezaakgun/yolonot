@@ -1620,6 +1620,7 @@ func cmdEvolve(args []string) {
 	basic := false
 	listMode := false
 	jsonMode := false
+	allProjects := false
 	for _, a := range args {
 		switch a {
 		case "--basic":
@@ -1628,13 +1629,16 @@ func cmdEvolve(args []string) {
 			listMode = true
 		case "--json":
 			jsonMode = true
+		case "--all", "--global":
+			allProjects = true
 		case "--help", "-h":
-			fmt.Println("Usage: yolonot suggest [--list | --json] [--basic]")
+			fmt.Println("Usage: yolonot suggest [--list | --json] [--basic] [--all]")
 			fmt.Println()
 			fmt.Println("  --list, -l  Print findings and candidate rules without interactive TUI")
 			fmt.Println("  --json      Emit findings and candidate rules as JSON")
 			fmt.Println("  --basic     Skip LLM-driven action recommendation; show only the")
 			fmt.Println("              statistics-derived hint/rule templates.")
+			fmt.Println("  --all       Analyze decisions across all projects (default: current project)")
 			return
 		}
 	}
@@ -1653,9 +1657,15 @@ func cmdEvolve(args []string) {
 	}
 
 	cwd, _ := os.Getwd()
+	candidateCwd := cwd
+	if allProjects {
+		candidateCwd = ""
+	} else {
+		entries = filterEntriesByProject(cwd, entries)
+	}
 	existingRules := LoadRules()
 	findings := collectEvolveFindings(entries, existingRules)
-	candidates := collectLearningCandidates(cwd, entries, existingRules)
+	candidates := collectLearningCandidates(candidateCwd, entries, existingRules)
 
 	if len(findings) == 0 && len(candidates) == 0 {
 		if jsonMode {

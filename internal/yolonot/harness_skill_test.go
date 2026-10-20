@@ -50,7 +50,7 @@ func TestClaudeSkillProtectsCustomizedInstallation(t *testing.T) {
 	if err := os.WriteFile(path, original, 0600); err != nil {
 		t.Fatal(err)
 	}
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	if _, err := h.InstallSkill(); err == nil {
 		t.Fatal("overwrote customized Claude skill")
 	}

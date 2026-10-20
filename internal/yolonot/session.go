@@ -22,6 +22,10 @@ func ProjectSessionID(sessionID, cwd string) string {
 	if sessionID == "" || cwd == "" {
 		return sessionID
 	}
+	if len(sessionID) > 100 {
+		sh := sha256.Sum256([]byte(sessionID))
+		sessionID = fmt.Sprintf("%s_%x", sessionID[:64], sh[:8])
+	}
 	cwd = canonicalDirectory(cwd)
 	root := gitRoot(cwd)
 	if root == "" {

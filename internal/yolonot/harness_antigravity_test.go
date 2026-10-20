@@ -11,7 +11,7 @@ import (
 )
 
 func TestAntigravityHarnessPayloadAndDecisions(t *testing.T) {
-	h := &AntigravityHarness{}
+	h := newAntigravityHarness()
 	if GetHarness(h.Name()) == nil {
 		t.Fatal("Antigravity adapter not registered")
 	}
@@ -47,7 +47,7 @@ func TestAntigravityHarnessPayloadAndDecisions(t *testing.T) {
 }
 
 func TestAntigravityHarnessPayloadRequiresKnownCwd(t *testing.T) {
-	h := &AntigravityHarness{}
+	h := newAntigravityHarness()
 	input := `{"toolCall":{"name":"run_command","args":{"CommandLine":"npm test"}},"workspacePaths":["/project"]}`
 	if p, err := h.ParseHookInput([]byte(input)); err != nil || p.Cwd != "/project" {
 		t.Fatalf("single workspace fallback failed: %+v %v", p, err)
@@ -60,7 +60,7 @@ func TestAntigravityHarnessPayloadRequiresKnownCwd(t *testing.T) {
 
 func TestAntigravityHarnessInstallPreservesOtherHooksAndIsIdempotent(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	h := &AntigravityHarness{}
+	h := newAntigravityHarness()
 	path := h.SettingsPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestAntigravityHarnessInstallPreservesOtherHooksAndIsIdempotent(t *testing.
 
 func TestAntigravityInstallRejectsInvalidJSONAndSymlink(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	h := &AntigravityHarness{}
+	h := newAntigravityHarness()
 	path := h.SettingsPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestAntigravityInstallRejectsInvalidJSONAndSymlink(t *testing.T) {
 func TestAntigravitySkillAndSessionOverride(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("YOLONOT_ANTIGRAVITY_SESSION_ID", "agy-session")
-	h := &AntigravityHarness{}
+	h := newAntigravityHarness()
 	if h.SessionIDFromEnv() != "agy-session" {
 		t.Fatal("explicit session override ignored")
 	}
@@ -169,7 +169,7 @@ func TestAntigravitySkillAndSessionOverride(t *testing.T) {
 func TestAntigravityActualHookCommandUsesNativeDecisions(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()
-	h := &AntigravityHarness{}
+	h := newAntigravityHarness()
 	SaveConfig(Config{Judges: JudgeList{{Use: judgeFastAllow}}})
 	cwd := t.TempDir()
 	input := func(command string) []byte {

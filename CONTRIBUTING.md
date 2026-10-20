@@ -47,16 +47,16 @@ CI installs Bun so the TypeScript middleware tests run on every PR.
 
 ## Adding a Harness
 
-yolonot supports multiple AI coding assistants through the `Harness` interface in `internal/yolonot/harness.go`. Add a new host under that package:
+yolonot supports 24 AI coding assistants (plus retired `gemini` cleanup) through the `Harness` interface in `internal/yolonot/harness.go` and the extensible `baseHarness` in `internal/yolonot/harness_base.go`. Add a new host under that package:
 
-1. **Implement the interface.** Create `harness_<name>.go` with a type that satisfies every method on `Harness`:
+1. **Configure a `baseHarness` adapter.** Create `harness_<name>.go` embedding `baseHarness` and select one of the shared installer strategies (`useNestedJSONHooks`, `useFlatJSONHooks`, `useTaggedBlockHooks`, or `useShimFileHooks`), or provide custom hooks where needed:
    - `Name()`, `IsDetected()`, `IsInstalled()`
    - `Install(binPath)`, `Uninstall()`
    - `SettingsPath()`, `SessionIDFromEnv()`
-   - `ParseHookInput([]byte) (HookPayload, error)` — canonicalize stdin to our `HookPayload` shape
+   - `ParseHookInput([]byte) (HookPayload, error)` — canonicalize stdin to our `HookPayload` shape (`parseFlexibleHookPayload` handles `snake_case` and `camelCase` payloads by default)
    - `FormatHookResponse(HookResponse) string` — serialize to the host's wire format (return `""` for passthrough)
-   - `RiskMap() map[string]string` — tier (`safe`/`low`/`moderate`/`high`/`critical`) → action (`allow`/`ask`/`deny`/`passthrough`)
-   - `InstallSkill() (string, error)`, `UninstallSkill() error` — return `("", nil)` if skill installation is not implemented, and document that limitation
+   - `RiskMap() map[string]string` — tier (`safe`/`low`/`moderate`/`high`/`critical`) → action (`allow`/`ask`/`deny`/`passthrough`), via `claudeCompatRiskMap()`, `askDenyRiskMap()`, `allowDenyRiskMap()`, or `denyOnlyRiskMap()`
+   - `InstallSkill() (string, error)`, `UninstallSkill() error` — managed automatically via `harnessSkillDir`
    - `PostInstallNotes() []string` — caveats printed after `yolonot install` (e.g. required flags, restart reminders)
 
 2. **Register it** via a `func init() { RegisterHarness(&YourHarness{}) }` block.
@@ -109,8 +109,8 @@ A passing adapter fixture is not proof of a host approval dialog. The `e2e/`
 package drives real hosts against a freshly built binary:
 
 ```bash
-go test -tags e2e ./e2e/ -v                     # Claude CLI, Claude mod (tmux), Codex, OpenCode V2, Antigravity, Cursor CLI
-YOLONOT_E2E_AUTH=1 go test -tags e2e ./e2e/ -v  # also live Cursor CLI checks (logged-in account, real model)
+go test -tags e2e ./e2e/ -v                     # All 24 harnesses: Claude CLI/Mod, Codex, OpenCode V2, Antigravity, Cursor, plus 19 extended CLI/runtime harnesses
+YOLONOT_E2E_AUTH=1 go test -tags e2e ./e2e/ -v  # Also live cloud-authenticated checks (Cursor CLI, Devin CLI, Amp CLI)
 ```
 
 Hosts that allow it point at a scripted local model (base URL settings).

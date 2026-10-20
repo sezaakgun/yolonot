@@ -552,19 +552,19 @@ func runHookRawInput(t *testing.T, raw []byte) string {
 func TestStep1SandboxBypassAndHarnessIntegrity(t *testing.T) {
 	// 1. ParseHookInput sandbox bypass & field extraction across harnesses
 	{
-		ch := &ClaudeHarness{}
+		ch := newClaudeHarness()
 		cp, err := ch.ParseHookInput([]byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"c1","cwd":"/tmp","tool_input":{"command":"curl https://example.com","dangerouslyDisableSandbox":true}}`))
 		if err != nil || !cp.BypassSandbox {
 			t.Fatalf("Claude dangerouslyDisableSandbox should set BypassSandbox=true: %+v (err=%v)", cp, err)
 		}
 
-		ah := &AntigravityHarness{}
+		ah := newAntigravityHarness()
 		ap, err := ah.ParseHookInput([]byte(`{"hookEventName":"PreToolUse","conversationId":"agy-1","stepIdx":42,"workspacePaths":["/workspace/proj"],"toolCall":{"name":"run_command","args":{"CommandLine":"npm test","Cwd":"sub","BypassSandbox":true}}}`))
 		if err != nil || !ap.BypassSandbox || ap.ToolUseID != "step_42" || ap.Cwd != filepath.Join("/workspace/proj", "sub") {
 			t.Fatalf("Antigravity BypassSandbox/stepIdx/relative Cwd failed: %+v (err=%v)", ap, err)
 		}
 
-		cur := &CursorHarness{}
+		cur := newCursorHarness()
 		curP, err := cur.ParseHookInput([]byte(`{"hook_event_name":"beforeShellExecution","command":"npm test","cwd":"/w","conversation_id":"cur-1","sandbox":false}`))
 		if err != nil || !curP.BypassSandbox {
 			t.Fatalf("Cursor sandbox:false should set BypassSandbox=true: %+v (err=%v)", curP, err)
@@ -574,7 +574,7 @@ func TestStep1SandboxBypassAndHarnessIntegrity(t *testing.T) {
 			t.Fatalf("Cursor sandbox:true should keep BypassSandbox=false: %+v (err=%v)", curP2, err)
 		}
 
-		cdx := &CodexHarness{}
+		cdx := newCodexHarness()
 		cdxP, err := cdx.ParseHookInput([]byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"cdx-1","cwd":"/repo","tool_input":{"command":"pytest","workdir":"pkg","sandbox_permissions":"require_escalated"}}`))
 		if err != nil || !cdxP.BypassSandbox || cdxP.Cwd != filepath.Join("/repo", "pkg") {
 			t.Fatalf("Codex sandbox_permissions/workdir failed: %+v (err=%v)", cdxP, err)

@@ -69,4 +69,24 @@ func TestSuggestEnrichesFindingsWithHumanResolutionsAndCandidates(t *testing.T) 
 	if len(parsed.Candidates) != 1 || parsed.Candidates[0].Command != "kubectl get pods -n staging" {
 		t.Fatalf("unexpected candidates in JSON: %+v", parsed.Candidates)
 	}
+
+	// Entries from another project root must not pollute default project-scoped suggest,
+	// but must be included when --all is passed.
+	otherProj := t.TempDir()
+	os.MkdirAll(filepath.Join(otherProj, ".git"), 0755)
+	entries = append(entries,
+		DecisionEntry{Timestamp: now, SessionID: "s2", Command: "terraform plan -out=tfplan", Cwd: otherProj, Layer: "gemini", Decision: "ask"},
+		DecisionEntry{Timestamp: now, SessionID: "s2", Command: "terraform plan -out=tfplan", Cwd: otherProj, Layer: "gemini", Decision: "ask"},
+		DecisionEntry{Timestamp: now, SessionID: "s2", Command: "terraform plan -out=tfplan", Cwd: otherProj, Layer: "gemini", Decision: "ask"},
+	)
+	writeTestDecisions(t, entries)
+
+	scopedOut := captureStdout(func() { cmdEvolve([]string{"--list", "--basic"}) })
+	if strings.Contains(scopedOut, "terraform plan") {
+		t.Fatalf("default suggest --list should filter out other project roots:\n%s", scopedOut)
+	}
+	allOut := captureStdout(func() { cmdEvolve([]string{"--list", "--basic", "--all"}) })
+	if !strings.Contains(allOut, "terraform plan") {
+		t.Fatalf("suggest --list --all should include other project roots:\n%s", allOut)
+	}
 }

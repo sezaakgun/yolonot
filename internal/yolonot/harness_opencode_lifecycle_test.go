@@ -20,7 +20,7 @@ func installedOpencodeDriver(t *testing.T, binary string) func(event, cwd string
 	if err != nil {
 		t.Skip("Bun is required to execute the OpenCode plugin")
 	}
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	if err := h.Install(binary); err != nil {
 		t.Fatal(err)
 	}

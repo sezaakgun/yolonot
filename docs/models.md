@@ -91,7 +91,7 @@ and escalation; a later stage gets only the remaining time.
 | Var | Purpose |
 |-----|---------|
 | `YOLONOT_DISABLED=1` | Hook is a no-op for this environment |
-| `YOLONOT_HARNESS` | Pin the harness adapter (claude, codex, opencode, antigravity, cursor) |
+| `YOLONOT_HARNESS` | Pin the harness adapter (`claude`, `codex`, `opencode`, `antigravity`, `cursor`, `qwen`, `copilot`, `grok`, `crush`, `goose`, `kilo`, `pi`, `openhands`, `kimi`, `zcode`, `cline`, `muse`, `kiro`, `hermes`, `deepseek`, `devin`, `openclaw`, `mirror`, `amp`) |
 | `YOLONOT_PROFILE`, `YOLONOT_<HARNESS>_PROFILE` | Risk profile for this session (see [risk-profiles.md](risk-profiles.md)) |
 | `YOLONOT_<HARNESS>_RISK_<TIER>` | One tier → action cell for this session |
 | `YOLONOT_ESCALATION=off` | Disable escalation for this environment |

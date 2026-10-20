@@ -179,3 +179,49 @@ func TestCursorLiveInteractiveAsk(t *testing.T) {
 		})
 	}
 }
+
+// Devin CLI (Fusion) requires a logged-in Windsurf/Devin account (`devin auth login`).
+// Uses XDG_CONFIG_HOME in the sandbox so the user's ~/.config/devin is never touched.
+func TestDevinLiveCLI(t *testing.T) {
+	bin, s, ws := authHost(t, "devin")
+	hostVersion(t, bin, "--version")
+	preWrapper := authWrapper(t, s, "devin", "PreToolUse", "")
+	postWrapper := authWrapper(t, s, "devin", "PostToolUse", "")
+	s.write(".config/devin/config.json", fmt.Sprintf(`{"hooks":{
+  "PreToolUse":[{"matcher":"exec","hooks":[{"type":"command","command":%q,"timeout":60}]}],
+  "PostToolUse":[{"matcher":"exec","hooks":[{"type":"command","command":%q,"timeout":60}]}]
+}}`, preWrapper, postWrapper))
+	for _, c := range []authCase{{"ALLOW", "allow", true}, {"DENY", "deny", false}} {
+		t.Run(c.token, func(t *testing.T) {
+			marker := filepath.Join(ws, c.token+".marker")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bin, "--config", s.path(".config/devin/config.json"), "--respect-workspace-trust", "false", "--permission-mode", "dangerous", "-p", authPrompt(marker))
+			cmd.Dir = ws
+			cmd.Env = append(authEnv(), "XDG_CONFIG_HOME="+s.path(".config"))
+			out, _ := cmd.CombinedOutput()
+			checkAuthCase(t, s, marker, c, string(out))
+		})
+	}
+}
+
+// Amp CLI requires a funded Sourcegraph Amp account (`amp login`).
+// Uses AMP_PLUGINS_DIR in the sandbox so the user's ~/.config/amp is never touched.
+func TestAmpLiveCLI(t *testing.T) {
+	bin, s, ws := authHost(t, "amp")
+	hostVersion(t, bin, "--version")
+	s.Install("amp")
+	for _, c := range []authCase{{"ALLOW", "allow", true}, {"DENY", "deny", false}} {
+		t.Run(c.token, func(t *testing.T) {
+			marker := filepath.Join(ws, c.token+".marker")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bin, "--execute", authPrompt(marker), "--dangerously-allow-all")
+			cmd.Dir = ws
+			cmd.Env = append(authEnv(), "AMP_PLUGINS_DIR="+s.path(".config/amp/plugins"))
+			out, _ := cmd.CombinedOutput()
+			checkAuthCase(t, s, marker, c, string(out))
+		})
+	}
+}
+

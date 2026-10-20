@@ -317,6 +317,9 @@ func DiscoverHostPermissions(cwd string, targets ...Harness) DiscoverSummary {
 				addFile(parseOpencodeConfigFile("project", filepath.Join(d, "opencode.jsonc")))
 				addFile(parseOpencodeConfigFile("project", filepath.Join(d, ".opencode", "opencode.json")))
 			}
+
+		default:
+			discoverExtendedHarness(h.Name(), home, projDirs, addFile)
 		}
 	}
 

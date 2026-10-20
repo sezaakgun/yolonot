@@ -65,7 +65,33 @@ func sliceHas(args []string, s string) bool {
 }
 
 func harnessBinary(name string) (string, error) {
-	names := map[string][]string{"claude": {"claude"}, "codex": {"codex"}, "opencode": {"opencode"}, "gemini": {"gemini"}, "antigravity": {"agy"}, "cursor": {"cursor-agent", "agent", "cursor"}}
+	names := map[string][]string{
+		"claude":      {"claude"},
+		"codex":       {"codex"},
+		"opencode":    {"opencode"},
+		"gemini":      {"gemini"},
+		"antigravity": {"agy"},
+		"cursor":      {"cursor-agent", "agent", "cursor"},
+		"crush":       {"crush"},
+		"qwen":        {"qwen"},
+		"zcode":       {"zcode"},
+		"copilot":     {"copilot"},
+		"grok":        {"grok"},
+		"deepseek":    {"dsh", "deepseek-harness"},
+		"hermes":      {"hermes"},
+		"kimi":        {"kimi"},
+		"devin":       {"devin"},
+		"muse":        {"muse"},
+		"goose":       {"goose"},
+		"openhands":   {"openhands"},
+		"kiro":        {"kiro-cli", "kiro"},
+		"cline":       {"cline"},
+		"kilo":        {"kilo", "kilocode"},
+		"openclaw":    {"openclaw"},
+		"pi":          {"pi"},
+		"mirror":      {"mirror"},
+		"amp":         {"amp"},
+	}
 	for _, candidate := range names[name] {
 		if path, err := exec.LookPath(candidate); err == nil {
 			return path, nil
@@ -87,7 +113,7 @@ func harnessVersion(name, path string) string {
 	cmd := exec.CommandContext(ctx, path, "--version")
 	cmd.WaitDelay = 100 * time.Millisecond
 	// Some version commands initialise logs. Keep those outside real state.
-	if name == "opencode" {
+	if name == "opencode" || name == "kilo" {
 		if tmp, err := os.MkdirTemp("", "yolonot-doctor-"); err == nil {
 			defer os.RemoveAll(tmp)
 			cmd.Env = append(os.Environ(), "XDG_DATA_HOME="+tmp, "XDG_STATE_HOME="+tmp, "XDG_CACHE_HOME="+tmp, "XDG_CONFIG_HOME="+tmp)
@@ -625,14 +651,14 @@ func probeModelConnection(m ModelConfig) error {
 // A caller-supplied marker always wins; restore it after read-only commands.
 func prepareHarnessCapabilities(h Harness, knownVersion ...string) func() {
 	noop := func() {}
-	if h == nil || h.Name() != "opencode" || os.Getenv("YOLONOT_OPENCODE_API") != "" {
+	if h == nil || (h.Name() != "opencode" && h.Name() != "kilo") || os.Getenv("YOLONOT_OPENCODE_API") != "" {
 		return noop
 	}
 	version := ""
 	if len(knownVersion) > 0 {
 		version = knownVersion[0]
-	} else if path, err := harnessBinary("opencode"); err == nil {
-		version = harnessVersion("opencode", path)
+	} else if path, err := harnessBinary(h.Name()); err == nil {
+		version = harnessVersion(h.Name(), path)
 	}
 	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
 	if !strings.HasPrefix(version, "2.") {

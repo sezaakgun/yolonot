@@ -320,6 +320,12 @@ func isVersionOrHelp(args []*syntax.Word) bool {
 		}
 	}
 	if (last == "--help" || last == "-h") && len(args) <= 4 {
+		for _, a := range args[1 : len(args)-1] {
+			tok, ok := literalWord(a)
+			if !ok || strings.HasPrefix(tok, "-") {
+				return false
+			}
+		}
 		return true
 	}
 	return false

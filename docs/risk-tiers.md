@@ -4,10 +4,10 @@ Every LLM decision carries a risk tier — `safe`, `low`, `moderate`, `high`, `c
 
 ## Defaults
 
-| Tier | Claude / Antigravity | Codex / Cursor default | OpenCode V2 | OpenCode V1 |
+| Tier | Ask-full (`claude`, `antigravity`, `qwen`, `copilot`, `zcode`, `devin`, `muse`, `pi`, `openclaw`, `mirror`, `amp`) | Ask+Deny (`opencode` V2, `kilo`, `grok`, `hermes`, `deepseek`) | Allow+Deny (`codex`, `cursor` default, `crush`, `goose`, `openhands`, `kimi`, `kiro`, `cline`) | OpenCode V1 |
 |---|---|---|---|---|
 | safe / low | allow | allow | allow | allow |
-| moderate | ask | passthrough | ask | allow |
+| moderate | ask | ask | passthrough | allow |
 | high | ask | deny | deny | deny |
 | critical | ask | deny | deny | deny |
 

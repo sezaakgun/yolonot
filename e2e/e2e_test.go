@@ -414,12 +414,22 @@ func (m *modelServer) responses(w http.ResponseWriter) {
 func (m *modelServer) gemini(w http.ResponseWriter, body obj) {
 	m.Generations.Add(1)
 	offered := false
+	hasCwd, hasToolAction := false, false
 	tools, _ := body["tools"].([]any)
 	for _, t := range tools {
 		decls, _ := t.(obj)["functionDeclarations"].([]any)
 		for _, d := range decls {
-			if d.(obj)["name"] == "run_command" {
+			dm, _ := d.(obj)
+			if dm["name"] == "run_command" {
 				offered = true
+				for _, schemaKey := range []string{"parametersJsonSchema", "parameters"} {
+					if sch, ok := dm[schemaKey].(obj); ok {
+						if props, ok := sch["properties"].(obj); ok {
+							_, hasCwd = props["Cwd"]
+							_, hasToolAction = props["toolAction"]
+						}
+					}
+				}
 			}
 		}
 	}
@@ -451,10 +461,18 @@ func (m *modelServer) gemini(w http.ResponseWriter, body obj) {
 		if wd := m.Cwd; wd != "" {
 			cwd = wd
 		}
-		part = obj{"functionCall": obj{"name": "run_command", "args": obj{
-			"CommandLine": m.Command, "Cwd": cwd, "WaitMsBeforeAsync": 5000,
-			"toolSummary": "Create marker", "toolAction": "Running touch command",
-		}}}
+		args := obj{
+			"CommandLine":       m.Command,
+			"WaitMsBeforeAsync": 5000,
+			"toolSummary":       "Create marker",
+		}
+		if hasCwd {
+			args["Cwd"] = cwd
+		}
+		if hasToolAction {
+			args["toolAction"] = "Running touch command"
+		}
+		part = obj{"functionCall": obj{"name": "run_command", "args": args}}
 	}
 	b, _ := json.Marshal(obj{
 		"candidates":    []any{obj{"content": obj{"role": "model", "parts": []any{part}}, "finishReason": "STOP", "index": 0}},
@@ -750,3 +768,91 @@ func TestCrossHarnessBinaryE2E(t *testing.T) {
 		})
 	}
 }
+
+func TestE2E_ExtendedHarnessesLifecycleAndHooks(t *testing.T) {
+	s := newSandbox(t, "")
+	s.mkdir("ws")
+	s.write("ws/.yolonot", "allow-cmd git status\ndeny-cmd rm -rf /*\n")
+	ws := filepath.Join(s.Home, "ws")
+
+	runHook := func(harness, payload string) (string, string, int) {
+		cmd := exec.Command(yolonotBin, "hook", "--harness", harness)
+		cmd.Dir, cmd.Env = ws, s.Env
+		cmd.Stdin = strings.NewReader(payload)
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		code := 0
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				code = ee.ExitCode()
+			} else {
+				code = 1
+			}
+		}
+		return stdout.String(), stderr.String(), code
+	}
+
+	harnesses := []struct {
+		name           string
+		allowPayload   string
+		denyPayload    string
+		wantExitTwo    bool
+		wantEmptyAllow bool
+	}{
+		{"crush", `{"event":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"git status"}}`, `{"event":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"rm -rf /tmp/x"}}`, false, false},
+		{"qwen", `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"run_shell_command","tool_input":{"command":"git status"}}`, `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"run_shell_command","tool_input":{"command":"rm -rf /tmp/x"}}`, false, true},
+		{"zcode", `{"hookEventName":"PreToolUse","sessionId":"s1","cwd":"` + ws + `","toolName":"Bash","toolInput":{"command":"git status"}}`, `{"hookEventName":"PreToolUse","sessionId":"s1","cwd":"` + ws + `","toolName":"Bash","toolInput":{"command":"rm -rf /tmp/x"}}`, false, false},
+		{"copilot", `{"eventName":"preToolUse","sessionId":"s1","cwd":"` + ws + `","toolName":"bash","toolArgs":{"command":"git status"}}`, `{"eventName":"preToolUse","sessionId":"s1","cwd":"` + ws + `","toolName":"bash","toolArgs":{"command":"rm -rf /tmp/x"}}`, false, false},
+		{"grok", `{"hookEventName":"pre_tool_use","sessionId":"s1","cwd":"` + ws + `","toolName":"run_terminal_command","toolInput":{"command":"git status"}}`, `{"hookEventName":"pre_tool_use","sessionId":"s1","cwd":"` + ws + `","toolName":"run_terminal_command","toolInput":{"command":"rm -rf /tmp/x"}}`, false, false},
+		{"deepseek", `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"git status"}}`, `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"rm -rf /tmp/x"}}`, false, true},
+		{"hermes", `{"hook_event_name":"pre_tool_call","session_id":"s1","cwd":"` + ws + `","tool_name":"terminal","tool_input":{"command":"git status"}}`, `{"hook_event_name":"pre_tool_call","session_id":"s1","cwd":"` + ws + `","tool_name":"terminal","tool_input":{"command":"rm -rf /tmp/x"}}`, false, true},
+		{"kimi", `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"Bash","tool_input":{"command":"git status"}}`, `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}`, false, true},
+		{"devin", `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"exec","tool_input":{"command":"git status"}}`, `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"exec","tool_input":{"command":"rm -rf /tmp/x"}}`, false, false},
+		{"muse", `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"git status"}}`, `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"rm -rf /tmp/x"}}`, false, true},
+		{"goose", `{"event":"PreToolUse","session_id":"s1","working_dir":"` + ws + `","tool_name":"shell","tool_input":{"command":"git status"}}`, `{"event":"PreToolUse","session_id":"s1","working_dir":"` + ws + `","tool_name":"shell","tool_input":{"command":"rm -rf /tmp/x"}}`, false, true},
+		{"openhands", `{"event_type":"PreToolUse","session_id":"s1","working_dir":"` + ws + `","tool_name":"terminal","tool_input":{"command":"git status"}}`, `{"event_type":"PreToolUse","session_id":"s1","working_dir":"` + ws + `","tool_name":"terminal","tool_input":{"command":"rm -rf /tmp/x"}}`, false, true},
+		{"kiro", `{"hook_event_name":"preToolUse","cwd":"` + ws + `","tool_name":"shell","tool_input":{"command":"git status"}}`, `{"hook_event_name":"preToolUse","cwd":"` + ws + `","tool_name":"shell","tool_input":{"command":"rm -rf /tmp/x"}}`, true, true},
+		{"cline", `{"taskId":"s1","workspaceRoots":["` + ws + `"],"tool_call":{"id":"c1","name":"run_commands","input":{"commands":["git status"]}}}`, `{"taskId":"s1","workspaceRoots":["` + ws + `"],"tool_call":{"id":"c2","name":"run_commands","input":{"commands":["rm -rf /tmp/x"]}}}`, false, true},
+		{"kilo", `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"git status"}}`, `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"rm -rf /tmp/x"}}`, false, false},
+		{"openclaw", `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"exec","tool_input":{"command":"git status"}}`, `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"exec","tool_input":{"command":"rm -rf /tmp/x"}}`, false, false},
+		{"pi", `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"git status"}}`, `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"rm -rf /tmp/x"}}`, false, false},
+		{"mirror", `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"git status"}}`, `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"bash","tool_input":{"command":"rm -rf /tmp/x"}}`, false, false},
+		{"amp", `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"Bash","tool_input":{"cmd":"git status"}}`, `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"` + ws + `","tool_name":"Bash","tool_input":{"cmd":"rm -rf /tmp/x"}}`, false, false},
+	}
+
+	for _, tc := range harnesses {
+		inst := exec.Command(yolonotBin, "install", "--harness", tc.name)
+		inst.Dir, inst.Env = ws, s.Env
+		if out, err := inst.CombinedOutput(); err != nil {
+			t.Fatalf("install --harness %s failed: %v\n%s", tc.name, err, string(out))
+		}
+
+		allowOut, _, allowCode := runHook(tc.name, tc.allowPayload)
+		if allowCode != 0 {
+			t.Fatalf("%s allow exited %d", tc.name, allowCode)
+		}
+		if tc.wantEmptyAllow && strings.TrimSpace(allowOut) != "" {
+			t.Fatalf("%s allow expected empty stdout, got %q", tc.name, allowOut)
+		}
+
+		denyOut, denyErr, denyCode := runHook(tc.name, tc.denyPayload)
+		if tc.wantExitTwo {
+			if denyCode != 2 || strings.TrimSpace(denyOut) != "" || !strings.Contains(denyErr, "rule") {
+				t.Fatalf("%s deny expected exit 2 + stderr reason + empty stdout; got code=%d stdout=%q stderr=%q", tc.name, denyCode, denyOut, denyErr)
+			}
+		} else if denyCode != 0 || (!strings.Contains(denyOut, "deny") && !strings.Contains(denyOut, "block") && !strings.Contains(denyOut, `"cancel":true`)) {
+			t.Fatalf("%s deny unexpected: code=%d stdout=%q stderr=%q", tc.name, denyCode, denyOut, denyErr)
+		}
+
+		uninst := exec.Command(yolonotBin, "uninstall", "--harness", tc.name)
+		uninst.Dir, uninst.Env = ws, s.Env
+		if out, err := uninst.CombinedOutput(); err != nil {
+			t.Fatalf("uninstall --harness %s failed: %v\n%s", tc.name, err, string(out))
+		}
+	}
+}
+
+
+

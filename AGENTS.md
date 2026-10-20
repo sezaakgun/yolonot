@@ -13,7 +13,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/architecture.md](docs/architect
   - `critical` risk tier must never map to `allow` or `force_allow`.
   - Script attachment (`internal/yolonot/llm_attach.go`) must never attach sensitive home directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, etc.) or attach pre-mutation file contents when an earlier segment overwrites a script.
 - **Cross-Harness & Subcommand Parity Invariants**:
-  - **5 Supported Harnesses**: `claude` (settings hooks + Claude Mod), `codex`, `antigravity`, `opencode` (V1 `tool.execute.before` + V2 `permission.asked`/`permission.replied`), and `cursor`.
+  - **24 Supported Harnesses (plus retired `gemini`) on unified `baseHarness` (`internal/yolonot/harness_base.go`)**: `claude` (settings hooks + Claude Mod), `codex`, `antigravity`, `opencode` (V1 `tool.execute.before` + V2 `permission.asked`/`permission.replied`), `cursor`, `qwen`, `copilot`, `grok`, `crush`, `goose`, `kilo`, `pi`, `openhands`, `kimi`, `zcode`, `cline`, `muse`, `kiro`, `hermes`, `deepseek`, `devin`, `openclaw`, `mirror`, and `amp`.
   - **Sandbox Bypass Isolation**: When a harness payload requests unsandboxed execution (`dangerouslyDisableSandbox`, `BypassSandbox`, `sandbox: false`, `sandbox_permissions: "require_escalated"`, `with_escalated_permissions: true`), `HookPayload.BypassSandbox` and `DecisionEntry.BypassSandbox` MUST be set. Unsandboxed commands must:
     1. Never auto-allow via `fast_allow` (explicit user `.yolonot` `allow-cmd`/`allow-path` rules remain authoritative).
     2. Use isolated session memory (`approved_unsandboxed` / `approved_unsandboxedhash`), script cache keys, and mod replay bindings so a prior sandboxed approval never silently authorizes an unsandboxed replay.

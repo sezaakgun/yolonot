@@ -62,7 +62,7 @@ func codexRecordPre(sessionID, command, cwd, ruleAction, decision, layer, reason
 	if sessionID == "" || command == "" || decision == "deny" {
 		return
 	}
-	if h := ActiveHarness(); h == nil || h.Name() != "codex" || currentHookEventName != "PreToolUse" {
+	if h := ActiveHarness(); h == nil || !harnessUsesPermissionRequest(h) || currentHookEventName != "PreToolUse" {
 		return
 	}
 	binding, hashes := modBinding, modApprovalHashes
@@ -325,8 +325,14 @@ func cmdMod(args []string) {
 					saveApprovedSnapshot(proj, r.Command, entry.ApprovalHashes)
 				}
 				LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "allow", Source: "ask_approved", ToolUseID: r.ToolUseID})
+				entry.Decision, entry.Reason = "allow", "allowed for this session"
+			} else {
+				entry.Grant = "allow-once"
+				dropLine(proj, "asked", r.Command)
+				AppendLine(proj, "once", r.Command)
+				LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "allow", Source: "allow_once", ToolUseID: r.ToolUseID})
+				entry.Decision, entry.Reason = "allow", "allowed once (script modified since prompt)"
 			}
-			entry.Decision, entry.Reason = "allow", "allowed for this session"
 		case "deny":
 			AppendLine(proj, "denied", r.Command)
 			LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "deny", Source: "ask_rejected", ToolUseID: r.ToolUseID})

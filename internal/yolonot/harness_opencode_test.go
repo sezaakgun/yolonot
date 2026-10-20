@@ -19,7 +19,7 @@ func TestOpencodeHarnessSettingsPath(t *testing.T) {
 	os.Setenv("HOME", dir)
 	defer os.Unsetenv("HOME")
 
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	want := filepath.Join(dir, ".config", "opencode", "plugins", "yolonot.ts")
 	if got := h.SettingsPath(); got != want {
 		t.Errorf("SettingsPath() = %s, want %s", got, want)
@@ -31,7 +31,7 @@ func TestOpencodeHarnessInstallWritesPlugin(t *testing.T) {
 	os.Setenv("HOME", dir)
 	defer os.Unsetenv("HOME")
 
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	if h.IsInstalled() {
 		t.Fatal("should not be installed initially")
 	}
@@ -74,7 +74,7 @@ func TestOpencodeHarnessUninstallRemovesPlugin(t *testing.T) {
 	os.Setenv("HOME", dir)
 	defer os.Unsetenv("HOME")
 
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	if err := h.Install("/usr/local/bin/yolonot"); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestOpencodeHarnessIsDetected(t *testing.T) {
 	os.Setenv("HOME", dir)
 	defer os.Unsetenv("HOME")
 
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	if h.IsDetected() {
 		t.Fatal("should not be detected without ~/.config/opencode")
 	}
@@ -109,7 +109,7 @@ func TestOpencodeHarnessIsDetected(t *testing.T) {
 func TestOpencodeHarnessSkillInstall(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	path, err := h.InstallSkill()
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestOpencodeHarnessSkillInstall(t *testing.T) {
 func TestOpencodeHarnessXDGAndLegacyPluginMigration(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	legacy := filepath.Join(opencodeConfigDir(), "plugin", "yolonot.ts")
 	if err := os.MkdirAll(filepath.Dir(legacy), 0700); err != nil {
 		t.Fatal(err)
@@ -163,7 +163,7 @@ func TestOpencodeHarnessXDGAndLegacyPluginMigration(t *testing.T) {
 }
 
 func TestOpencodeHarnessNativeAskCapability(t *testing.T) {
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	for _, version := range []string{"", "1", "2"} {
 		t.Setenv("YOLONOT_OPENCODE_API", version)
 		if h.SupportsAsk() != (version == "2") {
@@ -211,7 +211,7 @@ func TestActiveHarnessPicksOpencodeBySessionEnv(t *testing.T) {
 
 func TestOpencodeHarnessSessionIDFromEnv(t *testing.T) {
 	t.Setenv("YOLONOT_OPENCODE_SESSION_ID", "oc-42")
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	if got := h.SessionIDFromEnv(); got != "oc-42" {
 		t.Errorf("SessionIDFromEnv() = %q, want oc-42", got)
 	}
@@ -221,7 +221,7 @@ func TestOpencodeHarnessParseHookInputCanonical(t *testing.T) {
 	// The embedded TS plugin constructs a canonical Claude-shaped payload,
 	// so ParseHookInput is a passthrough. Lock the happy path.
 	raw := `{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"oc-1","cwd":"/tmp","tool_input":{"command":"ls"}}`
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	p, err := h.ParseHookInput([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -235,7 +235,7 @@ func TestOpencodeHarnessParseHookInputCanonical(t *testing.T) {
 }
 
 func TestOpencodeHarnessParseHookInputEmpty(t *testing.T) {
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	p, err := h.ParseHookInput(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -249,7 +249,7 @@ func TestOpencodeHarnessParseHookInputInvalidJSON(t *testing.T) {
 	// Bogus JSON must surface as an error so the hook pipeline skips this
 	// event — silent fallthrough with a zero payload would let malformed
 	// input bypass the classifier entirely.
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	if _, err := h.ParseHookInput([]byte("{not json")); err == nil {
 		t.Fatal("ParseHookInput on malformed JSON must return error, got nil")
 	}
@@ -264,7 +264,7 @@ func TestOpencodeHarnessFormatHookResponseDeny(t *testing.T) {
 	r.HookSpecificOutput.PermissionDecision = "deny"
 	r.HookSpecificOutput.PermissionDecisionReason = "blocked"
 
-	out := (&OpencodeHarness{}).FormatHookResponse(r)
+	out := (newOpencodeHarness()).FormatHookResponse(r)
 	var decoded HookResponse
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
 		t.Fatalf("round trip failed: %v (output=%s)", err, out)
@@ -286,8 +286,8 @@ func TestOpencodeHarnessFormatHookResponseMatchesClaude(t *testing.T) {
 	r.HookSpecificOutput.PermissionDecision = "allow"
 	r.HookSpecificOutput.PermissionDecisionReason = "ok"
 
-	claude := (&ClaudeHarness{}).FormatHookResponse(r)
-	opencode := (&OpencodeHarness{}).FormatHookResponse(r)
+	claude := (newClaudeHarness()).FormatHookResponse(r)
+	opencode := (newOpencodeHarness()).FormatHookResponse(r)
 	if claude != opencode {
 		t.Errorf("claude vs opencode divergence:\n  claude=%s\n  opencode=%s", claude, opencode)
 	}
@@ -296,7 +296,7 @@ func TestOpencodeHarnessFormatHookResponseMatchesClaude(t *testing.T) {
 func TestOpencodeHarnessDecisionlessWarningIsPassthrough(t *testing.T) {
 	response := HookResponse{SystemMessage: "yolonot: model unavailable, falling back to host permissions"}
 	response.HookSpecificOutput.HookEventName = "PreToolUse"
-	if got := (&OpencodeHarness{}).FormatHookResponse(response); got != "" {
+	if got := (newOpencodeHarness()).FormatHookResponse(response); got != "" {
 		t.Fatalf("trusted no-decision fallback must be empty stdout, got %q", got)
 	}
 }
@@ -305,7 +305,7 @@ func TestOpencodeHarnessDefaultRiskMap(t *testing.T) {
 	// OpenCode's plugin treats empty stdout as allow, so ActionPassthrough
 	// would silently promote moderate to allow. Guard against a regression
 	// that reintroduces passthrough to this map.
-	m := (&OpencodeHarness{}).RiskMap()
+	m := (newOpencodeHarness()).RiskMap()
 	cases := map[string]string{
 		RiskSafe: ActionAllow, RiskLow: ActionAllow, RiskModerate: ActionAllow,
 		RiskHigh: ActionDeny, RiskCritical: ActionDeny,
@@ -326,7 +326,7 @@ func TestOpencodeHarnessPostInstallNotesMentionAskLimitation(t *testing.T) {
 	// Users porting a Claude .yolonot must learn that ask-rules don't
 	// behave the same on OpenCode. This guard keeps that disclosure in
 	// PostInstallNotes even as copy evolves.
-	notes := (&OpencodeHarness{}).PostInstallNotes()
+	notes := (newOpencodeHarness()).PostInstallNotes()
 	if len(notes) == 0 {
 		t.Fatal("OpenCode must surface ask-primitive limitation in PostInstallNotes")
 	}

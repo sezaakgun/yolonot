@@ -68,7 +68,6 @@ func init() {
 		"pip":   pipHandler,
 		"pip3":  pipHandler,
 		"uv":    uvHandler,
-		"uvx":   uvHandler,
 		"cargo": cargoHandler,
 		"brew":  brewHandler,
 		// Network.

@@ -21,7 +21,7 @@ func TestTargetedHarnessInstallAndUninstallPreserveClaudeMod(t *testing.T) {
 	if err := os.WriteFile(registerPath, []byte(sentinel), 0644); err != nil {
 		t.Fatal(err)
 	}
-	claudeSettings, err := os.ReadFile((&ClaudeHarness{}).SettingsPath())
+	claudeSettings, err := os.ReadFile((newClaudeHarness()).SettingsPath())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,26 +31,26 @@ func TestTargetedHarnessInstallAndUninstallPreserveClaudeMod(t *testing.T) {
 		if err != nil || string(got) != sentinel {
 			t.Fatalf("unrelated harness operation changed the Claude mod: %q, %v", got, err)
 		}
-		got, err = os.ReadFile((&ClaudeHarness{}).SettingsPath())
+		got, err = os.ReadFile((newClaudeHarness()).SettingsPath())
 		if err != nil || !bytes.Equal(got, claudeSettings) {
 			t.Fatalf("unrelated harness operation changed Claude settings: %q, %v", got, err)
 		}
 	}
 	os.Args = []string{"yolonot", "install", "--harness", "opencode", "--mod"}
 	captureStdout(cmdInstall)
-	if !(&OpencodeHarness{}).IsInstalled() {
+	if !(newOpencodeHarness()).IsInstalled() {
 		t.Fatal("target harness was not installed")
 	}
 	assertClaudeUnchanged()
 	os.Args = []string{"yolonot", "uninstall", "--harness", "opencode"}
 	captureStdout(cmdUninstall)
-	if (&OpencodeHarness{}).IsInstalled() {
+	if (newOpencodeHarness()).IsInstalled() {
 		t.Fatal("target harness was not removed")
 	}
 	assertClaudeUnchanged()
 
 	// Default uninstall must still find a mod-only Claude installation.
-	if (&ClaudeHarness{}).IsInstalled() {
+	if (newClaudeHarness()).IsInstalled() {
 		t.Fatal("fixture unexpectedly contains classic Claude hooks")
 	}
 	os.Args = []string{"yolonot", "uninstall"}
@@ -58,7 +58,7 @@ func TestTargetedHarnessInstallAndUninstallPreserveClaudeMod(t *testing.T) {
 	if _, err := os.Stat(modDir()); !os.IsNotExist(err) {
 		t.Fatalf("default uninstall left the mod-only installation: %v", err)
 	}
-	data, err := os.ReadFile((&ClaudeHarness{}).SettingsPath())
+	data, err := os.ReadFile((newClaudeHarness()).SettingsPath())
 	if err != nil {
 		t.Fatal(err)
 	}

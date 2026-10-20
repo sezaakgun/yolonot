@@ -47,7 +47,7 @@ func TestBuiltinProfilesAllPresent(t *testing.T) {
 
 func TestTranslateProfile_ClaudePreservesAsk(t *testing.T) {
 	p := GetBuiltinProfile("balanced")
-	out := TranslateProfile(p.Map, &ClaudeHarness{})
+	out := TranslateProfile(p.Map, newClaudeHarness())
 	if out[RiskModerate] != ActionAsk {
 		t.Errorf("claude balanced moderate = %q, want ask", out[RiskModerate])
 	}
@@ -58,7 +58,7 @@ func TestTranslateProfile_ClaudePreservesAsk(t *testing.T) {
 
 func TestTranslateProfile_CodexAskCollapse(t *testing.T) {
 	p := GetBuiltinProfile("balanced")
-	out := TranslateProfile(p.Map, &CodexHarness{})
+	out := TranslateProfile(p.Map, newCodexHarness())
 	if out[RiskModerate] != ActionPassthrough {
 		t.Errorf("codex balanced moderate = %q, want passthrough", out[RiskModerate])
 	}
@@ -69,7 +69,7 @@ func TestTranslateProfile_CodexAskCollapse(t *testing.T) {
 
 func TestTranslateProfile_OpencodeAskCollapse(t *testing.T) {
 	p := GetBuiltinProfile("paranoid")
-	out := TranslateProfile(p.Map, &OpencodeHarness{})
+	out := TranslateProfile(p.Map, newOpencodeHarness())
 	// safe=ask in paranoid → opencode has no passthrough → allow
 	if out[RiskSafe] != ActionAllow {
 		t.Errorf("opencode paranoid safe = %q, want allow (no passthrough/ask)", out[RiskSafe])
@@ -89,7 +89,7 @@ func TestResolveRiskMap_ProfileBeneathConfigOverride(t *testing.T) {
 		},
 	}
 	SaveConfig(cfg)
-	m := ResolveRiskMap(&ClaudeHarness{})
+	m := ResolveRiskMap(newClaudeHarness())
 	if m[RiskHigh] != ActionAsk {
 		t.Errorf("config override should beat profile: got %q, want ask", m[RiskHigh])
 	}
@@ -109,12 +109,12 @@ func TestResolveRiskMap_PerHarnessProfileOverride(t *testing.T) {
 	SaveConfig(cfg)
 
 	// Codex still on global fast → high=deny
-	mc := ResolveRiskMap(&CodexHarness{})
+	mc := ResolveRiskMap(newCodexHarness())
 	if mc[RiskHigh] != ActionDeny {
 		t.Errorf("codex global fast: high=%q, want deny", mc[RiskHigh])
 	}
 	// Claude switched to strict → high=deny too, but moderate=ask
-	mClaude := ResolveRiskMap(&ClaudeHarness{})
+	mClaude := ResolveRiskMap(newClaudeHarness())
 	if mClaude[RiskHigh] != ActionDeny {
 		t.Errorf("claude override strict: high=%q, want deny", mClaude[RiskHigh])
 	}
@@ -127,7 +127,7 @@ func TestResolveRiskMap_DefaultProfileBalanced(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()
 	SaveConfig(Config{}) // empty → DefaultProfileName=balanced
-	m := ResolveRiskMap(&ClaudeHarness{})
+	m := ResolveRiskMap(newClaudeHarness())
 	// balanced matches Claude's shipped default for backward compat.
 	if m[RiskModerate] != ActionAsk {
 		t.Errorf("default profile claude moderate=%q, want ask", m[RiskModerate])
@@ -142,7 +142,7 @@ func TestResolveRiskMap_DefaultProfileBalanced(t *testing.T) {
 // must reproduce the harness's shipped RiskMap exactly. Without this guard
 // we silently tighten policy on upgrade.
 func TestBalancedProfile_MatchesClaudeGeminiDefaults(t *testing.T) {
-	for _, h := range []Harness{&ClaudeHarness{}, &GeminiHarness{}} {
+	for _, h := range []Harness{newClaudeHarness(), newGeminiHarness()} {
 		shipped := h.RiskMap()
 		balanced := GetBuiltinProfile("balanced")
 		translated := TranslateProfile(balanced.Map, h)
@@ -216,7 +216,7 @@ func TestCustomProfile_LookupAndUse(t *testing.T) {
 	if p.Builtin {
 		t.Error("custom profile incorrectly marked builtin")
 	}
-	m := ResolveRiskMap(&ClaudeHarness{})
+	m := ResolveRiskMap(newClaudeHarness())
 	if m[RiskHigh] != ActionAsk {
 		t.Errorf("custom profile claude high=%q, want ask", m[RiskHigh])
 	}
@@ -228,7 +228,7 @@ func TestResolveActiveProfile_EnvGlobalBeatsConfig(t *testing.T) {
 	SaveConfig(Config{Profile: "balanced"})
 	t.Setenv("YOLONOT_PROFILE", "fast")
 
-	m := ResolveRiskMap(&ClaudeHarness{})
+	m := ResolveRiskMap(newClaudeHarness())
 	if m[RiskHigh] != ActionDeny {
 		t.Errorf("YOLONOT_PROFILE=fast should pin claude/high=deny, got %q", m[RiskHigh])
 	}
@@ -247,12 +247,12 @@ func TestResolveActiveProfile_PerHarnessConfigBeatsGlobalEnv(t *testing.T) {
 	})
 	t.Setenv("YOLONOT_PROFILE", "fast")
 
-	mClaude := ResolveRiskMap(&ClaudeHarness{})
+	mClaude := ResolveRiskMap(newClaudeHarness())
 	if mClaude[RiskHigh] != ActionDeny {
 		t.Errorf("per-harness config strict should beat global env fast: claude high=%q, want deny", mClaude[RiskHigh])
 	}
 	// Other harnesses still pick up the global env pin.
-	mCodex := ResolveRiskMap(&CodexHarness{})
+	mCodex := ResolveRiskMap(newCodexHarness())
 	if mCodex[RiskModerate] != ActionAllow {
 		t.Errorf("codex still on env-global fast: moderate=%q, want allow", mCodex[RiskModerate])
 	}
@@ -265,11 +265,11 @@ func TestResolveActiveProfile_EnvHarnessBeatsEnvGlobal(t *testing.T) {
 	t.Setenv("YOLONOT_PROFILE", "fast")
 	t.Setenv("YOLONOT_CLAUDE_PROFILE", "strict")
 
-	mc := ResolveRiskMap(&ClaudeHarness{})
+	mc := ResolveRiskMap(newClaudeHarness())
 	if mc[RiskLow] != ActionAsk {
 		t.Errorf("claude env override strict: low=%q, want ask", mc[RiskLow])
 	}
-	mCodex := ResolveRiskMap(&CodexHarness{})
+	mCodex := ResolveRiskMap(newCodexHarness())
 	if mCodex[RiskHigh] != ActionDeny {
 		t.Errorf("codex env global fast: high=%q, want deny", mCodex[RiskHigh])
 	}
@@ -289,7 +289,7 @@ func TestResolveActiveProfile_SessionPinBeatsEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := ResolveRiskMap(&ClaudeHarness{})
+	m := ResolveRiskMap(newClaudeHarness())
 	// strict claude: low=ask, high=deny, critical=deny
 	if m[RiskLow] != ActionAsk {
 		t.Errorf("session-pinned strict: low=%q, want ask", m[RiskLow])
@@ -391,7 +391,7 @@ func TestResolveActiveProfile_UnknownNameFallsBack(t *testing.T) {
 	defer cleanup()
 	cfg := Config{Profile: "does-not-exist"}
 	SaveConfig(cfg)
-	p := ResolveActiveProfile(LoadConfig(), &ClaudeHarness{})
+	p := ResolveActiveProfile(LoadConfig(), newClaudeHarness())
 	if p == nil || p.Name != DefaultProfileName {
 		t.Errorf("unknown profile should fall back to %s, got %v", DefaultProfileName, p)
 	}
@@ -629,7 +629,7 @@ func TestCLISubcommandsEndToEndInProcess(t *testing.T) {
 	if !strings.Contains(out, "Skill bundle refreshed.") {
 		t.Fatalf("unexpected cmdInstallSkillOnly output: %s", out)
 	}
-	_ = (&ClaudeHarness{}).Install("/usr/local/bin/yolonot")
+	_ = (newClaudeHarness()).Install("/usr/local/bin/yolonot")
 	refreshed := refreshSkillsForInstalled()
 	if len(refreshed) == 0 {
 		t.Fatalf("expected refreshSkillsForInstalled to refresh installed claude skill")

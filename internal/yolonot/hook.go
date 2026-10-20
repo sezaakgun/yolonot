@@ -46,6 +46,9 @@ func extractToolInputBypassSandbox(toolInput map[string]interface{}) bool {
 	if b, ok := toolInput["with_escalated_permissions"].(bool); ok && b {
 		return true
 	}
+	if b, ok := toolInput["requestSandboxBypass"].(bool); ok && b {
+		return true
+	}
 	return false
 }
 
@@ -61,6 +64,15 @@ func approvedHashSuffix() string {
 		return "approved_unsandboxedhash"
 	}
 	return "approvedhash"
+}
+
+func isAutoApprovePermissionMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "bypasspermissions", "yolo", "auto", "autoedit", "auto_edit", "dontask", "dont_ask", "full-auto", "unrestricted", ":unrestricted",
+		"always-approve", "allow-all", "autopilot", "dangerous", "bypass", "autonomous", "danger-full-access":
+		return true
+	}
+	return false
 }
 
 // HookResponse is the JSON returned to Claude Code.
@@ -266,7 +278,13 @@ func buildHookResponse(decision, layer, reason, command string) HookResponse {
 // Returns empty string when the adapter opted out of emitting a response
 // (e.g. Codex for allow decisions) — callers pair this with emitHook() so
 // no stray newline reaches stdout.
+var (
+	hookExit            = os.Exit
+	currentHookDecision string
+)
+
 func hookResponse(decision, layer, reason, command string) string {
+	currentHookDecision = decision
 	r := buildHookResponse(decision, layer, reason, command)
 	if currentHookEventName == "PermissionRequest" {
 		r.HookSpecificOutput.HookEventName = "PermissionRequest"
@@ -279,8 +297,18 @@ func hookResponse(decision, layer, reason, command string) string {
 // emitHook prints a hook response to stdout, skipping entirely when the
 // adapter returned "" (Codex's "allow = silence" contract). Using this
 // instead of fmt.Println keeps us from emitting a blank line that Codex
-// would try to parse as JSON.
+// would try to parse as JSON. For harnesses that require exit code 2 on
+// deny (e.g. Kiro CLI), emits the reason to stderr and exits 2.
 func emitHook(response string) {
+	if currentHookDecision == ActionDeny && harnessExitTwoOnDeny(ActiveHarness()) {
+		currentHookDecision = ""
+		if response != "" {
+			fmt.Fprintln(os.Stderr, response)
+		}
+		hookExit(2)
+		return
+	}
+	currentHookDecision = ""
 	if response == "" {
 		return
 	}
@@ -300,6 +328,7 @@ func activeHarnessFormat(r HookResponse) string {
 }
 
 func cmdHook() {
+	currentHookDecision = ""
 	// Similarity, judges and escalation share one budget, leaving room to
 	// emit a decision before the host's 60-second hook timeout.
 	hookStart := time.Now()
@@ -348,6 +377,11 @@ func cmdHook() {
 	}
 	if payload.HookEventName == "" {
 		return
+	}
+	if override := os.Getenv("YOLONOT_FORCE_SESSION_ID"); override != "" {
+		payload.SessionID = override
+	} else if payload.SessionID == "" {
+		payload.SessionID = harness.SessionIDFromEnv()
 	}
 	if !payload.BypassSandbox {
 		payload.BypassSandbox = extractToolInputBypassSandbox(payload.ToolInput)
@@ -473,7 +507,7 @@ func cmdHook() {
 					// the command with no human involved.
 					// Clear the pending ask so a later call can ask again,
 					// but never fabricate a human approval from this event.
-					if harnessSupportsAsk(harness) && harness.Name() != "cursor" && harness.Name() != "codex" {
+					if harnessSupportsAsk(harness) && !harnessAmbiguousPostToolUse(harness) && !isAutoApprovePermissionMode(payload.PermissionMode) {
 						LogDecision(DecisionEntry{SessionID: sessionID, Command: command, Cwd: cwd, Layer: "human", Decision: "allow", Source: "allow_once"})
 					}
 				}
@@ -564,11 +598,12 @@ func cmdHook() {
 		return
 	}
 
-	// Codex fires PreToolUse followed immediately by PermissionRequest for
-	// the same command when host approval is requested. If no new deny rule
-	// intervened above, reuse the paired PreToolUse verdict without logging
-	// or calling remote judges a second time.
-	if harness.Name() == "codex" && payload.HookEventName == "PermissionRequest" && sessionID != "" {
+	// Harnesses with a dual-phase PreToolUse + PermissionRequest pipeline
+	// (Codex, Qwen Code, Muse Code) fire PreToolUse followed immediately by
+	// PermissionRequest for the same command when host approval is requested.
+	// If no new deny rule intervened above, reuse the paired PreToolUse
+	// verdict without logging or calling remote judges a second time.
+	if harnessUsesPermissionRequest(harness) && payload.HookEventName == "PermissionRequest" && sessionID != "" {
 		if pre := codexConsumePre(sessionID, command, cwd, modRuleAction); pre != nil {
 			if pre.Passthrough {
 				emitHook("")

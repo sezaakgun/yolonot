@@ -14,7 +14,7 @@ func TestCodexPermissionRequestDecisionWireFormat(t *testing.T) {
 		t.Run(decision, func(t *testing.T) {
 			r := buildHookResponse(decision, "rule", "reviewed policy", "echo safe")
 			r.HookSpecificOutput.HookEventName = "PermissionRequest"
-			out := (&CodexHarness{}).FormatHookResponse(r)
+			out := (newCodexHarness()).FormatHookResponse(r)
 			if decision == "ask" || decision == "" {
 				if out != "" {
 					t.Fatalf("undecided request must leave native prompt alone: %s", out)
@@ -110,10 +110,10 @@ func TestCurrentHarnessConfigDirectories(t *testing.T) {
 		t.Run(harness, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			custom := t.TempDir()
-			var h Harness = &ClaudeHarness{}
+			var h Harness = newClaudeHarness()
 			t.Setenv("CLAUDE_CONFIG_DIR", custom)
 			if harness == "codex" {
-				h = &CodexHarness{}
+				h = newCodexHarness()
 				t.Setenv("CODEX_HOME", custom)
 			}
 			if err := h.Install("/example/yolonot"); err != nil {
@@ -142,9 +142,9 @@ func TestCurrentHarnessPreservesInvalidHostSettings(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
 				t.Setenv("CLAUDE_CONFIG_DIR", "")
 				t.Setenv("CODEX_HOME", "")
-				var h Harness = &ClaudeHarness{}
+				var h Harness = newClaudeHarness()
 				if harness == "codex" {
-					h = &CodexHarness{}
+					h = newCodexHarness()
 				}
 				if err := os.MkdirAll(filepath.Dir(h.SettingsPath()), 0700); err != nil {
 					t.Fatal(err)
@@ -194,7 +194,7 @@ func TestClaudeCurrentExecFormBlocksHookFailures(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	stubClaudeExecHooks(t, true)
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	const binary = "/example/a path with 'quotes' and $expansion/yolonot"
 	if err := h.Install(binary); err != nil {
 		t.Fatal(err)
@@ -219,7 +219,7 @@ func TestClaudeOlderOrUnknownVersionGetsShellForm(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	stubClaudeExecHooks(t, false)
-	h := &ClaudeHarness{}
+	h := newClaudeHarness()
 	const binary = "/example/a path/yolonot"
 	if err := h.Install(binary); err != nil {
 		t.Fatal(err)

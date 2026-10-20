@@ -23,7 +23,7 @@ func TestCodexHarnessSettingsPath(t *testing.T) {
 	os.Setenv("HOME", dir)
 	defer os.Unsetenv("HOME")
 
-	h := &CodexHarness{}
+	h := newCodexHarness()
 	want := filepath.Join(dir, ".codex", "hooks.json")
 	if got := h.SettingsPath(); got != want {
 		t.Errorf("SettingsPath() = %s, want %s", got, want)
@@ -33,7 +33,7 @@ func TestCodexHarnessSettingsPath(t *testing.T) {
 func TestCodexHarnessParseHookInputCanonical(t *testing.T) {
 	// Codex stdin shape is field-compatible with Claude's canonical payload.
 	raw := `{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"cdx-1","cwd":"/tmp","tool_input":{"command":"ls"},"turn_id":"t1","tool_use_id":"u1"}`
-	h := &CodexHarness{}
+	h := newCodexHarness()
 	p, err := h.ParseHookInput([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func TestCodexHarnessFormatHookResponseAskIsPassthrough(t *testing.T) {
 	r.HookSpecificOutput.PermissionDecision = "ask"
 	r.HookSpecificOutput.PermissionDecisionReason = "suspicious"
 
-	claudeOut := (&ClaudeHarness{}).FormatHookResponse(r)
+	claudeOut := (newClaudeHarness()).FormatHookResponse(r)
 	var claudeDecoded HookResponse
 	if err := json.Unmarshal([]byte(claudeOut), &claudeDecoded); err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestCodexHarnessFormatHookResponseAskIsPassthrough(t *testing.T) {
 		t.Errorf("Claude emitted %q for ask (should stay ask)", claudeDecoded.HookSpecificOutput.PermissionDecision)
 	}
 
-	codexOut := (&CodexHarness{}).FormatHookResponse(r)
+	codexOut := (newCodexHarness()).FormatHookResponse(r)
 	if codexOut != "" {
 		t.Errorf("Codex emitted %q for ask (should be empty, passthrough to host)", codexOut)
 	}
@@ -81,7 +81,7 @@ func TestCodexHarnessFormatHookResponseAllowIsSilent(t *testing.T) {
 	r.HookSpecificOutput.PermissionDecision = "allow"
 	r.HookSpecificOutput.PermissionDecisionReason = "fine"
 
-	out := (&CodexHarness{}).FormatHookResponse(r)
+	out := (newCodexHarness()).FormatHookResponse(r)
 	if out != "" {
 		t.Errorf("FormatHookResponse(allow) = %q, want empty", out)
 	}
@@ -96,8 +96,8 @@ func TestCodexHarnessFormatHookResponseMatchesClaude(t *testing.T) {
 	r.HookSpecificOutput.PermissionDecision = "deny"
 	r.HookSpecificOutput.PermissionDecisionReason = "blocked"
 
-	claude := (&ClaudeHarness{}).FormatHookResponse(r)
-	codex := (&CodexHarness{}).FormatHookResponse(r)
+	claude := (newClaudeHarness()).FormatHookResponse(r)
+	codex := (newCodexHarness()).FormatHookResponse(r)
 	if claude != codex {
 		t.Errorf("claude vs codex divergence:\n  claude=%s\n  codex=%s", claude, codex)
 	}
@@ -116,7 +116,7 @@ func TestCodexHarnessInstallUninstall(t *testing.T) {
 	os.Setenv("HOME", dir)
 	defer os.Unsetenv("HOME")
 
-	h := &CodexHarness{}
+	h := newCodexHarness()
 	if h.IsInstalled() {
 		t.Fatal("should not be installed initially")
 	}
@@ -149,7 +149,7 @@ func TestCodexHarnessIsDetected(t *testing.T) {
 	os.Setenv("HOME", dir)
 	defer os.Unsetenv("HOME")
 
-	h := &CodexHarness{}
+	h := newCodexHarness()
 	if h.IsDetected() {
 		t.Fatal("should not be detected without ~/.codex dir")
 	}
@@ -169,7 +169,7 @@ func TestCodexHarnessInstallEnablesFeatureFlag(t *testing.T) {
 	cfgPath := filepath.Join(dir, ".codex", "config.toml")
 	os.WriteFile(cfgPath, []byte("model = \"gpt-5.4\"\n"), 0644)
 
-	h := &CodexHarness{}
+	h := newCodexHarness()
 	if err := h.Install("/usr/local/bin/yolonot"); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestCodexHarnessInstallEnablesFeatureFlag(t *testing.T) {
 
 func TestCodexHarnessInstallSkill(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	h := &CodexHarness{}
+	h := newCodexHarness()
 	path, err := h.InstallSkill()
 	if err != nil || !strings.HasSuffix(path, filepath.Join(".agents", "skills", "yolonot")) {
 		t.Fatalf("InstallSkill() = (%q, %v)", path, err)
@@ -225,14 +225,14 @@ func TestCodexHarnessParseHookInputInvalidJSON(t *testing.T) {
 	// Malformed stdin must error out so the hook pipeline aborts rather
 	// than operating on a zero-value HookPayload (which would skip the
 	// classifier entirely via the empty hook_event_name guard).
-	h := &CodexHarness{}
+	h := newCodexHarness()
 	if _, err := h.ParseHookInput([]byte("{not json")); err == nil {
 		t.Fatal("ParseHookInput on malformed JSON must return error, got nil")
 	}
 }
 
 func TestCodexHarnessPostInstallNotesMentionAskLimitation(t *testing.T) {
-	notes := (&CodexHarness{}).PostInstallNotes()
+	notes := (newCodexHarness()).PostInstallNotes()
 	if len(notes) == 0 {
 		t.Fatal("Codex must surface ask-primitive limitation in PostInstallNotes")
 	}
@@ -325,7 +325,7 @@ func TestCodexHarnessInstallRejectsInvalidConfigWithoutChangingIt(t *testing.T) 
 			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 				t.Fatal(err)
 			}
-			h := &CodexHarness{}
+			h := newCodexHarness()
 			if err := h.Install("/test/yolonot"); err == nil {
 				t.Fatal("install must report invalid config")
 			}
@@ -352,7 +352,7 @@ func TestCodexHarnessFeatureWriteRefusesSymlink(t *testing.T) {
 	if err := os.Symlink(outside, path); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&CodexHarness{}).Install("/test/yolonot"); err == nil {
+	if err := (newCodexHarness()).Install("/test/yolonot"); err == nil {
 		t.Fatal("install must surface config write failure")
 	}
 	got, _ := os.ReadFile(outside)
@@ -376,7 +376,7 @@ func TestCodexHarnessGeneratedConfigLoadsInInstalledCodex(t *testing.T) {
 	if err := os.WriteFile(path, []byte("[features]\nshell_snapshot = true\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&CodexHarness{}).Install("/test/yolonot"); err != nil {
+	if err := (newCodexHarness()).Install("/test/yolonot"); err != nil {
 		t.Fatal(err)
 	}
 	info, _ := os.Stat(path)
@@ -394,10 +394,10 @@ func TestRemoveHooksWithoutHooksKey(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
 	os.WriteFile(filepath.Join(dir, "hooks.json"), []byte(`{}`), 0644)
 	os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"theme":"dark"}`), 0644)
-	if err := (&CodexHarness{}).removeHooks(); err != nil {
+	if err := (newCodexHarness()).removeHooks(); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&ClaudeHarness{}).removeHooks(); err != nil {
+	if err := (newClaudeHarness()).removeHooks(); err != nil {
 		t.Fatal(err)
 	}
 }

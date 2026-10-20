@@ -22,11 +22,32 @@ type learningCandidate struct {
 	Allows  int    `json:"allows"`
 }
 
-func collectLearningCandidates(cwd string, entries []DecisionEntry, existingRules []Rule) []learningCandidate {
+func filterEntriesByProject(cwd string, entries []DecisionEntry) []DecisionEntry {
 	root := projectRoot(cwd)
 	if root == "" {
-		return nil
+		return entries
 	}
+	rootByCwd := map[string]string{}
+	out := make([]DecisionEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.Cwd == "" {
+			out = append(out, e)
+			continue
+		}
+		r, ok := rootByCwd[e.Cwd]
+		if !ok {
+			r = projectRoot(e.Cwd)
+			rootByCwd[e.Cwd] = r
+		}
+		if r == root {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func collectLearningCandidates(cwd string, entries []DecisionEntry, existingRules []Rule) []learningCandidate {
+	root := projectRoot(cwd)
 	type tally struct {
 		asks, allows, denies int
 		sessionApproved      bool
@@ -38,13 +59,15 @@ func collectLearningCandidates(cwd string, entries []DecisionEntry, existingRule
 		if e.BypassSandbox || e.Cwd == "" {
 			continue
 		}
-		r, ok := rootByCwd[e.Cwd]
-		if !ok {
-			r = projectRoot(e.Cwd)
-			rootByCwd[e.Cwd] = r
-		}
-		if r != root {
-			continue
+		if root != "" {
+			r, ok := rootByCwd[e.Cwd]
+			if !ok {
+				r = projectRoot(e.Cwd)
+				rootByCwd[e.Cwd] = r
+			}
+			if r != root {
+				continue
+			}
 		}
 		t, ok := byCommand[e.Command]
 		if !ok {

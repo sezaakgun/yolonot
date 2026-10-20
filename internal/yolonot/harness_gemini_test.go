@@ -19,7 +19,7 @@ func TestGeminiHarnessSettingsPath(t *testing.T) {
 	os.Setenv("HOME", dir)
 	defer os.Unsetenv("HOME")
 
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	want := filepath.Join(dir, ".gemini", "settings.json")
 	if got := h.SettingsPath(); got != want {
 		t.Errorf("SettingsPath() = %s, want %s", got, want)
@@ -29,7 +29,7 @@ func TestGeminiHarnessSettingsPath(t *testing.T) {
 func TestGeminiHarnessParseHookInputNormalisesEventName(t *testing.T) {
 	// Gemini emits BeforeTool / AfterTool; yolonot's internal rule engine
 	// branches on PreToolUse / PostToolUse. ParseHookInput must rewrite.
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	cases := map[string]string{
 		"BeforeTool": "PreToolUse",
 		"AfterTool":  "PostToolUse",
@@ -50,7 +50,7 @@ func TestGeminiHarnessParseHookInputNormalisesToolName(t *testing.T) {
 	// The rule engine / fast_allow logic branches on tool_name == "Bash".
 	// Gemini's shell tool is "run_shell_command"; ParseHookInput aliases it.
 	raw := `{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","session_id":"g1","cwd":"/tmp","tool_input":{"command":"ls"}}`
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	p, err := h.ParseHookInput([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestGeminiHarnessParseHookInputLeavesOtherToolsAlone(t *testing.T) {
 	// tools shouldn't normally reach us — but if they do, don't silently
 	// rename them to Bash (which would make the rule engine misbehave).
 	raw := `{"hook_event_name":"BeforeTool","tool_name":"read_file","tool_input":{"path":"/etc/passwd"}}`
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	p, err := h.ParseHookInput([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestGeminiHarnessParseHookInputLeavesOtherToolsAlone(t *testing.T) {
 func TestGeminiHarnessFormatHookResponseFlat(t *testing.T) {
 	// Gemini's scheduler reads decision/reason/systemMessage as TOP-LEVEL
 	// fields. Any nested hookSpecificOutput is ignored and falls open.
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	for _, dec := range []string{"allow", "ask", "deny"} {
 		r := HookResponse{}
 		r.HookSpecificOutput.HookEventName = "PreToolUse"
@@ -123,7 +123,7 @@ func TestGeminiHarnessFormatHookResponseAskIsPreserved(t *testing.T) {
 	r.HookSpecificOutput.PermissionDecision = "ask"
 	r.HookSpecificOutput.PermissionDecisionReason = "suspicious"
 
-	out := (&GeminiHarness{}).FormatHookResponse(r)
+	out := (newGeminiHarness()).FormatHookResponse(r)
 	var decoded map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestGeminiHarnessFormatHookResponseAskIsPreserved(t *testing.T) {
 	}
 
 	// Sanity: Claude should also still emit ask (untouched).
-	claudeOut := (&ClaudeHarness{}).FormatHookResponse(r)
+	claudeOut := (newClaudeHarness()).FormatHookResponse(r)
 	var claudeDecoded HookResponse
 	if err := json.Unmarshal([]byte(claudeOut), &claudeDecoded); err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestGeminiHarnessFormatHookResponseEmptyIsSilent(t *testing.T) {
 	// open on Gemini's parser; empty stdout is the documented implicit-allow
 	// path. Matches CodexHarness behavior for allow-silent mode.
 	r := HookResponse{}
-	if out := (&GeminiHarness{}).FormatHookResponse(r); out != "" {
+	if out := (newGeminiHarness()).FormatHookResponse(r); out != "" {
 		t.Errorf("FormatHookResponse(empty) = %q, want empty", out)
 	}
 }
@@ -162,7 +162,7 @@ func TestGeminiHarnessInstallWritesMatcherAndTimeout(t *testing.T) {
 	defer os.Unsetenv("HOME")
 	os.MkdirAll(filepath.Join(dir, ".gemini"), 0755)
 
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	if err := h.Install("/usr/local/bin/yolonot"); err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestGeminiHarnessInstallPinsHarnessFlag(t *testing.T) {
 	defer os.Unsetenv("HOME")
 	os.MkdirAll(filepath.Join(dir, ".gemini"), 0755)
 
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	if err := h.Install("/usr/local/bin/yolonot"); err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestGeminiHarnessInstallPreservesOtherSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	if err := h.Install("/usr/local/bin/yolonot"); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestGeminiHarnessInstallUninstall(t *testing.T) {
 	defer os.Unsetenv("HOME")
 	os.MkdirAll(filepath.Join(dir, ".gemini"), 0755)
 
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	if h.IsInstalled() {
 		t.Fatal("should not be installed initially")
 	}
@@ -272,7 +272,7 @@ func TestGeminiHarnessUninstallKeepsOtherHooks(t *testing.T) {
 	defer os.Unsetenv("HOME")
 	os.MkdirAll(filepath.Join(dir, ".gemini"), 0755)
 
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	if err := h.Install("/usr/local/bin/yolonot"); err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +304,7 @@ func TestGeminiHarnessIsDetected(t *testing.T) {
 	os.Setenv("HOME", dir)
 	defer os.Unsetenv("HOME")
 
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	if h.IsDetected() {
 		t.Fatal("should not be detected without ~/.gemini")
 	}
@@ -316,7 +316,7 @@ func TestGeminiHarnessIsDetected(t *testing.T) {
 
 func TestGeminiHarnessSkillInstallUninstall(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	path, err := h.InstallSkill()
 	if err != nil || path == "" {
 		t.Fatalf("InstallSkill() = (%q, %v)", path, err)
@@ -358,7 +358,7 @@ func TestActiveHarnessPicksGeminiBySessionEnv(t *testing.T) {
 
 func TestGeminiHarnessSessionIDFromEnv(t *testing.T) {
 	t.Setenv("YOLONOT_GEMINI_SESSION_ID", "gem-99")
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	if got := h.SessionIDFromEnv(); got != "gem-99" {
 		t.Errorf("SessionIDFromEnv() = %q, want gem-99", got)
 	}
@@ -367,7 +367,7 @@ func TestGeminiHarnessSessionIDFromEnv(t *testing.T) {
 func TestGeminiHarnessParseHookInputInvalidJSON(t *testing.T) {
 	// Malformed stdin must error — empty hook_event_name alone would also
 	// short-circuit, but returning an error surfaces the bug sooner.
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	if _, err := h.ParseHookInput([]byte("{not json")); err == nil {
 		t.Fatal("ParseHookInput on malformed JSON must return error, got nil")
 	}
@@ -380,7 +380,7 @@ func TestGeminiHarnessPostInstallNotesWarnAboutYolo(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
-	notes := (&GeminiHarness{}).PostInstallNotes()
+	notes := (newGeminiHarness()).PostInstallNotes()
 	if len(notes) == 0 {
 		t.Fatal("Gemini PostInstallNotes empty — --yolo warning missing")
 	}
@@ -402,7 +402,7 @@ func TestGeminiHarnessPostInstallNotesSuppressedWhenYoloDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	notes := (&GeminiHarness{}).PostInstallNotes()
+	notes := (newGeminiHarness()).PostInstallNotes()
 	if len(notes) != 0 {
 		t.Errorf("PostInstallNotes should be empty when yolo is default; got %v", notes)
 	}

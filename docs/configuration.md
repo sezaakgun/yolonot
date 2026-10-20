@@ -25,9 +25,7 @@ that a running host loaded or trusted the hooks. See [harness verification](harn
 patterns on shell interpreters or mutating multiplex tools like `git *` or
 `bash *`), policy risk settings (`attach_outside_root`, `force_allow` /
 `high=allow` overrides), active paused sessions, and read-only host
-permission/sandbox settings across Claude (`.claude/settings*.json`), Codex
-(`config.toml`), Antigravity (`~/.gemini/config/config.json`) and Cursor
-(`cli-config.json`).
+permission/sandbox settings across all 24 supported harnesses (including Claude, Codex, OpenCode, Antigravity, Cursor, Qwen, Copilot, Grok, Crush, Goose, Kilo, Pi, OpenHands, Kimi, ZCode, Cline, Muse, Kiro, Hermes, DeepSeek, Devin, OpenClaw, Mirror, and Amp).
 
 `status --all` (and `status --json`) combines session decisions, resolved risk
 tiers, profile, models, protocols, judges, rule sources, pause state, failure

@@ -40,6 +40,7 @@ the host or explicitly by the user. Environment sources understood by yolonot:
 | OpenCode | `YOLONOT_OPENCODE_SESSION_ID` or `OPENCODE_SESSION_ID` |
 | Cursor | `YOLONOT_CURSOR_SESSION_ID` |
 | Antigravity | `YOLONOT_ANTIGRAVITY_SESSION_ID` |
+| Other harnesses | `YOLONOT_<HARNESS>_SESSION_ID` (e.g. `YOLONOT_QWEN_SESSION_ID`, `YOLONOT_COPILOT_SESSION_ID`) |
 
 Most hosts supply the ID to hooks without exporting it to shell tools. Do not
 invent it or infer it from the newest file. `--current` means the most recently

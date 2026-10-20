@@ -359,7 +359,7 @@ func TestBuildAnalyzePromptAndCacheIsolationWithSessionContext(t *testing.T) {
 	}
 
 	// CursorHarness preserves transcript_path
-	ch := &CursorHarness{}
+	ch := newCursorHarness()
 	pl, err := ch.ParseHookInput([]byte(`{"hook_event_name":"beforeShellExecution","conversation_id":"c1","cwd":"/tmp","command":"ls","transcript_path":"/tmp/cursor-t.jsonl"}`))
 	if err != nil || pl.TranscriptPath != "/tmp/cursor-t.jsonl" {
 		t.Errorf("CursorHarness.ParseHookInput should preserve transcript_path, got %+v (err=%v)", pl, err)

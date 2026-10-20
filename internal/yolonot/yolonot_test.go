@@ -25,8 +25,12 @@ func withFakeHome(t *testing.T) (string, func()) {
 	dir := t.TempDir()
 	orig := os.Getenv("HOME")
 	origSysRoot := os.Getenv("YOLONOT_SYSTEM_ROOT")
+	origAgyConv := os.Getenv("ANTIGRAVITY_CONVERSATION_ID")
+	origHarness := os.Getenv("YOLONOT_HARNESS")
 	os.Setenv("HOME", dir)
 	os.Setenv("YOLONOT_SYSTEM_ROOT", filepath.Join(dir, "sysroot"))
+	os.Unsetenv("ANTIGRAVITY_CONVERSATION_ID")
+	os.Unsetenv("YOLONOT_HARNESS")
 	os.MkdirAll(filepath.Join(dir, ".yolonot", "sessions"), 0755)
 	os.MkdirAll(filepath.Join(dir, ".yolonot", "cache"), 0755)
 	os.MkdirAll(filepath.Join(dir, ".claude"), 0755)
@@ -34,6 +38,16 @@ func withFakeHome(t *testing.T) (string, func()) {
 	return dir, func() {
 		os.Setenv("HOME", orig)
 		os.Setenv("YOLONOT_SYSTEM_ROOT", origSysRoot)
+		if origAgyConv != "" {
+			os.Setenv("ANTIGRAVITY_CONVERSATION_ID", origAgyConv)
+		} else {
+			os.Unsetenv("ANTIGRAVITY_CONVERSATION_ID")
+		}
+		if origHarness != "" {
+			os.Setenv("YOLONOT_HARNESS", origHarness)
+		} else {
+			os.Unsetenv("YOLONOT_HARNESS")
+		}
 	}
 }
 

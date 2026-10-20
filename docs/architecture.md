@@ -43,6 +43,7 @@ yolonot/
 │   │   ├── executable_snapshot.go # local native executable identity for approval/replay
 │   │   ├── pause.go            # session pause/resume marker handling
 │   │   ├── harness.go          # Harness interface + registry + resolution
+│   │   ├── harness_base.go     # Extensible baseHarness + shared JSON/TOML/YAML/shim installers
 │   │   ├── harness_claude.go   # Claude Code adapter
 │   │   ├── harness_codex.go    # Codex CLI adapter
 │   │   ├── harness_opencode.go # OpenCode plugin adapter
@@ -50,6 +51,8 @@ yolonot/
 │   │   ├── harness_antigravity.go # Antigravity CLI adapter
 │   │   ├── harness_gemini.go   # retired Gemini compatibility/cleanup
 │   │   ├── harness_cursor.go   # Cursor adapter
+│   │   ├── harness_*.go        # 19 additional harness adapters (qwen, copilot, grok, crush, goose, kilo, pi, openhands, kimi, zcode, cline, muse, kiro, hermes, deepseek, devin, openclaw, mirror, amp)
+│   │   ├── discover_harnesses.go # Host permission/rule discovery for extended harnesses
 │   │   └── skills/
 │   │       └── SKILL.md        # Shared management skill (embedded in binary)
 │   ├── fastallow/          # built-in bash-AST fast-path (Dippy-inspired)

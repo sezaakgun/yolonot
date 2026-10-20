@@ -13,7 +13,7 @@ import (
 )
 
 func TestCursorNativeAskOptInPreservesDefaultPassthrough(t *testing.T) {
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	r := buildHookResponse(ActionAsk, "rule", "review required", "example")
 	for _, flag := range []string{"", "0", "true", "1"} {
 		t.Run(flag, func(t *testing.T) {
@@ -43,14 +43,14 @@ func TestCursorNativeAskOptInPreservesDefaultPassthrough(t *testing.T) {
 
 func TestCursorCurrentToolCorrelationField(t *testing.T) {
 	input := []byte(`{"conversation_id":"conv","tool_use_id":"call-123","hook_event_name":"beforeShellExecution","command":"git status","cwd":"/project"}`)
-	payload, err := (&CursorHarness{}).ParseHookInput(input)
+	payload, err := (newCursorHarness()).ParseHookInput(input)
 	if err != nil || payload.ToolUseID != "call-123" || payload.SessionID != "conv" {
 		t.Fatalf("current Cursor tool correlation lost: %+v %v", payload, err)
 	}
 }
 
 func TestGoogleCursorSettingsMutationsRejectMalformedFiles(t *testing.T) {
-	for _, h := range []Harness{&GeminiHarness{}, &CursorHarness{}} {
+	for _, h := range []Harness{newGeminiHarness(), newCursorHarness()} {
 		t.Run(h.Name(), func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			path := h.SettingsPath()
@@ -76,7 +76,7 @@ func TestGoogleCursorSettingsMutationsRejectMalformedFiles(t *testing.T) {
 }
 
 func TestGoogleCursorSettingsWritesPreservePrivateMode(t *testing.T) {
-	for _, h := range []Harness{&GeminiHarness{}, &CursorHarness{}} {
+	for _, h := range []Harness{newGeminiHarness(), newCursorHarness()} {
 		t.Run(h.Name(), func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			path := h.SettingsPath()
@@ -107,7 +107,7 @@ func TestInstalledGeminiDiscoversSkillWithoutModelCall(t *testing.T) {
 	}
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
-	h := &GeminiHarness{}
+	h := newGeminiHarness()
 	if _, err := h.InstallSkill(); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestCursorWorkspaceScopeWithForeignHookDirectory(t *testing.T) {
 	for _, event := range []string{"beforeShellExecution", "afterShellExecution"} {
 		for _, explicit := range []string{"", project, "."} {
 			input, _ := json.Marshal(map[string]any{"hook_event_name": event, "command": "cursor-denied", "cwd": explicit, "workspace_roots": []string{project, "/other-workspace"}})
-			payload, err := (&CursorHarness{}).ParseHookInput(input)
+			payload, err := (newCursorHarness()).ParseHookInput(input)
 			if err != nil || payload.Cwd != project {
 				t.Fatalf("scope lost: %+v %v", payload, err)
 			}

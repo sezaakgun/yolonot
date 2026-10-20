@@ -20,10 +20,6 @@ func harnessSupportsAsk(h Harness) bool {
 	if capability, ok := h.(interface{ SupportsAsk() bool }); ok {
 		return capability.SupportsAsk()
 	}
-	switch h.Name() {
-	case "claude", "gemini", "antigravity":
-		return true
-	}
 	return false
 }
 

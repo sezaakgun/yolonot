@@ -301,15 +301,15 @@ func pythonHandler(tokens []string) (bool, string) {
 		return false, ""
 	}
 	head := tokens[0]
-	for _, t := range tokens[1:] {
-		if _, ok := pythonSafeFlags[t]; ok {
-			return true, head + " " + t
+	if len(tokens) == 2 {
+		if _, ok := pythonSafeFlags[tokens[1]]; ok {
+			return true, head + " " + tokens[1]
 		}
 	}
 	// -c, -m, -i are always unsafe to auto-approve (except -m calendar).
 	for i, t := range tokens[1:] {
 		if t == "-m" {
-			if i+2 < len(tokens) && tokens[i+2] == "calendar" {
+			if len(tokens) == 3 && i == 0 && tokens[2] == "calendar" {
 				return true, head + " -m calendar"
 			}
 			return false, ""

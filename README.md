@@ -6,7 +6,7 @@
 
 <p align="center">
   Configurable command guardrails for AI coding agents.<br>
-  One policy engine across Claude Code, Codex CLI, OpenCode, Antigravity, and Cursor.
+  One policy engine across 24 AI coding harnesses — Claude Code, Codex CLI, OpenCode, Antigravity, Cursor, GitHub Copilot CLI, Qwen, Grok, Kiro, Cline, and more.
 </p>
 
 <p align="center">
@@ -43,7 +43,7 @@ yolonot setup
 yolonot setup --harness codex
 ```
 
-Targets: `claude`, `codex`, `opencode`, `antigravity` (`agy`), `cursor`. Without a target,
+Targets: `claude`, `codex`, `opencode`, `antigravity` (`agy`), `cursor`, plus 19 additional harnesses (`qwen`, `copilot`, `grok`, `crush`, `goose`, `kilo`, `pi`, `openhands`, `kimi`, `zcode`, `cline`, `muse`, `kiro`, `hermes`, `deepseek`, `devin`, `openclaw`, `mirror`, `amp` — see [docs/harnesses.md](docs/harnesses.md)). Without a target,
 setup installs into detected harnesses. The optional Claude transcript mod
 is installed with `yolonot install --harness claude --mod`.
 

@@ -28,7 +28,7 @@ func TestOpencodeV2PluginNativePermissionLifecycle(t *testing.T) {
 	if err := os.WriteFile(fixture, []byte(fixtureScript), 0700); err != nil {
 		t.Fatal(err)
 	}
-	h := &OpencodeHarness{}
+	h := newOpencodeHarness()
 	if err := h.Install(fixture); err != nil {
 		t.Fatal(err)
 	}

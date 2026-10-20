@@ -13,46 +13,72 @@ import (
 	"github.com/pelletier/go-toml/v2/unstable"
 )
 
-func init() { RegisterHarness(&CodexHarness{}) }
+func init() { RegisterHarness(newCodexHarness()) }
 
 // CodexHarness is the OpenAI Codex CLI adapter.
-//
-// Codex's hook protocol is a near-clone of Claude's: same stdin payload
-// fields (session_id, hook_event_name, tool_name, tool_input.command,
-// tool_response) and same response shape (hookSpecificOutput.hookEventName /
-// permissionDecision / permissionDecisionReason). The canonical HookPayload
-// / HookResponse pair therefore shares the canonical payload, with response
-// decisions narrowed to the PreToolUse contract below.
-//
-// Differences from Claude:
-//   - Hooks live in ~/.codex/hooks.json (dedicated file, not a full settings
-//     file). The JSON root is just {"hooks": {...}}.
-//   - Codex does not expose a session-id env var; session IDs are only on
-//     stdin. SessionIDFromEnv() returns the YOLONOT_CODEX_SESSION_ID
-//     override if the user chooses to set one in their shell, otherwise
-//     empty (CLI commands fall back to --current / --session-id).
-//   - PermissionRequest approves host requests separately from PreToolUse.
-type CodexHarness struct{}
-
-func (c *CodexHarness) Name() string { return "codex" }
-
-// RiskMap is Codex's default tier→action policy. Its PreToolUse hook has no
-// "ask" primitive, so moderate is left to
-// the host's own permission engine via passthrough, and high/critical
-// escalate to deny. This replaces the old hardcoded ask→deny rewrite
-// with an explicit, user-configurable policy.
-func (c *CodexHarness) RiskMap() map[string]string {
-	return map[string]string{
-		RiskSafe:     ActionAllow,
-		RiskLow:      ActionAllow,
-		RiskModerate: ActionPassthrough,
-		RiskHigh:     ActionDeny,
-		RiskCritical: ActionDeny,
-	}
+type CodexHarness struct {
+	baseHarness
 }
 
-func (c *CodexHarness) SettingsPath() string {
-	return filepath.Join(codexConfigDir(), "hooks.json")
+func newCodexHarness() *CodexHarness {
+	h := &CodexHarness{
+		baseHarness: baseHarness{
+			name:                 "codex",
+			usesPermRequestPhase: true,
+			riskMap:              allowDenyRiskMap(),
+			sessionEnvKeys:       []string{"YOLONOT_CODEX_SESSION_ID"},
+			configDirFn:          codexConfigDir,
+			settingsPathFn: func() string {
+				return filepath.Join(codexConfigDir(), "hooks.json")
+			},
+			skillDirFn: func() string {
+				home, _ := os.UserHomeDir()
+				return filepath.Join(home, ".agents", "skills", "yolonot")
+			},
+			parseFn: func(input []byte) (HookPayload, error) {
+				if len(input) == 0 {
+					return HookPayload{}, nil
+				}
+				var p HookPayload
+				if err := json.Unmarshal(input, &p); err != nil {
+					return HookPayload{}, err
+				}
+				if wd, ok := p.ToolInput["workdir"].(string); ok && wd != "" {
+					if !filepath.IsAbs(wd) && p.Cwd != "" {
+						p.Cwd = filepath.Join(p.Cwd, wd)
+					} else {
+						p.Cwd = wd
+					}
+				}
+				if !p.BypassSandbox {
+					p.BypassSandbox = extractToolInputBypassSandbox(p.ToolInput)
+				}
+				return p, nil
+			},
+			formatFn: func(r HookResponse) string {
+				return formatPermissionRequestOrClaude(r, false)
+			},
+			notes: []string{
+				"PreToolUse blocks deny decisions; PermissionRequest approves allowed requests and leaves ask decisions to Codex's own permission dialog.",
+				"Use 'deny' rules for hard blocks; see 'yolonot risk codex' for the default risk map.",
+				"Review and trust the installed hooks in Codex /hooks; changed non-managed hooks are skipped until trusted.",
+				"yolonot install enables features.hooks in Codex config.toml (CODEX_HOME is supported).",
+			},
+		},
+	}
+	h.useNestedJSONHooks(nestedJSONHooksSpec{
+		harnessName:     "codex",
+		events:          []string{"PreToolUse", "PermissionRequest", "PostToolUse"},
+		matcher:         "Bash",
+		matchAnyYolonot: true,
+		preInstall: func(string) error {
+			if err := ensureCodexFeatureFlag(); err != nil {
+				return fmt.Errorf("enable Codex hooks: %w", err)
+			}
+			return nil
+		},
+	})
+	return h
 }
 
 func codexConfigDir() string {
@@ -63,147 +89,11 @@ func codexConfigDir() string {
 	return filepath.Join(home, ".codex")
 }
 
-// SessionIDFromEnv honours the optional YOLONOT_CODEX_SESSION_ID shell
-// override. Codex itself does not export its session id (see
-// github.com/openai/codex#8923), so auto-detecting "the active harness is
-// Codex" from env is unreliable — users set YOLONOT_HARNESS=codex instead.
-func (c *CodexHarness) SessionIDFromEnv() string {
-	return os.Getenv("YOLONOT_CODEX_SESSION_ID")
-}
-
-func (c *CodexHarness) ParseHookInput(input []byte) (HookPayload, error) {
-	if len(input) == 0 {
-		return HookPayload{}, nil
-	}
-	var p HookPayload
-	if err := json.Unmarshal(input, &p); err != nil {
-		return HookPayload{}, err
-	}
-	if wd, ok := p.ToolInput["workdir"].(string); ok && wd != "" {
-		if !filepath.IsAbs(wd) && p.Cwd != "" {
-			p.Cwd = filepath.Join(p.Cwd, wd)
-		} else {
-			p.Cwd = wd
-		}
-	}
-	if !p.BypassSandbox {
-		p.BypassSandbox = extractToolInputBypassSandbox(p.ToolInput)
-	}
-	return p, nil
-}
-
-// FormatHookResponse emits explicit denies through PreToolUse and uses
-// PermissionRequest's separate decision object to approve or deny an
-// actual host permission request.
-//
-//   - allow → empty output (defer to host)
-//   - deny  → explicit canonical response
-//   - ask   → empty (passthrough to host). The risk map is now responsible
-//     for deciding whether ambiguous commands escalate to deny or fall
-//     through; Codex's default map sets high/critical → deny and moderate
-//     → passthrough, so ask should not reach the wire in practice. If a
-//     user forces ask via config override, we defer to Codex's own engine
-//     rather than silently rewriting to deny.
-//
-// This diverges from ClaudeHarness.FormatHookResponse (which emits all
-// three verbatim) — Claude's PreToolUse accepts all three.
-func (c *CodexHarness) FormatHookResponse(r HookResponse) string {
-	if r.HookSpecificOutput.HookEventName == "PermissionRequest" {
-		decision := r.HookSpecificOutput.PermissionDecision
-		if decision != "allow" && decision != "deny" {
-			return ""
-		}
-		verdict := map[string]string{"behavior": decision}
-		if decision == "deny" && r.HookSpecificOutput.PermissionDecisionReason != "" {
-			verdict["message"] = r.HookSpecificOutput.PermissionDecisionReason
-		}
-		data, _ := json.Marshal(map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
-			"hookEventName": "PermissionRequest", "decision": verdict,
-		}})
-		return string(data)
-	}
-	switch r.HookSpecificOutput.PermissionDecision {
-	case "allow", "ask", "":
-		return ""
-	}
-	data, _ := json.Marshal(r)
-	return string(data)
-}
-
-func (c *CodexHarness) IsInstalled() bool {
-	s := c.loadHooks()
-	hooks, _ := s["hooks"].(map[string]interface{})
-	pre, _ := hooks["PreToolUse"].([]interface{})
-	for _, entry := range pre {
-		e, ok := entry.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		hs, _ := e["hooks"].([]interface{})
-		for _, h := range hs {
-			hm, ok := h.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if cmd, ok := hm["command"].(string); ok && strings.Contains(cmd, "yolonot") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (c *CodexHarness) Install(binaryPath string) error {
-	if _, err := c.readHooks(); err != nil {
-		return err
-	}
-	// Validate and enable hooks before changing their registration. In
-	// particular, an invalid config must not turn into a successful install.
-	if err := c.ensureFeatureFlag(); err != nil {
-		return fmt.Errorf("enable Codex hooks: %w", err)
-	}
-	if c.IsInstalled() {
-		Verbosef("existing install detected — removing old hooks from %s", c.SettingsPath())
-		if err := c.removeHooks(); err != nil {
-			return err
-		}
-	}
-
-	s, err := c.readHooks()
-	if err != nil {
-		return err
-	}
-	hooks, _ := s["hooks"].(map[string]interface{})
-	if hooks == nil {
-		hooks = map[string]interface{}{}
-		s["hooks"] = hooks
-	}
-
-	// Pin --harness codex so the hook routes through CodexHarness.Format,
-	// not Claude's (default when no harness env var is set — Codex doesn't
-	// export CODEX_SESSION_ID, so auto-detection would otherwise pick claude
-	// and emit permissionDecision:"allow", which Codex rejects).
-	bp := shellHookCommand(binaryPath, "codex")
-	preHook := map[string]interface{}{"type": "command", "command": bp, "timeout": 60.0}
-	postHook := map[string]interface{}{"type": "command", "command": bp, "timeout": 60.0}
-
-	addHookToEvent(hooks, "PreToolUse", "Bash", preHook)
-	addHookToEvent(hooks, "PermissionRequest", "Bash", preHook)
-	addHookToEvent(hooks, "PostToolUse", "Bash", postHook)
-
-	if err := c.saveHooks(s); err != nil {
-		return err
-	}
-	Verbosef("wrote %s (Bash matcher for PreToolUse + PermissionRequest + PostToolUse, timeout 60s)", c.SettingsPath())
-
-	return nil
-}
-
-// ensureFeatureFlag enables canonical hooks and migrates its deprecated
-// codex_hooks alias. Surgical edits
-// preserve comments and unrelated settings; parsing before and after refuses
-// invalid TOML rather than appending a duplicate [features] table.
-func (c *CodexHarness) ensureFeatureFlag() error {
+// ensureCodexFeatureFlag enables canonical hooks and migrates its deprecated
+// codex_hooks alias. Surgical edits preserve comments and unrelated settings;
+// parsing before and after refuses invalid TOML rather than appending a
+// duplicate [features] table.
+func ensureCodexFeatureFlag() error {
 	path := filepath.Join(codexConfigDir(), "config.toml")
 	data, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -401,118 +291,4 @@ func enableCodexHookFlags(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("cannot safely enable features.hooks")
 	}
 	return updated, nil
-}
-
-func (c *CodexHarness) Uninstall() error {
-	Verbosef("stripping yolonot hooks from %s", c.SettingsPath())
-	return c.removeHooks()
-}
-
-func (c *CodexHarness) InstallSkill() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return installHarnessSkill("codex", filepath.Join(home, ".agents", "skills", "yolonot"))
-}
-func (c *CodexHarness) UninstallSkill() error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	return uninstallHarnessSkill(filepath.Join(home, ".agents", "skills", "yolonot"))
-}
-
-// PostInstallNotes documents this adapter's enforcement capabilities.
-// The PreToolUse integration only emits deny — "ask" is surfaced as
-// passthrough, letting Codex's own permission engine decide. Users
-// porting an existing Claude .yolonot with ask rules need to know this.
-func (c *CodexHarness) PostInstallNotes() []string {
-	return []string{
-		"PreToolUse blocks deny decisions; PermissionRequest approves allowed requests and leaves ask decisions to Codex's own permission dialog.",
-		"Use 'deny' rules for hard blocks; see 'yolonot risk codex' for the default risk map.",
-		"Review and trust the installed hooks in Codex /hooks; changed non-managed hooks are skipped until trusted.",
-		"yolonot install enables features.hooks in Codex config.toml (CODEX_HOME is supported).",
-	}
-}
-
-// IsDetected returns true if ~/.codex exists. Unlike Claude, we don't
-// optimistically create the dir — if a user hasn't installed Codex yet,
-// we shouldn't pick it as the default install target.
-func (c *CodexHarness) IsDetected() bool {
-	_, err := os.Stat(codexConfigDir())
-	return err == nil
-}
-
-func (c *CodexHarness) loadHooks() map[string]interface{} {
-	s, _ := c.readHooks()
-	if s == nil {
-		return map[string]interface{}{}
-	}
-	return s
-}
-
-func (c *CodexHarness) readHooks() (map[string]interface{}, error) {
-	data, err := os.ReadFile(c.SettingsPath())
-	if os.IsNotExist(err) {
-		return map[string]interface{}{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var s map[string]interface{}
-	if err := json.Unmarshal(data, &s); err != nil || s == nil {
-		return nil, fmt.Errorf("%s: expected a valid JSON object", c.SettingsPath())
-	}
-	if hooks, present := s["hooks"]; present {
-		if _, ok := hooks.(map[string]interface{}); !ok {
-			return nil, fmt.Errorf("%s: hooks must be an object", c.SettingsPath())
-		}
-	}
-	return s, nil
-}
-
-func (c *CodexHarness) saveHooks(s map[string]interface{}) error {
-	data, _ := json.MarshalIndent(s, "", "  ")
-	return atomicWriteFile(c.SettingsPath(), append(data, '\n'), 0644)
-}
-
-func (c *CodexHarness) removeHooks() error {
-	s, err := c.readHooks()
-	if err != nil {
-		return err
-	}
-	hooks, _ := s["hooks"].(map[string]interface{})
-
-	for _, event := range []string{"PreToolUse", "PermissionRequest", "PostToolUse"} {
-		entries, _ := hooks[event].([]interface{})
-		var newEntries []interface{}
-		for _, entry := range entries {
-			e, ok := entry.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			hs, _ := e["hooks"].([]interface{})
-			var remaining []interface{}
-			for _, h := range hs {
-				if hm, ok := h.(map[string]interface{}); ok {
-					if cmd, _ := hm["command"].(string); strings.Contains(cmd, "yolonot") {
-						continue
-					}
-				}
-				remaining = append(remaining, h)
-			}
-			if len(remaining) > 0 {
-				e["hooks"] = remaining
-				newEntries = append(newEntries, e)
-			}
-		}
-		if len(newEntries) == 0 {
-			delete(hooks, event)
-		} else {
-			hooks[event] = newEntries
-		}
-	}
-
-	return c.saveHooks(s)
 }
