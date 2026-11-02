@@ -12,7 +12,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="https://github.com/sezaakgun/yolonot/actions"><img src="https://github.com/sezaakgun/yolonot/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
-  <img src="https://img.shields.io/badge/go-1.25+-00ADD8.svg" alt="Go 1.25+">
+  <img src="https://img.shields.io/badge/go-1.26+-00ADD8.svg" alt="Go 1.26+">
 </p>
 
 ---
@@ -28,12 +28,11 @@ yolonot evaluates shell commands before your coding agent runs them. Combine exp
 ### 1. Install and configure your harness
 
 ```bash
+# Install via Homebrew (macOS / Linux)
+brew install sezaakgun/tap/yolonot
+
+# Or install via Go
 go install github.com/sezaakgun/yolonot@latest
-
-# To install the current source checkout instead of the published tag:
-# go install .
-
-# Make sure Go bin is in PATH
 export PATH="$PATH:$(go env GOPATH)/bin"
 
 # First-run wizard: hooks + rules + models + judge chain
@@ -65,6 +64,7 @@ inspect the effective policy:
 yolonot profile codex               # use your harness name
 yolonot doctor --harness codex      # health, hooks, config, escalation latency
 yolonot audit --harness codex       # security, rule lint & host permissions audit
+yolonot rules discover              # scan & migrate existing host permission rules
 yolonot status --all --harness codex
 yolonot judges
 yolonot check "git status"          # dry-run without executing the command
