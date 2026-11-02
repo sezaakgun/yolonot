@@ -20,9 +20,9 @@ func newCopilotHarness() *CopilotHarness {
 			supportsAsk:          true,
 			ambiguousPostToolUse: true,
 			sessionEnvKeys:       []string{"YOLONOT_COPILOT_SESSION_ID", "COPILOT_SESSION_ID"},
-			configDirFn:    copilotConfigDir,
-			settingsPathFn: func() string { return filepath.Join(copilotConfigDir(), "settings.json") },
-			riskMap:        claudeCompatRiskMap(),
+			configDirFn:          copilotConfigDir,
+			settingsPathFn:       func() string { return filepath.Join(copilotConfigDir(), "settings.json") },
+			riskMap:              claudeCompatRiskMap(),
 			formatFn: func(r HookResponse) string {
 				d := r.HookSpecificOutput.PermissionDecision
 				if d == "" {

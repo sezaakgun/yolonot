@@ -475,4 +475,3 @@ func parseFlexibleHookPayload(input []byte) (HookPayload, error) {
 	}
 	return p, nil
 }
-

@@ -224,4 +224,3 @@ func TestAmpLiveCLI(t *testing.T) {
 		})
 	}
 }
-

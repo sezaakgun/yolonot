@@ -1041,5 +1041,3 @@ func parseAmpSettingsFile(scope, path string) *DiscoveredHostFile {
 	}
 	return out
 }
-
-

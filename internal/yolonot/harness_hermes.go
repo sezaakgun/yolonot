@@ -23,9 +23,9 @@ func newHermesHarness() *HermesHarness {
 			supportsAsk:          true,
 			ambiguousPostToolUse: true,
 			sessionEnvKeys:       []string{"YOLONOT_HERMES_SESSION_ID", "HERMES_SESSION_ID"},
-			configDirFn:    hermesConfigDir,
-			settingsPathFn: func() string { return filepath.Join(hermesConfigDir(), "config.yaml") },
-			riskMap:        askDenyRiskMap(),
+			configDirFn:          hermesConfigDir,
+			settingsPathFn:       func() string { return filepath.Join(hermesConfigDir(), "config.yaml") },
+			riskMap:              askDenyRiskMap(),
 			formatFn: func(r HookResponse) string {
 				msg := r.HookSpecificOutput.PermissionDecisionReason
 				switch r.HookSpecificOutput.PermissionDecision {

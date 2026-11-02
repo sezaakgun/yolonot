@@ -64,19 +64,19 @@ func newMockToolServer(t *testing.T, toolName string, toolArgs map[string]any) *
 					"created":  1700000000,
 					"owned_by": "meta",
 					"metadata": obj{
-						"name":                  "muse-spark-1.3",
-						"family":                "muse-spark",
-						"release_date":          "2026-09-02",
-						"is_hidden":             false,
-						"attachment":            false,
-						"reasoning":             true,
-						"tool_call":             true,
-						"modalities":            obj{"input": []string{"text"}, "output": []string{"text"}},
-						"limit":                 obj{"context": 1007997, "output": 128000},
-						"options":               obj{},
-						"roles":                 []any{},
-						"cost":                  obj{"input": 1.25, "output": 4.25, "cached": 0.15},
-						"variants":              []any{obj{"tier": "minimal", "selector": obj{"reasoningEffort": "minimal"}, "description": nil}},
+						"name":                   "muse-spark-1.3",
+						"family":                 "muse-spark",
+						"release_date":           "2026-09-02",
+						"is_hidden":              false,
+						"attachment":             false,
+						"reasoning":              true,
+						"tool_call":              true,
+						"modalities":             obj{"input": []string{"text"}, "output": []string{"text"}},
+						"limit":                  obj{"context": 1007997, "output": 128000},
+						"options":                obj{},
+						"roles":                  []any{},
+						"cost":                   obj{"input": 1.25, "output": 4.25, "cached": 0.15},
+						"variants":               []any{obj{"tier": "minimal", "selector": obj{"reasoningEffort": "minimal"}, "description": nil}},
 						"background_agent_model": nil,
 					},
 				}},
@@ -946,5 +946,3 @@ func TestHermesAndDeepSeekHookRuntimes(t *testing.T) {
 		}
 	}
 }
-
-

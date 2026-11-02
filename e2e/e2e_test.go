@@ -853,6 +853,3 @@ func TestE2E_ExtendedHarnessesLifecycleAndHooks(t *testing.T) {
 		}
 	}
 }
-
-
-
