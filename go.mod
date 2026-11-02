@@ -1,6 +1,6 @@
 module github.com/sezaakgun/yolonot
 
-go 1.25.0
+go 1.26.0
 
 toolchain go1.26.2
 
@@ -12,7 +12,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.9.3
 	github.com/charmbracelet/x/term v0.2.1
 	github.com/pelletier/go-toml/v2 v2.3.1
-	mvdan.cc/sh/v3 v3.13.1
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (
@@ -35,6 +35,6 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/sync v0.17.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
 )
