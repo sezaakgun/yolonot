@@ -4,5 +4,7 @@ evals/reports/
 coverage.out
 .pytest_cache/
 .claude/
+.agents/
 .dippy
 /force
+/todo/

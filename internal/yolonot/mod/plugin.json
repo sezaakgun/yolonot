@@ -1,0 +1,5 @@
+{
+  "name": "yolonot",
+  "version": "__YOLONOT_VERSION__",
+  "description": "yolonot in the Claude Code transcript: verdict chips on shell commands, a status row above the prompt, and a four-way ask dialog (allow once, allow this session, explain, deny)."
+}

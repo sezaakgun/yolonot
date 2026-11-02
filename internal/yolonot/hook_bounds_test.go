@@ -63,6 +63,7 @@ func TestCmdHookOversizePromptAsks(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()
 	t.Setenv("YOLONOT_HARNESS", "claude") // default risk map: critical → ask
+	SaveConfig(Config{Provider: ProviderConfig{URL: "http://127.0.0.1:9/v1/chat/completions", Model: "never-called"}})
 
 	projectDir := t.TempDir()
 	command := writeOversizeScripts(t, projectDir)
@@ -96,6 +97,7 @@ func TestCmdHookOversizePromptDeniesWhenCriticalDenies(t *testing.T) {
 		"claude": {RiskCritical: ActionDeny},
 	}})
 
+	SaveConfig(Config{Provider: ProviderConfig{URL: "http://127.0.0.1:9/v1/chat/completions", Model: "never-called"}, RiskMaps: map[string]map[string]string{"claude": {RiskCritical: ActionDeny}}})
 	projectDir := t.TempDir()
 	command := writeOversizeScripts(t, projectDir)
 	chdirForRules(t, projectDir)

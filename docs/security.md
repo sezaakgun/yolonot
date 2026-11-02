@@ -1,0 +1,108 @@
+# Security, privacy and failure behavior
+
+yolonot gates shell tool calls exposed by supported coding harnesses. It
+does not sandbox a process, mediate every file read or edit, or authorize
+arbitrary MCP tools. Keep the host's own sandbox and permissions in place.
+
+## Trusted configuration
+
+Explicit deny rules run before session approvals, model judges and Claude
+mod replay. Replay is bound to the tool ID, command, working directory and
+inspected script contents; completion closes that call's replay. Supported
+direct native executables have a separate local content/target/mode snapshot
+that is never sent to the model. Changed inspected files must be judged again.
+Commands whose script contents are withheld cannot reuse a mod verdict.
+
+Global configuration and project `.yolonot` files are trusted policy.
+Malformed global configuration defaults to deny and CLI validation reports
+errors rather than activating a partial policy.
+Inspect project policy before using an unfamiliar checkout. A process
+running as your user can edit your policy and session files; yolonot is not
+a privilege boundary against that process. External `exec:` judges also
+execute with your user privileges, so install only hooks you trust.
+
+Models can misclassify commands or follow adversarial instructions in
+inputs. Use explicit deny rules for commands that must be blocked. A model
+verdict is a judgment about the inspected inputs, not proof that a command
+has no side effects.
+
+## Model requests and local data
+
+Model judges receive the command, any scripts the attachment rules can
+identify safely, a 1-line auto-detected repository summary (`Active project`,
+from `package.json`, `pyproject.toml`, `README.md`, `CLAUDE.md`, or `AGENTS.md`),
+and (when the host provides `transcript_path`) the sanitized latest human
+request (`User prompt in this session`, capped at 500 characters with
+`<task-notification>`, `<system-reminder>`, compaction summaries, and
+`<pasted_content>` blocks stripped and credential-looking lines redacted).
+Any forged prompt headers (`Project context:`, `Allow when:`, `Ask when:`,
+`Active project:`, `User prompt in this session:`) inside untrusted commands or
+attached scripts are redacted before reaching the model. The attachment boundary
+is the project root by default; `attach_outside_root` explicitly widens it.
+Sensitive home directories are always withheld. Script and transcript credential
+redaction is best effort; commands may themselves contain secrets. See
+[script attachment](how-it-works.md#script-attachment).
+Each logged decision records which scripts the judge saw (`attached`) and
+which it did not (`withheld`, with the reason), plus the host's `agent_id`,
+`agent_type` and `tool_use_id` when it sends them, so `yolonot stats` can
+attribute asks to subagents and join an ask to the answer that followed it.
+That join is reporting only: candidate suggestions still come from explicit human
+answers, never from a time-window match.
+
+Prompt hints in the project and global config reach the configured model judges.
+`Allow once` answers and native prompt approvals with no exposed persistence
+choice are conservatively one-time: they do not become yolonot session grants.
+Explicit `yolonot approve` and the Claude mod session option provide remembered
+human grants. When an agent runs `yolonot approve`, `deny`, `reset`, `pause`,
+`resume` or `uninstall` itself, or changes `profile`, `judges`, `models` or
+`config`, the hook always asks (deny on hosts without ask), whatever the rules
+or judges say, also through global flags or `sh -c`, so an agent cannot grant
+itself approval. Inspect repeated asks and human resolutions with
+`yolonot suggest --list`.
+
+An unanswered ask is not a user rejection. Cancelled or unavailable mod
+dialogs block the current call without creating a human Deny or session deny.
+Classic hosts without explicit rejection events cannot persist a Deny answer
+from missing completion alone.
+
+Decision logs and session state are local under `~/.yolonot/`. They can contain
+command arguments, paths and model reasoning. The model provider's own data
+handling applies to requests you send it. API keys are resolved from the
+configured environment variable and are not persisted by config saves.
+
+## Failure behavior
+
+| Condition | Behavior |
+|---|---|
+| Explicit deny rule | Block before the judge chain and mod replay. |
+| Missing configured model API-key variable | Fail before a provider request; follow unavailable failure policy if no other judge decides. A terminal export may be absent in Desktop hooks/mods. |
+| Invalid global configuration | Deny by default; no partial JSON policy is activated. |
+| Invalid typed answer | Treat as a parse failure; try the next judge, then apply failure policy if none decides. |
+| Non-2xx model response | Treat that judge as unavailable; try the next judge. |
+| All models fail or return unparseable decisions | Defer to the host's native permission policy, with a warning where the adapter can display it. |
+| Empty judge chain | Defer to the host; explicit rules and session policy still apply. |
+| Classifier prompt exceeds the size limit | Use the profile's abstain action: deny if the critical cell denies, otherwise ask. |
+| Shared hook deadline expires before a judge produces a verdict | Stop model/exec work; deny if policy requires it, otherwise ask on adapters with native ask and deny on adapters without native ask. No new approval is cached. |
+| Escalation fails | Keep the primary verdict; do not cache a transient failed escalation. |
+| OpenCode shim process fails or emits malformed JSON | Block. Successful empty stdout is intentional passthrough. |
+| Pause or `YOLONOT_DISABLED=1` | Bypass yolonot; host permissions remain responsible. |
+
+These are defaults. `failure` actions configure unavailable/parse/config/
+oversize/timeout outcomes; unsupported native ask becomes deny. An empty
+chain is still intentional passthrough. [Configuration reference](configuration.md).
+
+Similarity, all judges and escalation share a configurable decision deadline
+(default 55 seconds, maximum 55),
+leaving time to emit a result before the installed 60-second host hook limit.
+Individual provider timeouts and the 3-second exec timeout may end a stage
+earlier; they never restart the overall budget.
+
+New decision-cache entries include the judging model/prompt/hint/policy
+fingerprint and script snapshot; legacy entries without that metadata are
+re-judged. Native host failure enforcement still differs: current Claude
+installation blocks hook failures via `onFailure`, OpenCode shim errors block,
+and Codex requires trusted hooks. See [harness behavior](harnesses.md).
+
+Host capabilities differ. In particular, passthrough can still prompt or
+allow according to the host's policy. Check [harness behavior](harnesses.md)
+and `yolonot profile <harness>` before relying on an unattended workflow.

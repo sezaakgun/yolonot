@@ -22,6 +22,11 @@ func ProjectSessionID(sessionID, cwd string) string {
 	if sessionID == "" || cwd == "" {
 		return sessionID
 	}
+	if len(sessionID) > 100 {
+		sh := sha256.Sum256([]byte(sessionID))
+		sessionID = fmt.Sprintf("%s_%x", sessionID[:64], sh[:8])
+	}
+	cwd = canonicalDirectory(cwd)
 	root := gitRoot(cwd)
 	if root == "" {
 		root = cwd
@@ -30,14 +35,38 @@ func ProjectSessionID(sessionID, cwd string) string {
 	return fmt.Sprintf("%s_%x", sessionID, h[:4])
 }
 
-// gitRoot returns the git repository root for the given directory, or empty string.
+func canonicalDirectory(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	if absolute, err := filepath.Abs(dir); err == nil {
+		dir = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	return filepath.Clean(dir)
+}
+
+// gitRoot returns the git repository root (or main repo root for linked worktrees)
+// for the given directory, or empty string.
 func gitRoot(dir string) string {
+	if root := findRepoRoot(dir); root != "" {
+		if main := resolveWorktreeMainRoot(root); main != "" {
+			return main
+		}
+		return canonicalDirectory(root)
+	}
 	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	top := strings.TrimSpace(string(out))
+	if main := resolveWorktreeMainRoot(top); main != "" {
+		return main
+	}
+	return top
 }
 
 func SessionDir() string {
@@ -82,8 +111,9 @@ func ReadLines(sessionID, suffix string) []string {
 	seen := make(map[string]struct{})
 	var lines []string
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*maxHookInputBytes)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := decodeSessionLine(suffix, strings.TrimSpace(scanner.Text()))
 		if line == "" {
 			continue
 		}
@@ -105,10 +135,9 @@ func ContainsLine(sessionID, suffix, line string) bool {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024) // handle long lines
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*maxHookInputBytes)
 	for scanner.Scan() {
-		if strings.TrimSpace(scanner.Text()) == line {
+		if decodeSessionLine(suffix, strings.TrimSpace(scanner.Text())) == line {
 			return true
 		}
 	}
@@ -216,14 +245,6 @@ func MatchesLineOrWrappedVariant(sessionID, suffix, command string) bool {
 	return false
 }
 
-// ApprovedAsWrappedVariant is the legacy backward-only lookup. Kept as a
-// thin shim over MatchesLineOrWrappedVariant so existing call sites in
-// hook.go and tests keep compiling, but new code should call the symmetric
-// helper directly.
-func ApprovedAsWrappedVariant(sessionID, command string) bool {
-	return MatchesLineOrWrappedVariant(sessionID, "approved", command)
-}
-
 // AppendLine appends a line to a session file, creating dirs as needed.
 func AppendLine(sessionID, suffix, line string) error {
 	dir := SessionDir()
@@ -234,7 +255,7 @@ func AppendLine(sessionID, suffix, line string) error {
 		return err
 	}
 	defer f.Close()
-	_, err = f.WriteString(line + "\n")
+	_, err = f.WriteString(encodeSessionLine(suffix, line) + "\n")
 	return err
 }
 
@@ -250,10 +271,15 @@ func CleanOldSessions() {
 		name := e.Name()
 		if strings.HasSuffix(name, ".approved") ||
 			strings.HasSuffix(name, ".approvedhash") ||
+			strings.HasSuffix(name, ".approved_unsandboxed") ||
+			strings.HasSuffix(name, ".approved_unsandboxedhash") ||
+			strings.HasSuffix(name, ".codexpre") ||
 			strings.HasSuffix(name, ".asked") ||
 			strings.HasSuffix(name, ".denied") ||
 			strings.HasSuffix(name, ".paused") ||
-			strings.HasSuffix(name, ".profile") {
+			strings.HasSuffix(name, ".profile") ||
+			strings.HasSuffix(name, ".mod") ||
+			strings.HasSuffix(name, ".once") {
 			info, err := e.Info()
 			if err != nil {
 				continue
@@ -263,6 +289,9 @@ func CleanOldSessions() {
 			}
 		}
 	}
+	if info, err := os.Stat(globalPauseFile()); err == nil && info.ModTime().Before(cutoff) {
+		os.Remove(globalPauseFile())
+	}
 }
 
 // FindSessionID returns the most recent base session ID from session files.
@@ -271,37 +300,42 @@ func CleanOldSessions() {
 func FindSessionID() string {
 	dir := SessionDir()
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
-	}
-
-	type fileInfo struct {
-		stem    string
-		modTime time.Time
-	}
-	var files []fileInfo
-	for _, e := range entries {
-		name := e.Name()
-		for _, suffix := range []string{".approved", ".asked", ".denied"} {
-			if strings.HasSuffix(name, suffix) {
-				info, err := e.Info()
-				if err != nil {
-					continue
+	if err == nil {
+		type fileInfo struct {
+			stem    string
+			modTime time.Time
+		}
+		var files []fileInfo
+		for _, e := range entries {
+			name := e.Name()
+			for _, suffix := range []string{".approved", ".approved_unsandboxed", ".asked", ".denied", ".mod", ".once", ".paused", ".profile"} {
+				if strings.HasSuffix(name, suffix) {
+					info, err := e.Info()
+					if err != nil {
+						continue
+					}
+					stem := strings.TrimSuffix(name, suffix)
+					// Extract base session ID: strip _{8-hex-char hash} suffix
+					stem = baseSessionID(stem)
+					files = append(files, fileInfo{stem, info.ModTime()})
+					break
 				}
-				stem := strings.TrimSuffix(name, suffix)
-				// Extract base session ID: strip _{8-hex-char hash} suffix
-				stem = baseSessionID(stem)
-				files = append(files, fileInfo{stem, info.ModTime()})
 			}
 		}
+		if len(files) > 0 {
+			sort.Slice(files, func(i, j int) bool {
+				return files[i].modTime.After(files[j].modTime)
+			})
+			return files[0].stem
+		}
 	}
-	if len(files) == 0 {
-		return ""
+	recent := ReadRecentDecisions(50)
+	for i := len(recent) - 1; i >= 0; i-- {
+		if recent[i].SessionID != "" {
+			return recent[i].SessionID
+		}
 	}
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime.After(files[j].modTime)
-	})
-	return files[0].stem
+	return ""
 }
 
 // baseSessionID extracts the original session ID from a project-scoped key.

@@ -1,7 +1,6 @@
 package yolonot
 
 import (
-	"os"
 	"testing"
 )
 
@@ -91,7 +90,7 @@ func TestAbstainAction(t *testing.T) {
 }
 
 func TestClaudeHarnessDefaultRiskMap(t *testing.T) {
-	m := (&ClaudeHarness{}).RiskMap()
+	m := (newClaudeHarness()).RiskMap()
 	cases := map[string]string{
 		RiskSafe: ActionAllow, RiskLow: ActionAllow, RiskModerate: ActionAsk,
 		RiskHigh: ActionAsk, RiskCritical: ActionAsk,
@@ -104,7 +103,7 @@ func TestClaudeHarnessDefaultRiskMap(t *testing.T) {
 }
 
 func TestGeminiHarnessDefaultRiskMap(t *testing.T) {
-	m := (&GeminiHarness{}).RiskMap()
+	m := (newGeminiHarness()).RiskMap()
 	cases := map[string]string{
 		RiskSafe: ActionAllow, RiskLow: ActionAllow, RiskModerate: ActionAsk,
 		RiskHigh: ActionAsk, RiskCritical: ActionAsk,
@@ -120,7 +119,7 @@ func TestGeminiHarnessDefaultRiskMap(t *testing.T) {
 // their default RiskMap — deny stays rule-origin only. Regression guard
 // for the "LLM never denies on ask-capable harnesses" invariant.
 func TestAskCapableHarnessesNeverDefaultDeny(t *testing.T) {
-	for _, h := range []Harness{&ClaudeHarness{}, &GeminiHarness{}} {
+	for _, h := range []Harness{newClaudeHarness(), newGeminiHarness()} {
 		for tier, action := range h.RiskMap() {
 			if action == ActionDeny {
 				t.Errorf("%s default RiskMap[%s]=deny — ask-capable harnesses must not deny from LLM", h.Name(), tier)
@@ -130,7 +129,7 @@ func TestAskCapableHarnessesNeverDefaultDeny(t *testing.T) {
 }
 
 func TestCodexHarnessDefaultRiskMap(t *testing.T) {
-	m := (&CodexHarness{}).RiskMap()
+	m := (newCodexHarness()).RiskMap()
 	cases := map[string]string{
 		RiskSafe: ActionAllow, RiskLow: ActionAllow, RiskModerate: ActionPassthrough,
 		RiskHigh: ActionDeny, RiskCritical: ActionDeny,
@@ -152,31 +151,9 @@ func TestResolveRiskMap_EnvOverridesConfig(t *testing.T) {
 	}})
 
 	t.Setenv("YOLONOT_CLAUDE_RISK_MODERATE", "allow")
-	m := ResolveRiskMap(&ClaudeHarness{})
+	m := ResolveRiskMap(newClaudeHarness())
 	if m[RiskModerate] != ActionAllow {
 		t.Errorf("env should win: got %q, want %q", m[RiskModerate], ActionAllow)
-	}
-}
-
-func TestActiveClassifier_HonoursEnvOverride(t *testing.T) {
-	// LLM classifier is registered via llm.go's init(). An unknown env
-	// value must fall back rather than returning nil.
-	orig := os.Getenv("YOLONOT_CLASSIFIER")
-	defer os.Setenv("YOLONOT_CLASSIFIER", orig)
-
-	os.Setenv("YOLONOT_CLASSIFIER", "does-not-exist")
-	c := ActiveClassifier()
-	if c == nil {
-		t.Fatal("unknown classifier name should fall back to default, got nil")
-	}
-	if c.Name() != "llm" {
-		t.Errorf("fallback classifier = %q, want llm", c.Name())
-	}
-}
-
-func TestClassifierRegistry_RegistersLLM(t *testing.T) {
-	if c := GetClassifier("llm"); c == nil {
-		t.Fatal("LLMClassifier must be registered at init")
 	}
 }
 
@@ -203,18 +180,18 @@ type fakeHarness struct {
 	riskMap map[string]string
 }
 
-func (f *fakeHarness) Name() string                              { return "fake-harness-for-tests" }
-func (f *fakeHarness) SettingsPath() string                      { return "" }
-func (f *fakeHarness) SessionIDFromEnv() string                  { return "" }
+func (f *fakeHarness) Name() string                               { return "fake-harness-for-tests" }
+func (f *fakeHarness) SettingsPath() string                       { return "" }
+func (f *fakeHarness) SessionIDFromEnv() string                   { return "" }
 func (f *fakeHarness) ParseHookInput([]byte) (HookPayload, error) { return HookPayload{}, nil }
-func (f *fakeHarness) FormatHookResponse(HookResponse) string    { return "" }
-func (f *fakeHarness) IsInstalled() bool                         { return false }
-func (f *fakeHarness) Install(string) error                      { return nil }
-func (f *fakeHarness) Uninstall() error                          { return nil }
-func (f *fakeHarness) InstallSkill() (string, error)             { return "", nil }
-func (f *fakeHarness) UninstallSkill() error                     { return nil }
-func (f *fakeHarness) IsDetected() bool                          { return false }
-func (f *fakeHarness) RiskMap() map[string]string                { return f.riskMap }
+func (f *fakeHarness) FormatHookResponse(HookResponse) string     { return "" }
+func (f *fakeHarness) IsInstalled() bool                          { return false }
+func (f *fakeHarness) Install(string) error                       { return nil }
+func (f *fakeHarness) Uninstall() error                           { return nil }
+func (f *fakeHarness) InstallSkill() (string, error)              { return "", nil }
+func (f *fakeHarness) UninstallSkill() error                      { return nil }
+func (f *fakeHarness) IsDetected() bool                           { return false }
+func (f *fakeHarness) RiskMap() map[string]string                 { return f.riskMap }
 func (f *fakeHarness) PostInstallNotes() []string                 { return nil }
 
 func unregisterHarness(h Harness) {

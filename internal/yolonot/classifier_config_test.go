@@ -120,7 +120,7 @@ func TestClassifierConfigMarshalObjectShapeWithHints(t *testing.T) {
 // replace-base-but-still-append-hints).
 func TestBuildSystemPromptFullOverrideReplacesBase(t *testing.T) {
 	const override = `Custom classifier. Output ONLY JSON: {"decision":"allow|ask","risk":"safe|low"}`
-	cfg := ClassifierConfig{
+	cfg := PromptConfig{
 		SystemPrompt: override,
 		AllowHints:   []string{"npm install is routine here"},
 	}
@@ -140,7 +140,7 @@ func TestBuildSystemPromptFullOverrideReplacesBase(t *testing.T) {
 // hints is returned byte-for-byte — the user owns 100% of the bytes.
 func TestBuildSystemPromptOverrideVerbatimNoHints(t *testing.T) {
 	const override = `Only JSON: {"decision":"allow|ask","risk":"safe"}`
-	got := BuildSystemPrompt(ClassifierConfig{SystemPrompt: override}, WalkupHints{})
+	got := BuildSystemPrompt(PromptConfig{SystemPrompt: override}, WalkupHints{})
 	if got != override {
 		t.Errorf("override not returned verbatim:\n got: %q\nwant: %q", got, override)
 	}
@@ -150,7 +150,7 @@ func TestBuildSystemPromptOverrideVerbatimNoHints(t *testing.T) {
 // a per-project .yolonot system-prompt directive is more specific than the
 // per-user config.json override and must win.
 func TestBuildSystemPromptWalkupOverrideBeatsConfig(t *testing.T) {
-	cfg := ClassifierConfig{SystemPrompt: `CONFIG {"decision":"","risk":""}`}
+	cfg := PromptConfig{SystemPrompt: `CONFIG {"decision":"","risk":""}`}
 	wu := WalkupHints{SystemPrompt: `WALKUP {"decision":"","risk":""}`}
 	got := BuildSystemPrompt(cfg, wu)
 	if !strings.HasPrefix(got, "WALKUP") {
@@ -265,7 +265,7 @@ func TestExpandDefaultsSentinel(t *testing.T) {
 // If this fails, every existing user's classifier behavior may shift on
 // upgrade — even users who never touched the new feature.
 func TestBuildSystemPromptDefaultByteEqual(t *testing.T) {
-	got := BuildSystemPrompt(ClassifierConfig{}, WalkupHints{})
+	got := BuildSystemPrompt(PromptConfig{}, WalkupHints{})
 	if got != SystemPrompt {
 		t.Fatalf("default BuildSystemPrompt diverged from SystemPrompt const")
 	}
@@ -275,7 +275,7 @@ func TestBuildSystemPromptDefaultByteEqual(t *testing.T) {
 // section is labeled, hints render as bullets, and the base prompt is
 // preserved as a prefix so the model still gets the canonical instructions.
 func TestBuildSystemPromptIncludesUserHints(t *testing.T) {
-	cfg := ClassifierConfig{
+	cfg := PromptConfig{
 		Context:    []string{"trusted: *.example.com"},
 		AllowHints: []string{"kubectl get on prod-* is read-only"},
 		AskHints:   []string{"never run schema migrations against billing"},
@@ -301,7 +301,7 @@ func TestBuildSystemPromptIncludesUserHints(t *testing.T) {
 // TestBuildSystemPromptStripsDefaultsSentinel makes sure the literal
 // "$defaults" token never reaches the model — only its expansion does.
 func TestBuildSystemPromptStripsDefaultsSentinel(t *testing.T) {
-	cfg := ClassifierConfig{
+	cfg := PromptConfig{
 		Context: []string{DefaultsSentinel, "real entry"},
 	}
 	got := BuildSystemPrompt(cfg, WalkupHints{})
@@ -334,7 +334,7 @@ func TestBuiltinClassifierDefaultsPopulated(t *testing.T) {
 // final system prompt. Catches regressions where the sentinel parser
 // works but the built-in slice was wired to the wrong variable.
 func TestBuildSystemPromptDefaultsExpandToRealContent(t *testing.T) {
-	cfg := ClassifierConfig{Context: []string{DefaultsSentinel}}
+	cfg := PromptConfig{Context: []string{DefaultsSentinel}}
 	got := BuildSystemPrompt(cfg, WalkupHints{})
 	if !strings.Contains(got, builtinClassifierContext[0]) {
 		t.Errorf("$defaults did not expand: first builtin entry not in prompt")
@@ -366,20 +366,17 @@ func TestLabelsForReport(t *testing.T) {
 	}
 }
 
-// TestLoadConfigRoundtripLegacyClassifier is the end-to-end backward-
-// compat invariant for the LoadConfig/SaveConfig pair: a config file
-// written by a previous yolonot version (classifier as string) must
-// load, re-save, and reload byte-equal — no silent migration to the
-// object form unless the user adds hints.
-func TestLoadConfigRoundtripLegacyClassifier(t *testing.T) {
+// TestLoadConfigFoldsLegacyClassifier: a v0 "classifier" key loads into
+// Prompt and is not written back; the file is rewritten in the v1 shape.
+func TestLoadConfigFoldsLegacyClassifier(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	if err := os.MkdirAll(filepath.Join(tmp, ".yolonot"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	original := []byte(`{
-  "provider": {"name": "openai", "model": "gpt-5.4-mini"},
-  "classifier": "llm"
+  "provider": {"name": "openai", "url": "https://api.openai.com/v1/chat/completions", "model": "gpt-5.4-mini"},
+  "classifier": {"impl": "llm", "context": ["trusted: example.com"]}
 }
 `)
 	cfgPath := filepath.Join(tmp, ".yolonot", "config.json")
@@ -388,11 +385,8 @@ func TestLoadConfigRoundtripLegacyClassifier(t *testing.T) {
 	}
 
 	c := LoadConfig()
-	if c.Classifier.Impl != "llm" {
-		t.Errorf("Impl: got %q, want %q", c.Classifier.Impl, "llm")
-	}
-	if len(c.Classifier.Context)+len(c.Classifier.AllowHints)+len(c.Classifier.AskHints) != 0 {
-		t.Errorf("legacy load produced non-empty hints: %+v", c.Classifier)
+	if !c.Legacy || c.Classifier.Impl != "" || len(c.Prompt.Context) != 1 {
+		t.Fatalf("legacy fold: legacy=%v classifier=%+v prompt=%+v", c.Legacy, c.Classifier, c.Prompt)
 	}
 
 	SaveConfig(c)
@@ -400,41 +394,13 @@ func TestLoadConfigRoundtripLegacyClassifier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read after save: %v", err)
 	}
-	if !strings.Contains(string(written), `"classifier": "llm"`) {
-		t.Errorf("legacy round-trip did not preserve string form; got:\n%s", written)
+	for _, bad := range []string{`"classifier"`, `"impl"`, `"provider"`} {
+		if strings.Contains(string(written), bad) {
+			t.Errorf("v0 key %s written back:\n%s", bad, written)
+		}
 	}
-	if strings.Contains(string(written), `"impl"`) {
-		t.Errorf("legacy config silently rewrote to object form; got:\n%s", written)
-	}
-}
-
-// TestLoadConfigSavesObjectFormWithHints confirms the marshaler does
-// switch to the object form once any hint is set — otherwise users who
-// edit hints in via the CLI/scripts in the future would see their
-// changes silently dropped on next SaveConfig.
-func TestLoadConfigSavesObjectFormWithHints(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-	if err := os.MkdirAll(filepath.Join(tmp, ".yolonot"), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	c := Config{
-		Provider: ProviderConfig{Name: "openai", Model: "gpt-5.4-mini"},
-		Classifier: ClassifierConfig{
-			Impl:    "llm",
-			Context: []string{"trusted: example.com"},
-		},
-	}
-	SaveConfig(c)
-	written, err := os.ReadFile(filepath.Join(tmp, ".yolonot", "config.json"))
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !strings.Contains(string(written), `"context"`) {
-		t.Errorf("object form missing context field; got:\n%s", written)
-	}
-	if !strings.Contains(string(written), `"impl"`) {
-		t.Errorf("object form missing impl field; got:\n%s", written)
+	if !strings.Contains(string(written), `"prompt"`) || !strings.Contains(string(written), `"trusted: example.com"`) {
+		t.Errorf("prompt block missing:\n%s", written)
 	}
 }
 
@@ -442,7 +408,7 @@ func TestLoadConfigSavesObjectFormWithHints(t *testing.T) {
 // precedence: config entries appear before walk-up entries within each
 // section, so per-user globals are listed before per-project additions.
 func TestBuildSystemPromptMergesWalkupAfterConfig(t *testing.T) {
-	cfg := ClassifierConfig{Context: []string{"FROM-CONFIG"}}
+	cfg := PromptConfig{Context: []string{"FROM-CONFIG"}}
 	walk := WalkupHints{Context: []string{"FROM-WALKUP"}}
 	got := BuildSystemPrompt(cfg, walk)
 	configIdx := strings.Index(got, "FROM-CONFIG")

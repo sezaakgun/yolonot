@@ -131,7 +131,7 @@ func LookupProfile(cfg Config, name string) *RiskProfile {
 	if p := GetBuiltinProfile(name); p != nil {
 		return p
 	}
-	m, ok := cfg.CustomProfiles[name]
+	m, ok := cfg.Policy.Profiles[name]
 	if !ok {
 		return nil
 	}
@@ -144,9 +144,10 @@ func LookupProfile(cfg Config, name string) *RiskProfile {
 			cp[tier] = fallback[tier]
 			continue
 		}
-		// Custom profiles use canonical {allow, ask, deny} only — passthrough
+		v = normalizeRiskAction(v)
+		// Custom profiles use canonical {allow, force_allow, ask, deny} only — passthrough
 		// is a per-harness translation result, not a profile-author concept.
-		if v != ActionAllow && v != ActionAsk && v != ActionDeny {
+		if (v != ActionAllow && v != ActionForceAllow && v != ActionAsk && v != ActionDeny) || (v == ActionForceAllow && tier == RiskCritical) {
 			Verbosef("LookupProfile: custom profile %q tier %q has invalid action %q, using %s default", name, tier, v, DefaultProfileName)
 			cp[tier] = fallback[tier]
 			continue
@@ -177,14 +178,14 @@ func LookupProfile(cfg Config, name string) *RiskProfile {
 // active baseline.
 func ResolveActiveProfile(cfg Config, h Harness) *RiskProfile {
 	name := DefaultProfileName
-	if cfg.Profile != "" {
-		name = cfg.Profile
+	if cfg.Policy.Profile != "" {
+		name = cfg.Policy.Profile
 	}
 	if v := os.Getenv("YOLONOT_PROFILE"); v != "" {
 		name = v
 	}
 	if h != nil {
-		if v, ok := cfg.ProfileOverride[h.Name()]; ok && v != "" {
+		if v := cfg.harnessPolicy(h.Name()).Profile; v != "" {
 			name = v
 		}
 		envKey := "YOLONOT_" + strings.ToUpper(h.Name()) + "_PROFILE"
@@ -295,26 +296,17 @@ func translateProfileAction(h Harness, tier, act string) string {
 	if h == nil {
 		return ActionAsk
 	}
-	switch h.Name() {
-	case "claude", "gemini":
-		return ActionAsk
-	case "codex", "cursor":
-		// Codex/Cursor: passthrough on lower tiers (host's native engine
-		// can prompt), hard-deny on high+critical (won't be downgraded).
-		if tier == RiskHigh || tier == RiskCritical {
-			return ActionDeny
-		}
-		return ActionPassthrough
-	case "opencode":
-		// OpenCode plugin shim has no passthrough — empty stdout = allow.
-		// Below high we surface as allow (visible in config); high+ deny.
-		if tier == RiskHigh || tier == RiskCritical {
-			return ActionDeny
-		}
-		return ActionAllow
-	default:
+	rm := h.RiskMap()
+	if (tier == RiskHigh || tier == RiskCritical) && rm[tier] == ActionDeny {
+		return ActionDeny
+	}
+	if harnessSupportsAsk(h) {
 		return ActionAsk
 	}
+	if def := rm[RiskModerate]; def == ActionAllow || def == ActionPassthrough || def == ActionDeny {
+		return def
+	}
+	return ActionAsk
 }
 
 // validProfileName matches CLI-safe profile identifiers. Lowercase ASCII,
@@ -323,7 +315,7 @@ var validProfileName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
 // ValidateCustomProfile enforces structural invariants for a user-defined
 // profile: legal name, no built-in collision, all 5 tiers present, all
-// values in {allow, ask, deny}. Returns a user-facing error message.
+// values in {allow, force_allow, ask, deny} (critical cannot be force_allow).
 func ValidateCustomProfile(name string, m map[string]string) error {
 	if !validProfileName.MatchString(name) {
 		return fmt.Errorf("invalid profile name %q: must match [a-z][a-z0-9_-]{0,31}", name)
@@ -339,8 +331,12 @@ func ValidateCustomProfile(name string, m map[string]string) error {
 		if !ok {
 			return fmt.Errorf("profile missing tier %q", tier)
 		}
-		if v != ActionAllow && v != ActionAsk && v != ActionDeny {
-			return fmt.Errorf("tier %q action %q invalid: must be allow|ask|deny", tier, v)
+		nv := normalizeRiskAction(v)
+		if nv == ActionForceAllow && tier == RiskCritical {
+			return fmt.Errorf("tier %q action %q invalid: critical cannot use force_allow", tier, v)
+		}
+		if nv != ActionAllow && nv != ActionForceAllow && nv != ActionAsk && nv != ActionDeny {
+			return fmt.Errorf("tier %q action %q invalid: must be allow|force_allow|ask|deny", tier, v)
 		}
 	}
 	return nil
@@ -348,7 +344,10 @@ func ValidateCustomProfile(name string, m map[string]string) error {
 
 // cmdProfile dispatches `yolonot profile ...` subcommands. Surface:
 //
-//	yolonot profile                                    show active profile + overrides
+//	yolonot profile                                    show active profile, overrides & effective risk map
+//	yolonot profile <harness>                          show effective 5-tier risk map for <harness>
+//	yolonot profile [set] <harness> <tier> <act|reset> override or reset one tier for <harness>
+//	yolonot profile <harness> reset [<tier>]           reset all or one tier override for <harness>
 //	yolonot profile list                               list built-in + custom profiles
 //	yolonot profile show <name>                        print one profile
 //	yolonot profile use <name> [--harness=<h>]         set global or per-harness profile
@@ -368,15 +367,29 @@ func cmdProfile(args []string) {
 		cmdProfileList()
 	case "show":
 		cmdProfileShow(args[1:])
-	case "use", "set":
+	case "use":
+		cmdProfileUse(args[1:])
+	case "set":
+		if len(args) > 1 && GetHarness(args[1]) != nil {
+			cmdRisk(args[1:])
+			return
+		}
 		cmdProfileUse(args[1:])
 	case "reset", "clear":
+		if len(args) >= 2 && !strings.HasPrefix(args[1], "--") && GetHarness(args[1]) != nil {
+			cmdRisk(append([]string{args[1], "reset"}, args[2:]...))
+			return
+		}
 		cmdProfileReset(args[1:])
 	case "create", "new":
 		cmdProfileCreate(args[1:])
 	case "delete", "rm":
 		cmdProfileDelete(args[1:])
 	default:
+		if GetHarness(args[0]) != nil {
+			cmdRisk(args)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "Unknown profile subcommand %q.\n", args[0])
 		profileUsage(os.Stderr)
 		os.Exit(1)
@@ -385,35 +398,36 @@ func cmdProfile(args []string) {
 
 func profileUsage(w *os.File) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  yolonot profile                              Show active profile")
-	fmt.Fprintln(w, "  yolonot profile list                         List built-in + custom profiles")
-	fmt.Fprintln(w, "  yolonot profile show <name>                  Show one profile's tier→action map")
-	fmt.Fprintln(w, "  yolonot profile use <name> [--harness=<h>]   Set global / per-harness profile")
-	fmt.Fprintln(w, "  yolonot profile reset [--harness=<h>]        Clear global / per-harness override")
+	fmt.Fprintln(w, "  yolonot profile                                   Show active profile & effective risk map")
+	fmt.Fprintln(w, "  yolonot profile list                              List built-in + custom profiles")
+	fmt.Fprintln(w, "  yolonot profile show <name>                       Show one profile's tier→action map")
+	fmt.Fprintln(w, "  yolonot profile use <name> [--harness=<h>|--session]  Set global / per-harness / session profile")
+	fmt.Fprintln(w, "  yolonot profile [set] <harness> <tier> <action|reset> Override or reset one tier for <harness>")
+	fmt.Fprintln(w, "  yolonot profile reset [--harness=<h>|--session]   Clear global / per-harness / session override")
 	fmt.Fprintln(w, "  yolonot profile create <name> --base=<existing> [--<tier>=<action>...]")
-	fmt.Fprintln(w, "  yolonot profile delete <name>                Remove a custom profile")
+	fmt.Fprintln(w, "  yolonot profile delete <name>                     Remove a custom profile")
 }
 
 func printActiveProfile() {
 	cfg := LoadConfig()
-	globalName := cfg.Profile
+	globalName := cfg.Policy.Profile
 	if globalName == "" {
 		globalName = DefaultProfileName
 	}
-	if cfg.Profile == "" {
+	if cfg.Policy.Profile == "" {
 		fmt.Printf("Active profile: %s (default — set with: yolonot profile use <name>)\n", globalName)
 	} else {
 		fmt.Printf("Active profile: %s (global)\n", globalName)
 	}
-	if len(cfg.ProfileOverride) > 0 {
+	if pins := harnessProfilePins(cfg); len(pins) > 0 {
 		fmt.Println("Per-harness overrides:")
-		names := make([]string, 0, len(cfg.ProfileOverride))
-		for k := range cfg.ProfileOverride {
+		names := make([]string, 0, len(pins))
+		for k := range pins {
 			names = append(names, k)
 		}
 		sort.Strings(names)
 		for _, h := range names {
-			fmt.Printf("  %-10s → %s\n", h, cfg.ProfileOverride[h])
+			fmt.Printf("  %-10s → %s\n", h, pins[h])
 		}
 	}
 
@@ -435,24 +449,22 @@ func printActiveProfile() {
 		}
 	}
 
+	if h := ActiveHarness(); h != nil {
+		fmt.Println()
+		printRiskMap(h)
+	}
+
 	fmt.Println()
 	fmt.Println("Built-in profiles: fast, balanced, strict, paranoid")
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  yolonot profile list                          List all profiles + tier maps")
-	fmt.Println("  yolonot profile show <name>                   Show one profile")
-	fmt.Println("  yolonot profile use <name>                    Set global profile")
-	fmt.Println("  yolonot profile use <name> --harness=<h>      Per-harness override")
-	fmt.Println("  yolonot profile use <name> --session          Pin to current session only")
-	fmt.Println("  yolonot profile reset [--session|--harness=<h>]")
-	fmt.Println()
-	fmt.Println("Custom profiles:")
+	fmt.Println("  yolonot profile list                              List all profiles + tier maps")
+	fmt.Println("  yolonot profile show <name>                       Show one profile")
+	fmt.Println("  yolonot profile use <name> [--harness=<h>|--session]  Set global / per-harness / session profile")
+	fmt.Println("  yolonot profile <harness> [<tier> <action|reset>] View or override per-harness risk tiers")
+	fmt.Println("  yolonot profile reset [--session|--harness=<h>]   Clear profile override")
 	fmt.Println("  yolonot profile create <name> --base=<existing> [--high=deny ...]")
-	fmt.Println("  yolonot profile create <name> --safe=allow --low=allow \\")
-	fmt.Println("      --moderate=ask --high=deny --critical=deny")
 	fmt.Println("  yolonot profile delete <name>")
-	fmt.Println()
-	fmt.Println("Env pins (this shell only): YOLONOT_PROFILE=fast | YOLONOT_<HARNESS>_PROFILE=fast")
 }
 
 func cmdProfileList() {
@@ -536,20 +548,27 @@ func cmdProfileUse(args []string) {
 		return
 	}
 	if harness != "" {
-		if GetHarness(harness) == nil {
+		h := GetHarness(harness)
+		if h == nil {
 			fmt.Fprintf(os.Stderr, "Unknown harness %q.\n", harness)
 			os.Exit(1)
 		}
-		if cfg.ProfileOverride == nil {
-			cfg.ProfileOverride = map[string]string{}
+		harness = h.Name()
+		if !requireV1(&cfg) {
+			return
 		}
-		cfg.ProfileOverride[harness] = name
-		SaveConfig(cfg)
+		hp := cfg.harnessPolicy(harness)
+		hp.Profile = name
+		cfg.setHarnessPolicy(harness, hp)
+		mustSaveConfig(cfg)
 		fmt.Printf("%s profile → %s (per-harness override)\n", harness, name)
 		return
 	}
-	cfg.Profile = name
-	SaveConfig(cfg)
+	if !requireV1(&cfg) {
+		return
+	}
+	cfg.Policy.Profile = name
+	mustSaveConfig(cfg)
 	fmt.Printf("Global profile → %s\n", name)
 }
 
@@ -580,28 +599,32 @@ func cmdProfileReset(args []string) {
 	}
 	cfg := LoadConfig()
 	if harness != "" {
-		if cfg.ProfileOverride == nil {
+		if h := GetHarness(harness); h != nil {
+			harness = h.Name()
+		}
+		hp := cfg.harnessPolicy(harness)
+		if hp.Profile == "" {
 			fmt.Printf("No override for %s.\n", harness)
 			return
 		}
-		if _, ok := cfg.ProfileOverride[harness]; !ok {
-			fmt.Printf("No override for %s.\n", harness)
+		if !requireV1(&cfg) {
 			return
 		}
-		delete(cfg.ProfileOverride, harness)
-		if len(cfg.ProfileOverride) == 0 {
-			cfg.ProfileOverride = nil
-		}
-		SaveConfig(cfg)
+		hp.Profile = ""
+		cfg.setHarnessPolicy(harness, hp)
+		mustSaveConfig(cfg)
 		fmt.Printf("Cleared profile override for %s. Falling back to global %s.\n", harness, effectiveGlobal(cfg))
 		return
 	}
-	if cfg.Profile == "" {
+	if cfg.Policy.Profile == "" {
 		fmt.Printf("Global profile already at default (%s).\n", DefaultProfileName)
 		return
 	}
-	cfg.Profile = ""
-	SaveConfig(cfg)
+	if !requireV1(&cfg) {
+		return
+	}
+	cfg.Policy.Profile = ""
+	mustSaveConfig(cfg)
 	fmt.Printf("Global profile reset → %s\n", DefaultProfileName)
 }
 
@@ -644,16 +667,19 @@ func cmdProfileCreate(args []string) {
 		os.Exit(1)
 	}
 
-	if _, exists := cfg.CustomProfiles[name]; exists {
+	if _, exists := cfg.Policy.Profiles[name]; exists {
 		fmt.Fprintf(os.Stderr, "Custom profile %q already exists. Delete it first.\n", name)
 		os.Exit(1)
 	}
 
-	if cfg.CustomProfiles == nil {
-		cfg.CustomProfiles = map[string]map[string]string{}
+	if !requireV1(&cfg) {
+		return
 	}
-	cfg.CustomProfiles[name] = tierMap
-	SaveConfig(cfg)
+	if cfg.Policy.Profiles == nil {
+		cfg.Policy.Profiles = map[string]map[string]string{}
+	}
+	cfg.Policy.Profiles[name] = tierMap
+	mustSaveConfig(cfg)
 
 	fmt.Printf("Created custom profile %q:\n", name)
 	for _, t := range allRiskTiers {
@@ -674,25 +700,28 @@ func cmdProfileDelete(args []string) {
 		os.Exit(1)
 	}
 	cfg := LoadConfig()
-	if _, ok := cfg.CustomProfiles[name]; !ok {
+	if _, ok := cfg.Policy.Profiles[name]; !ok {
 		fmt.Fprintf(os.Stderr, "Unknown custom profile %q.\n", name)
 		os.Exit(1)
 	}
-	if cfg.Profile == name {
+	if cfg.Policy.Profile == name {
 		fmt.Fprintf(os.Stderr, "Profile %q is the active global profile. Switch first: yolonot profile use <other>\n", name)
 		os.Exit(1)
 	}
-	for h, p := range cfg.ProfileOverride {
+	for h, p := range harnessProfilePins(cfg) {
 		if p == name {
 			fmt.Fprintf(os.Stderr, "Profile %q is the active override for harness %q. Reset first: yolonot profile reset --harness=%s\n", name, h, h)
 			os.Exit(1)
 		}
 	}
-	delete(cfg.CustomProfiles, name)
-	if len(cfg.CustomProfiles) == 0 {
-		cfg.CustomProfiles = nil
+	if !requireV1(&cfg) {
+		return
 	}
-	SaveConfig(cfg)
+	delete(cfg.Policy.Profiles, name)
+	if len(cfg.Policy.Profiles) == 0 {
+		cfg.Policy.Profiles = nil
+	}
+	mustSaveConfig(cfg)
 	fmt.Printf("Deleted custom profile %q.\n", name)
 }
 
@@ -767,23 +796,34 @@ func parseProfileFlags(args []string) (map[string]string, error) {
 }
 
 func effectiveGlobal(cfg Config) string {
-	if cfg.Profile != "" {
-		return cfg.Profile
+	if cfg.Policy.Profile != "" {
+		return cfg.Policy.Profile
 	}
 	return DefaultProfileName
+}
+
+// harnessProfilePins is the harness → profile view of policy.harness.
+func harnessProfilePins(cfg Config) map[string]string {
+	out := map[string]string{}
+	for h, hp := range cfg.Policy.Harness {
+		if hp.Profile != "" {
+			out[h] = hp.Profile
+		}
+	}
+	return out
 }
 
 // ListProfiles returns built-in + custom profiles, built-ins first then
 // custom in alphabetical order. Used by `yolonot profile list`.
 func ListProfiles(cfg Config) []RiskProfile {
 	out := BuiltinProfiles()
-	customNames := make([]string, 0, len(cfg.CustomProfiles))
-	for k := range cfg.CustomProfiles {
+	customNames := make([]string, 0, len(cfg.Policy.Profiles))
+	for k := range cfg.Policy.Profiles {
 		customNames = append(customNames, k)
 	}
 	sort.Strings(customNames)
 	for _, name := range customNames {
-		m := cfg.CustomProfiles[name]
+		m := cfg.Policy.Profiles[name]
 		cp := map[string]string{}
 		for k, v := range m {
 			cp[k] = v

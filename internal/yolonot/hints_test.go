@@ -169,7 +169,7 @@ func TestLoadHintsWalkupHaltsAtRepoRoot(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(outer, "repo", ".git"), 0o755); err != nil {
 		t.Fatalf("mkdir .git: %v", err)
 	}
-	t.Setenv("HOME", tmp)
+	t.Setenv("HOME", filepath.Join(tmp, "home"))
 
 	// Attacker-controlled hint outside repo — must NOT load.
 	if err := os.WriteFile(filepath.Join(outer, ".yolonot"),
@@ -205,5 +205,66 @@ func TestLoadHintsWalkupHaltsAtRepoRoot(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("legitimate in-repo hint was dropped; got Context=%v", hints.Context)
+	}
+}
+
+func TestWalkupWorktreeAndTrustedHomeParent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(home, "work")
+	mainRepo := filepath.Join(workDir, "main-repo")
+	if err := os.MkdirAll(filepath.Join(mainRepo, ".git", "worktrees", "wt1"), 0o755); err != nil {
+		t.Fatalf("mkdir main .git: %v", err)
+	}
+	// Shared org/workspace .yolonot at ~/work/.yolonot (above repoRoot, inside $HOME).
+	if err := os.WriteFile(filepath.Join(workDir, ".yolonot"),
+		[]byte(`context "workspace-level: ~/work"`+"\n"), 0o644); err != nil {
+		t.Fatalf("write work .yolonot: %v", err)
+	}
+	// Main repo .yolonot.
+	if err := os.WriteFile(filepath.Join(mainRepo, ".yolonot"),
+		[]byte(`allow-hint "main-repo-level: make test is safe"`+"\n"), 0o644); err != nil {
+		t.Fatalf("write mainRepo .yolonot: %v", err)
+	}
+
+	// Linked worktree outside $HOME (e.g. /tmp/wt1).
+	extTmp := t.TempDir()
+	wt1 := filepath.Join(extTmp, "wt1")
+	if err := os.MkdirAll(wt1, 0o755); err != nil {
+		t.Fatalf("mkdir wt1: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt1, ".git"),
+		[]byte("gitdir: "+filepath.Join(mainRepo, ".git", "worktrees", "wt1")+"\n"), 0o644); err != nil {
+		t.Fatalf("write wt1 .git: %v", err)
+	}
+
+	t.Chdir(wt1)
+	hints := LoadHints()
+	if !reflect.DeepEqual(hints.AllowHints, []string{"main-repo-level: make test is safe"}) {
+		t.Errorf("worktree failed to load main repo .yolonot: AllowHints=%v", hints.AllowHints)
+	}
+	if !reflect.DeepEqual(hints.Context, []string{"workspace-level: ~/work"}) {
+		t.Errorf("worktree failed to walk up to trusted ~/work/.yolonot: Context=%v", hints.Context)
+	}
+
+	// ProjectSessionID must match between mainRepo and linked worktree wt1.
+	if idMain, idWT := ProjectSessionID("sess1", mainRepo), ProjectSessionID("sess1", wt1); idMain != idWT {
+		t.Errorf("ProjectSessionID mismatch between mainRepo (%s) and worktree (%s)", idMain, idWT)
+	}
+
+	// ~/Downloads/.yolonot must NEVER be loaded as an ancestor.
+	dlRepo := filepath.Join(home, "Downloads", "dl-repo")
+	if err := os.MkdirAll(filepath.Join(dlRepo, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir dlRepo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "Downloads", ".yolonot"),
+		[]byte(`allow-hint "EVIL from Downloads"`+"\n"), 0o644); err != nil {
+		t.Fatalf("write Downloads .yolonot: %v", err)
+	}
+	t.Chdir(dlRepo)
+	dlHints := LoadHints()
+	if len(dlHints.AllowHints) > 0 {
+		t.Errorf("untrusted ~/Downloads/.yolonot must not load, got %v", dlHints.AllowHints)
 	}
 }

@@ -18,7 +18,7 @@ func TestCursorHarnessSettingsPath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	want := filepath.Join(dir, ".cursor", "hooks.json")
 	if got := h.SettingsPath(); got != want {
 		t.Errorf("SettingsPath() = %s, want %s", got, want)
@@ -28,7 +28,7 @@ func TestCursorHarnessSettingsPath(t *testing.T) {
 func TestCursorHarnessParseHookInputNormalisesEventName(t *testing.T) {
 	// Cursor emits beforeShellExecution / afterShellExecution; yolonot's
 	// internal rule engine branches on PreToolUse / PostToolUse.
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	cases := map[string]string{
 		"beforeShellExecution": "PreToolUse",
 		"afterShellExecution":  "PostToolUse",
@@ -50,7 +50,7 @@ func TestCursorHarnessParseHookInputLiftsCommandAndSetsBash(t *testing.T) {
 	// The rule engine / fast_allow logic branches on tool_name == "Bash"
 	// and pulls the command from tool_input["command"].
 	raw := `{"hook_event_name":"beforeShellExecution","command":"rm -rf /tmp/x","cwd":"/w","conversation_id":"c42"}`
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	p, err := h.ParseHookInput([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestCursorHarnessParseHookInputLiftsCommandAndSetsBash(t *testing.T) {
 
 func TestCursorHarnessParseHookInputEmpty(t *testing.T) {
 	// Empty stdin is valid — cmdHook returns zero payload and exits silently.
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	p, err := h.ParseHookInput(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestCursorHarnessParseHookInputEmpty(t *testing.T) {
 }
 
 func TestCursorHarnessParseHookInputInvalidJSON(t *testing.T) {
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	if _, err := h.ParseHookInput([]byte("{not json")); err == nil {
 		t.Fatal("ParseHookInput on malformed JSON must return error, got nil")
 	}
@@ -97,7 +97,7 @@ func TestCursorHarnessFormatHookResponseDenyFlat(t *testing.T) {
 	r.HookSpecificOutput.PermissionDecision = "deny"
 	r.HookSpecificOutput.PermissionDecisionReason = "why"
 
-	out := (&CursorHarness{}).FormatHookResponse(r)
+	out := (newCursorHarness()).FormatHookResponse(r)
 	var decoded map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
 		t.Fatalf("unmarshal failed: %v (raw=%s)", err, out)
@@ -118,13 +118,13 @@ func TestCursorHarnessFormatHookResponseDenyFlat(t *testing.T) {
 
 func TestCursorHarnessFormatHookResponseAskIsEmpty(t *testing.T) {
 	// Cursor's schema accepts "ask" but does not enforce it — no TUI prompt
-	// fires, and asked-not-approved pins the next invocation as session_deny.
+	// fires, so callers cannot depend on an interactive answer.
 	// We collapse ask to empty stdout (passthrough) so Cursor's own
 	// permission UI handles moderate-risk commands. Parallels Codex/OpenCode.
 	r := HookResponse{}
 	r.HookSpecificOutput.PermissionDecision = "ask"
 	r.HookSpecificOutput.PermissionDecisionReason = "why"
-	if out := (&CursorHarness{}).FormatHookResponse(r); out != "" {
+	if out := (newCursorHarness()).FormatHookResponse(r); out != "" {
 		t.Errorf("ask: FormatHookResponse = %q, want empty", out)
 	}
 }
@@ -139,7 +139,7 @@ func TestCursorHarnessFormatHookResponseAllowIsExplicit(t *testing.T) {
 	r.HookSpecificOutput.PermissionDecision = "allow"
 	r.HookSpecificOutput.PermissionDecisionReason = "previously approved this session"
 
-	out := (&CursorHarness{}).FormatHookResponse(r)
+	out := (newCursorHarness()).FormatHookResponse(r)
 	if out == "" {
 		t.Fatal("allow must not collapse to empty — Cursor would reprompt via its native UI")
 	}
@@ -154,7 +154,7 @@ func TestCursorHarnessFormatHookResponseAllowIsExplicit(t *testing.T) {
 
 func TestCursorHarnessFormatHookResponseEmptyIsSilent(t *testing.T) {
 	r := HookResponse{}
-	if out := (&CursorHarness{}).FormatHookResponse(r); out != "" {
+	if out := (newCursorHarness()).FormatHookResponse(r); out != "" {
 		t.Errorf("FormatHookResponse(empty) = %q, want empty", out)
 	}
 }
@@ -166,7 +166,7 @@ func TestCursorHarnessFormatHookResponseDenyFallsBackToSystemMessage(t *testing.
 	r.HookSpecificOutput.PermissionDecision = "deny"
 	r.SystemMessage = "banner"
 
-	out := (&CursorHarness{}).FormatHookResponse(r)
+	out := (newCursorHarness()).FormatHookResponse(r)
 	var decoded map[string]interface{}
 	json.Unmarshal([]byte(out), &decoded)
 	if decoded["user_message"] != "banner" {
@@ -179,7 +179,7 @@ func TestCursorHarnessInstallWritesFlatEntries(t *testing.T) {
 	t.Setenv("HOME", dir)
 	os.MkdirAll(filepath.Join(dir, ".cursor"), 0755)
 
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	if err := h.Install("/usr/local/bin/yolonot"); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestCursorHarnessInstallPinsHarnessFlag(t *testing.T) {
 	t.Setenv("HOME", dir)
 	os.MkdirAll(filepath.Join(dir, ".cursor"), 0755)
 
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	if err := h.Install("/usr/local/bin/yolonot"); err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestCursorHarnessInstallPreservesOtherHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	if err := h.Install("/usr/local/bin/yolonot"); err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestCursorHarnessInstallUninstall(t *testing.T) {
 	t.Setenv("HOME", dir)
 	os.MkdirAll(filepath.Join(dir, ".cursor"), 0755)
 
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	if h.IsInstalled() {
 		t.Fatal("should not be installed initially")
 	}
@@ -305,7 +305,7 @@ func TestCursorHarnessUninstallKeepsPeerHooks(t *testing.T) {
 	t.Setenv("HOME", dir)
 	os.MkdirAll(filepath.Join(dir, ".cursor"), 0755)
 
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	if err := h.Install("/usr/local/bin/yolonot"); err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func TestCursorHarnessIsDetected(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	if h.IsDetected() {
 		t.Fatal("should not be detected without ~/.cursor")
 	}
@@ -348,20 +348,28 @@ func TestCursorHarnessIsDetected(t *testing.T) {
 	}
 }
 
-func TestCursorHarnessSkillNoOp(t *testing.T) {
-	h := &CursorHarness{}
+func TestCursorHarnessSkillInstallUninstall(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	h := newCursorHarness()
 	path, err := h.InstallSkill()
-	if err != nil || path != "" {
-		t.Errorf("InstallSkill() = (%q, %v), want (\"\", nil)", path, err)
+	if err != nil || path == "" {
+		t.Fatalf("InstallSkill() = (%q, %v)", path, err)
+	}
+	data, err := os.ReadFile(filepath.Join(cursorSkillDir(), "SKILL.md"))
+	if err != nil || !strings.Contains(string(data), "name: yolonot") {
+		t.Fatalf("Cursor skill not written with valid metadata: %v", err)
 	}
 	if err := h.UninstallSkill(); err != nil {
 		t.Errorf("UninstallSkill() = %v, want nil", err)
+	}
+	if _, err := os.Stat(filepath.Join(cursorSkillDir(), "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatal("Cursor skill remains after uninstall")
 	}
 }
 
 func TestCursorHarnessSessionIDFromEnv(t *testing.T) {
 	t.Setenv("YOLONOT_CURSOR_SESSION_ID", "cur-99")
-	h := &CursorHarness{}
+	h := newCursorHarness()
 	if got := h.SessionIDFromEnv(); got != "cur-99" {
 		t.Errorf("SessionIDFromEnv() = %q, want cur-99", got)
 	}
@@ -376,7 +384,7 @@ func TestActiveHarnessPicksCursorByOverride(t *testing.T) {
 }
 
 func TestCursorHarnessPostInstallNotes(t *testing.T) {
-	notes := (&CursorHarness{}).PostInstallNotes()
+	notes := (newCursorHarness()).PostInstallNotes()
 	if len(notes) == 0 {
 		t.Fatal("PostInstallNotes empty — restart hint missing")
 	}
@@ -392,9 +400,9 @@ func TestCursorHarnessPostInstallNotes(t *testing.T) {
 func TestCursorHarnessRiskMapDenyOnly(t *testing.T) {
 	// Cursor matches the Codex pattern because ask isn't enforced upstream.
 	// safe/low → allow; moderate → passthrough (Cursor's UI decides);
-	// high/critical → deny. Regressing moderate to ActionAsk would pin every
-	// moderate command as session_deny via asked-not-approved.
-	rm := (&CursorHarness{}).RiskMap()
+	// high/critical → deny. Moderate commands must remain passthrough while
+	// native interactive ask support is disabled.
+	rm := (newCursorHarness()).RiskMap()
 	if rm[RiskSafe] != ActionAllow || rm[RiskLow] != ActionAllow {
 		t.Errorf("safe/low should allow: %v", rm)
 	}

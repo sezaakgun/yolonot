@@ -201,7 +201,7 @@ func TestCachedOrSmartReusesFreshEntry(t *testing.T) {
 	}
 
 	c := suggestCache{Patterns: map[string]cachedSuggestion{
-		"kubectl get pods": {
+		suggestCacheKey(evolveFinding{Pattern: "kubectl get pods"}): {
 			Action: "allow-hint",
 			Text:   "cached prose",
 			Reason: "from cache",

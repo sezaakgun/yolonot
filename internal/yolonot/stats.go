@@ -2,7 +2,9 @@ package yolonot
 
 import (
 	"fmt"
+	"os"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -21,10 +23,19 @@ type projectStats struct {
 	deny  int
 }
 
-func cmdStats() {
-	entries := ReadRecentDecisions(1000000)
+func cmdStats(args ...string) {
+	filter, err := parseStatsArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "yolonot stats:", err)
+		os.Exit(2)
+	}
+	entries := filterDecisions(ReadRecentDecisions(1000000), filter)
 	if len(entries) == 0 {
-		fmt.Println("No decisions logged yet.")
+		if filter.empty() {
+			fmt.Println("No decisions logged yet.")
+		} else {
+			fmt.Printf("No decisions match %s.\n", filter.describe())
+		}
 		return
 	}
 
@@ -39,6 +50,7 @@ func cmdStats() {
 	askCount := 0
 	denyCount := 0
 	passthroughCount := 0
+	riskPassthroughCount := 0
 
 	// Counts by layer
 	layerCounts := map[string]int{}
@@ -63,6 +75,8 @@ func cmdStats() {
 	// both would double-count).
 	humanApproved := 0
 	humanRejected := 0
+	pausedSkipped := 0
+	unsandboxedCount := 0
 
 	// Asked commands for "top asked" grouping
 	askedCmds := map[string]int{}
@@ -71,6 +85,10 @@ func cmdStats() {
 	projectMap := map[string]*projectStats{}
 
 	for _, e := range entries {
+		if e.Layer == "pause" {
+			pausedSkipped++
+			continue
+		}
 		if e.Layer == "human" {
 			switch e.Decision {
 			case "allow":
@@ -80,6 +98,9 @@ func cmdStats() {
 			}
 			continue
 		}
+		if e.BypassSandbox {
+			unsandboxedCount++
+		}
 		switch e.Decision {
 		case "allow":
 			allowCount++
@@ -87,8 +108,11 @@ func cmdStats() {
 			askCount++
 		case "deny":
 			denyCount++
-		case "passthrough":
+		case "passthrough", "":
 			passthroughCount++
+			if e.OrigDecision != "" {
+				riskPassthroughCount++
+			}
 		}
 
 		layer := e.Layer
@@ -119,13 +143,13 @@ func cmdStats() {
 		}
 
 		// Instant allows
-		if e.Decision == "allow" && (layer == "rule" || layer == "pre_check" || layer == "session" || layer == "cache") {
+		if e.Decision == "allow" && (layer == "rule" || layer == "pre_check" || strings.HasPrefix(layer, "exec:") || layer == "fast_allow" || layer == "session" || layer == "cache") {
 			instantAllows++
 		}
 
 		// Asked commands
-		if e.Decision == "ask" && e.Command != "" {
-			key := normalizeCommand(e.Command)
+		if (e.Decision == "ask" || e.OrigDecision == "ask") && e.Command != "" {
+			key := askShape(e.Command)
 			if key != "" {
 				askedCmds[key]++
 			}
@@ -152,12 +176,18 @@ func cmdStats() {
 		}
 	}
 
-	// Human entries were skipped by the loop; keep them out of the decision
-	// percentages too.
-	total -= humanApproved + humanRejected
+	// Human and pause entries were skipped by the loop; keep them out of the
+	// decision percentages too.
+	total -= humanApproved + humanRejected + pausedSkipped
 
 	// Print header
-	fmt.Printf("yolonot stats (%s)\n\n", dateRange)
+	if filter.empty() {
+		fmt.Printf("yolonot stats (%s)\n\n", dateRange)
+	} else {
+		fmt.Printf("yolonot stats (%s; %s)\n\n", dateRange, filter.describe())
+	}
+
+	printImpactSummary(entries, total, allowCount, instantAllows, escRescued, escHardened, denyCount, layerCounts["session_deny"], humanRejected, llmCallCount, llmTotalMs)
 
 	// Decision counts
 	fmt.Printf("  Total decisions:   %d\n", total)
@@ -165,7 +195,16 @@ func cmdStats() {
 	fmt.Printf("  Asked:             %3d (%d%%)\n", askCount, int(pct(askCount, total)))
 	fmt.Printf("  Denied:            %3d (%d%%)\n", denyCount, int(pct(denyCount, total)))
 	if passthroughCount > 0 {
-		fmt.Printf("  Passthrough:       %3d (LLM unavailable)\n", passthroughCount)
+		label := "LLM unavailable"
+		if riskPassthroughCount == passthroughCount {
+			label = "risk map"
+		} else if riskPassthroughCount > 0 {
+			label = "risk map / LLM unavailable"
+		}
+		fmt.Printf("  Passthrough:       %3d (%s)\n", passthroughCount, label)
+	}
+	if unsandboxedCount > 0 {
+		fmt.Printf("  Unsandboxed:       %3d\n", unsandboxedCount)
 	}
 	if humanApproved > 0 || humanRejected > 0 {
 		fmt.Printf("\n  Ask resolutions:   %d approved, %d rejected by user\n", humanApproved, humanRejected)
@@ -188,13 +227,30 @@ func cmdStats() {
 	fmt.Printf("  Instant allows:    %3d (rule/session/cache — no LLM needed)\n", instantAllows)
 
 	// Escalation — the counter that answers "is the second model earning
-	// its keep": how often it fired and how often it spared an ask.
+	// its keep": how often it fired, how often it spared an ask, and
+	// whether it answers before its own timeout.
 	if escFired > 0 {
 		avgEscMs := escTotalMs / int64(escFired)
 		fmt.Printf("\n  Escalation:        %3d fired, %d rescued (%d%%), %d hardened, avg %dms\n",
 			escFired, escRescued, int(pct(escRescued, escFired)), escHardened, avgEscMs)
+		es := collectEscalationStats(entries)
+		if len(es.latencies) > 0 {
+			fmt.Printf("    Answered:        %3d (p50 %dms, p90 %dms)\n", len(es.latencies), percentile(es.latencies, 50), percentile(es.latencies, 90))
+		}
 		if escErrors > 0 {
-			fmt.Printf("    Errors:          %3d (provider failures — ask stood)\n", escErrors)
+			fmt.Printf("    Errors:          %3d (provider failures — the primary verdict stood)\n", escErrors)
+			for _, kind := range sortedKeys(es.errorsByKind) {
+				fmt.Printf("      %-14s %3d\n", kind, es.errorsByKind[kind])
+			}
+		}
+		if es.skipped > 0 {
+			fmt.Printf("    Skipped:         %3d (%s)\n", es.skipped, joinCounts(es.skippedByReason))
+		}
+		if esc := GetEscalationConfig(); esc.Model != "" {
+			timeout := resolveTimeoutSeconds(esc, 10)
+			if warn := escalationLatencyWarning(es, timeout); warn != "" {
+				fmt.Printf("    ⚠ %s — raise its timeout or pick a faster model (yolonot models)\n", warn)
+			}
 		}
 	}
 
@@ -224,6 +280,8 @@ func cmdStats() {
 		}
 	}
 
+	printAskDiagnostics(entries, filter)
+
 	// Project breakdown
 	if len(projectMap) > 0 {
 		fmt.Printf("\n  By project:\n")
@@ -237,9 +295,17 @@ func cmdStats() {
 			}
 			return projects[i].name < projects[j].name
 		})
-		for _, ps := range projects {
+		maxProjects := 10
+		shown := projects
+		if len(shown) > maxProjects {
+			shown = shown[:maxProjects]
+		}
+		for _, ps := range shown {
 			fmt.Printf("    %-18s %3d (allow: %d, ask: %d, deny: %d)\n",
 				ps.name, ps.total, ps.allow, ps.ask, ps.deny)
+		}
+		if len(projects) > maxProjects {
+			fmt.Printf("    … and %d more projects\n", len(projects)-maxProjects)
 		}
 	}
 }
@@ -269,7 +335,7 @@ func extractDate(ts string) string {
 
 func sortedLayerKeys(m map[string]int) []string {
 	// Preferred order for known layers
-	preferred := []string{"rule", "pre_check", "session", "session_llm", "cache", "llm", "session_deny"}
+	preferred := []string{"rule", "fast_allow", "pre_check", "session", "session_llm", "cache", "llm", "session_deny"}
 	var result []string
 	seen := map[string]bool{}
 	for _, k := range preferred {
@@ -288,4 +354,179 @@ func sortedLayerKeys(m map[string]int) []string {
 	sort.Strings(extra)
 	result = append(result, extra...)
 	return result
+}
+
+func sortedKeys(m map[string]int) []string {
+	var keys []string
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func joinCounts(m map[string]int) string {
+	var parts []string
+	for _, k := range sortedKeys(m) {
+		parts = append(parts, fmt.Sprintf("%s %d", k, m[k]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// printAskDiagnostics is the part of stats that explains a noisy session:
+// who asked, what was asked twice, where the second model contradicted
+// itself, which scripts the judge could not see, and what the human did
+// with each ask.
+func printAskDiagnostics(entries []DecisionEntry, filter statsFilter) {
+	mainAsks, agentAsks := 0, 0
+	for _, e := range entries {
+		if (e.Decision != "ask" && e.OrigDecision != "ask") || e.Layer == "human" {
+			continue
+		}
+		if isAgentEntry(e) {
+			agentAsks++
+		} else {
+			mainAsks++
+		}
+	}
+	if agentAsks > 0 {
+		fmt.Printf("\n  Asks by caller:    %d main thread, %d subagent\n", mainAsks, agentAsks)
+	}
+
+	if repeats := collectRepeatedAsks(entries); len(repeats) > 0 {
+		fmt.Printf("\n  Asked more than once in one session:\n")
+		for i, r := range repeats {
+			if i == 5 {
+				fmt.Printf("    … %d more\n", len(repeats)-5)
+				break
+			}
+			from := ""
+			if r.agents > 0 {
+				from = fmt.Sprintf(", %d from subagents", r.agents)
+			}
+			fmt.Printf("    %dx  %s  (session %s%s)\n", r.count, r.pattern, shortID(r.session), from)
+		}
+	}
+
+	if flips := collectInconsistentVerdicts(entries); len(flips) > 0 {
+		fmt.Printf("\n  Escalation answered the same command differently:\n")
+		for i, f := range flips {
+			if i == 5 {
+				fmt.Printf("    … %d more\n", len(flips)-5)
+				break
+			}
+			fmt.Printf("    %s → %s  (session %s)\n", f.pattern, strings.Join(f.verdicts, " vs "), shortID(f.session))
+		}
+	}
+
+	if asks, byPath := withheldScriptCounts(entries); asks > 0 {
+		fmt.Printf("\n  Asks where a referenced script was not shown to the judge: %d\n", asks)
+		paths := sortedKeys(byPath)
+		sort.SliceStable(paths, func(i, j int) bool { return byPath[paths[i]] > byPath[paths[j]] })
+		for i, p := range paths {
+			if i == 5 {
+				break
+			}
+			fmt.Printf("    %dx  %s\n", byPath[p], p)
+		}
+		fmt.Printf("    (yolonot check '<command>' prints why; an allow-hint can describe routine scripts)\n")
+	}
+
+	if res := collectAskResolutions(entries); len(res) > 0 {
+		byLayer, byOutcome := resolutionTable{}, resolutionTable{}
+		for _, r := range res {
+			byLayer.add(r.ask.Layer, r.resolution)
+			if r.ask.Escalated && r.ask.EscalationOutcome != "" {
+				byOutcome.add("escalation "+r.ask.EscalationOutcome, r.resolution)
+			}
+		}
+		fmt.Printf("\n  What you did with the asks (approved / once / rejected / unanswered):\n")
+		for _, g := range byLayer.sortedGroups() {
+			c := byLayer[g]
+			fmt.Printf("    %-24s %3d:  %d / %d / %d / %d\n", g, c["total"], c["approved"], c["once"], c["rejected"], c["unanswered"])
+		}
+		for _, g := range byOutcome.sortedGroups() {
+			c := byOutcome[g]
+			fmt.Printf("    %-24s %3d:  %d / %d / %d / %d\n", g, c["total"], c["approved"], c["once"], c["rejected"], c["unanswered"])
+		}
+	}
+
+	if filter.session == "" {
+		if sessions := collectSessionAskCounts(entries); len(sessions) > 1 {
+			fmt.Printf("\n  Sessions with most asks (yolonot stats --session <id>):\n")
+			for i, s := range sessions {
+				if i == 5 {
+					break
+				}
+				fmt.Printf("    %3d asks  %s  %s  (%d escalation timeouts)\n", s.asks, shortID(s.session), s.project, s.timeouts)
+			}
+		}
+	}
+}
+
+func printImpactSummary(entries []DecisionEntry, total, allowCount, instantAllows, escRescued, escHardened, denyCount, repeatBlocked, humanRejected, llmCallCount int, llmTotalMs int64) {
+	judgeAllows := allowCount - instantAllows
+	if judgeAllows < 0 {
+		judgeAllows = 0
+	}
+	rescuedPart := ""
+	if escRescued > 0 {
+		rescuedPart = fmt.Sprintf(", %d rescued by 2nd model", escRescued)
+	}
+	fmt.Printf("  Impact:\n")
+	fmt.Printf("    Auto-approved:   %d (%d%% — %d instant 0ms, %d AI judge%s)\n",
+		allowCount, int(pct(allowCount, total)), instantAllows, judgeAllows, rescuedPart)
+	if llmCallCount > 0 && instantAllows > 0 {
+		avgMs := llmTotalMs / int64(llmCallCount)
+		savedSec := float64(int64(instantAllows)*avgMs) / 1000.0
+		fmt.Printf("    Speed saved:     %d LLM calls skipped (~%.1fs saved at %dms avg)\n", instantAllows, savedSec, avgMs)
+	} else {
+		fmt.Printf("    Speed saved:     %d LLM calls skipped (instant local allow)\n", instantAllows)
+	}
+
+	autoDenied := denyCount - repeatBlocked
+	if autoDenied < 0 {
+		autoDenied = 0
+	}
+	hardenedAsks := 0
+	for _, e := range entries {
+		if e.Escalated && e.EscalationOutcome == "hardened" && e.Decision == "ask" {
+			hardenedAsks++
+		}
+	}
+	threatsTotal := autoDenied + hardenedAsks + humanRejected
+	if threatsTotal == 0 && repeatBlocked > 0 {
+		threatsTotal = repeatBlocked
+	}
+	var parts []string
+	if autoDenied > 0 {
+		parts = append(parts, fmt.Sprintf("%d auto-denied", autoDenied))
+	}
+	if escHardened > 0 {
+		parts = append(parts, fmt.Sprintf("%d hardened by 2nd model", escHardened))
+	}
+	if humanRejected > 0 {
+		parts = append(parts, fmt.Sprintf("%d rejected by user", humanRejected))
+	}
+	if repeatBlocked > 0 {
+		parts = append(parts, fmt.Sprintf("%d repeat blocked", repeatBlocked))
+	}
+	if len(parts) > 0 {
+		fmt.Printf("    Threats stopped: %d (%s)\n", threatsTotal, strings.Join(parts, ", "))
+	} else {
+		fmt.Printf("    Threats stopped: 0\n")
+	}
+	for _, inc := range collectThreatIncidents(entries) {
+		cmd := truncateStr(strings.ReplaceAll(inc.command, "\n", " ⏎ "), 60)
+		mult := ""
+		if inc.count > 1 {
+			mult = fmt.Sprintf("%dx ", inc.count)
+		}
+		reason := ""
+		if inc.reason != "" {
+			reason = " " + truncateStr(inc.reason, 70)
+		}
+		fmt.Printf("      ✗ %s%s  [%s]%s\n", mult, cmd, inc.tag, reason)
+	}
+	fmt.Println()
 }

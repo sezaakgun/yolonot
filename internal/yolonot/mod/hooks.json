@@ -1,0 +1,4 @@
+{
+  "description": "yolonot's function-hooks module. Written by `yolonot install --mod`; builds without hooks-module support ignore this key and keep the classic PreToolUse hook.",
+  "modules": ["./register.tsx"]
+}

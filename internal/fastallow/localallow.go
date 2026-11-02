@@ -320,6 +320,12 @@ func isVersionOrHelp(args []*syntax.Word) bool {
 		}
 	}
 	if (last == "--help" || last == "-h") && len(args) <= 4 {
+		for _, a := range args[1 : len(args)-1] {
+			tok, ok := literalWord(a)
+			if !ok || strings.HasPrefix(tok, "-") {
+				return false
+			}
+		}
 		return true
 	}
 	return false
@@ -409,20 +415,20 @@ var dangerousEnvNames = map[string]struct{}{
 	"GIT_EDITOR":          {},
 	"GIT_SEQUENCE_EDITOR": {},
 	// Generic editor/pager overrides — same class.
-	"EDITOR":        {},
-	"VISUAL":        {},
-	"PAGER":         {},
+	"EDITOR": {},
+	"VISUAL": {},
+	"PAGER":  {},
 	// kube/helm/docker — config-file redirection (re-covered by CLI flag
 	// handlers, but prefix form would bypass those handlers entirely).
-	"KUBECONFIG": {},
+	"KUBECONFIG":    {},
 	"DOCKER_CONFIG": {},
 	"DOCKER_HOST":   {},
 	// LD_PRELOAD / DYLD_INSERT_LIBRARIES load attacker libs into any
 	// spawned child — the nuclear option.
-	"LD_PRELOAD":             {},
-	"LD_LIBRARY_PATH":        {},
-	"DYLD_INSERT_LIBRARIES":  {},
-	"DYLD_LIBRARY_PATH":      {},
+	"LD_PRELOAD":                 {},
+	"LD_LIBRARY_PATH":            {},
+	"DYLD_INSERT_LIBRARIES":      {},
+	"DYLD_LIBRARY_PATH":          {},
 	"DYLD_FALLBACK_LIBRARY_PATH": {},
 	// PATH prefix manipulation points every unqualified command at an
 	// attacker directory.
