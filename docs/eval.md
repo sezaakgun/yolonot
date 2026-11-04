@@ -189,3 +189,28 @@ Requirements:
   reverse-shell, RCE, exfil, prod-mutation, and two withheld-note cases).
 - Fixtures are synthetic — RFC 5737 / `*.example.com` placeholders, no real
   secrets. The malicious scripts are read by the eval, never executed.
+
+## Published benchmark results
+
+Evaluated with `fast_allow` AST + TypeSafe Jev (`jev-1.13`, Stage 1) + `claude-haiku-5.5` (Stage 2 escalation) across **456 cases** in three public suites (`244` risky + `212` safe) and **5,000 sampled real-world gate evaluations**:
+
+### 1. Three-suite evaluation breakdown (`N = 456`)
+
+| Benchmark Suite | Safe Cleared in `<1ms` AST | Safe Allowed (Total) | Dangerous Caught (`balanced` → `strict` → `paranoid`) |
+| :--- | :--- | :--- | :--- |
+| **1. yolonot Open Eval (`260` cases)** (`176` greenfield + `70` brownfield + `14` script-attach) | `49.4%` (`42 / 85`) | `98.8%` (`84 / 85`) | **`100.0%`** (`105 / 105`, including `14/14` hidden script attacks) |
+| **2. HF `rogue-security` (`76` bash calls)** (`rogue-security/coding-agent-security-benchmark`) | `32.0%` (`8 / 25`) | `64.0%` cold (`16 / 25`)* | **`94.7%`** (`36/38`) → **`100.0%`** (`38/38` in `strict`/`paranoid`) |
+| **3. `RedCode-Exec` + Dippy CLI (`120` cases)** (`60` safe Dippy CLI + `60` RedCode OS attacks) | `98.3%` (`59 / 60`) | `98.3%` (`59 / 60`) | **`90.5%`** (`38/42`) → **`100.0%`** (`42/42` in `strict`/`paranoid`) |
+| **Normalized Macro-Average (`456` cases)** *(vs. `54.2%` AST hit rate on `5,000` real-world calls)* | **`59.9%` in `~1.6µs`** (`0` unsafe leaks) | **`98.6%` CLI** (`87.0%` 3-suite cold) | **`95.1%` → `98.4%` → `100.0%`** across `balanced`, `strict`, `paranoid` |
+
+*\*Denominators in columns 2–4 reflect each suite's pure cold-classifier safe (`85 + 25 + 60 = 170`) and high-confidence attack (`105 + 38 + 42 = 185`) subsets; the remaining `101` of `456` cases test `.yolonot` rule precedence, script attachment, and gray-zone prompt-rate behavior (`13` in `rogue-security` and `18` in `RedCode-Exec`). In `rogue-security`, the 9 safe commands flagged as `ask` on a cold start are zero-context executions of unfamiliar `/tmp/*.py` scripts, `kill -9`, or public gist creation that require a one-time confirmation before session memory or `yolonot suggest` auto-allows them.*
+
+### 2. Stage 2 cross-model escalation & classifier ablation (`n = 5,000` real-world calls)
+
+- **54.2% instant local resolution (`~1.6µs` AST parse):** Cleared in-process by `fast_allow`, `.yolonot` rules, and SHA-256 session memory with zero API calls (`96.5%` total allow, `2.35%` ask, `0.17%` hard deny, `0.97%` passthrough).
+- **48.3% false-alarm rescue via Stage 2 escalation:** Escalating uncertain Stage 1 `ask` verdicts from `jev-1.13` to a distinct model (`claude-haiku-5.5`) rescued **48.3%** of overly cautious asks to `allow` (raising Dippy CLI safe allow rate from `93.3% → 98.3%`) while catching and hardening **8 under-rated risks**, subject to the hard monotonicity floor (`critical` never relaxes to `allow`).
+- **Pluggable classifier benchmarks on Open Eval:**
+  - **TypeSafe Jev (`jev-1.13`):** `99.4%` greenfield accuracy (`~50–80ms` typical latency).
+  - **Kev-4B (Apache-2.0 Qwen3.5 LoRA):** `93.2%` accuracy (`100%` dangerous catch, runs locally with zero cloud API cost).
+  - **Cloudflare Clef-flash:** `92.0%` accuracy (`100%` dangerous catch).
+  - **Script-attach (`evals/suites/script-attach.jsonl`):** `14/14` (`100%`) hidden on-disk script attacks caught.
