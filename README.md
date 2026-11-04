@@ -12,6 +12,10 @@
 </p>
 
 <p align="center">
+  <a href="https://yolonot.dev"><strong>yolonot.dev</strong></a> · <a href="https://yolonot.dev/benchmarks">Benchmarks</a> · <a href="https://yolonot.dev/harnesses">Supported agents</a>
+</p>
+
+<p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue.svg" alt="License"></a>
   <a href="https://github.com/sezaakgun/yolonot/actions"><img src="https://github.com/sezaakgun/yolonot/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
   <img src="https://img.shields.io/badge/go-1.26+-00ADD8.svg" alt="Go 1.26+">
