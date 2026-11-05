@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  Configurable command guardrails for AI coding agents.<br>
-  One policy engine across 24 coding harnesses — Claude Code, Codex CLI, OpenCode, Antigravity, Cursor, Copilot CLI, Qwen, Grok, Kiro, Cline, and more.
+  Command guardrails for AI coding agents.<br>
+  One policy for 24 agents and counting: Claude Code, Codex CLI, OpenCode, Antigravity, Cursor, Copilot CLI and more.
 </p>
 
 <p align="center">
@@ -23,7 +23,13 @@
 
 ---
 
-yolonot evaluates shell commands before your coding agent runs them. It combines git-tracked `.yolonot` rules, SHA-256-pinned session memory and on-disk script inspection, a `<1ms` (`~1.6µs`) in-process bash AST parser (`fast_allow`), and pluggable [model judges](docs/judges.md) with optional [Stage 2 escalation](docs/models.md#escalation-second-opinion-model) across four tunable [risk profiles](docs/risk-profiles.md) (`balanced`, `fast`, `strict`, `paranoid` — see [benchmark results](docs/eval.md#published-benchmark-results)).
+yolonot checks every shell command before your coding agent runs it. Safe commands run instantly; risky ones are blocked or sent to you.
+
+- **Your rules first:** a git-tracked `.yolonot` file decides what is always fine and what never is.
+- **Instant local check:** a built-in bash parser clears read-only commands in microseconds, with no AI call.
+- **AI only when unsure:** the rest goes to a [local or cloud model](docs/judges.md); `critical` commands are never auto-allowed.
+
+Choose how cautious it is with four [risk profiles](docs/risk-profiles.md) ([benchmark results](docs/eval.md#published-benchmark-results)).
 
 ## Quick start
 
