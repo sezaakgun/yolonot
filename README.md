@@ -8,7 +8,7 @@
 
 <p align="center">
   Command guardrails for AI coding agents.<br>
-  One policy for 24 agents: Claude Code, Codex CLI, OpenCode, Antigravity, Cursor, Copilot CLI and more.
+  One policy for 24 agents and counting: Claude Code, Codex CLI, OpenCode, Antigravity, Cursor, Copilot CLI and more.
 </p>
 
 <p align="center">
