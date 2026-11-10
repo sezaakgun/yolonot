@@ -241,7 +241,8 @@ func TestExpandDefaultsSentinel(t *testing.T) {
 		in   []string
 		want []string
 	}{
-		{"empty input → nil", nil, nil},
+		{"nil input → builtins by default", nil, builtin},
+		{"explicit empty slice → nil (disabled)", []string{}, nil},
 		{"sentinel only → builtins", []string{"$defaults"}, builtin},
 		{"no sentinel → user list verbatim", []string{"u1", "u2"}, []string{"u1", "u2"}},
 		{"sentinel preserves ordering",
@@ -259,15 +260,27 @@ func TestExpandDefaultsSentinel(t *testing.T) {
 	}
 }
 
-// TestBuildSystemPromptDefaultByteEqual is the core backward-compat
-// invariant for the LLM call path: with no user customization, the system
-// prompt sent to the model must be byte-equal to the SystemPrompt const.
-// If this fails, every existing user's classifier behavior may shift on
-// upgrade — even users who never touched the new feature.
+// TestBuildSystemPromptDefaultByteEqual checks that with all hint slices
+// explicitly disabled ([]), BuildSystemPrompt returns the base SystemPrompt
+// const byte-for-byte, while a zero PromptConfig (nil slices) expands
+// $defaults on top of SystemPrompt by default.
 func TestBuildSystemPromptDefaultByteEqual(t *testing.T) {
+	bare := BuildSystemPrompt(PromptConfig{Context: []string{}, AllowHints: []string{}, AskHints: []string{}}, WalkupHints{})
+	if bare != SystemPrompt {
+		t.Fatalf("explicit empty-hints BuildSystemPrompt diverged from SystemPrompt const")
+	}
 	got := BuildSystemPrompt(PromptConfig{}, WalkupHints{})
-	if got != SystemPrompt {
-		t.Fatalf("default BuildSystemPrompt diverged from SystemPrompt const")
+	if !strings.HasPrefix(got, SystemPrompt) {
+		t.Fatalf("default BuildSystemPrompt missing SystemPrompt prefix")
+	}
+	for _, want := range []string{
+		builtinClassifierContext[0],
+		builtinClassifierAllowHints[0],
+		builtinClassifierAskHints[0],
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("default BuildSystemPrompt missing built-in $defaults entry %q", want)
+		}
 	}
 }
 
@@ -418,5 +431,41 @@ func TestBuildSystemPromptMergesWalkupAfterConfig(t *testing.T) {
 	}
 	if configIdx > walkIdx {
 		t.Errorf("config entry appeared after walkup entry; want config first")
+	}
+}
+
+func TestPromptConfigEmptySliceDisablesDefaultsRoundTrip(t *testing.T) {
+	cfg := Config{
+		ConfigVersion: 1,
+		Prompt:        PromptConfig{AskHints: []string{}},
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"ask_hints":[]`) {
+		t.Fatalf("expected explicit empty ask_hints array in JSON, got: %s", raw)
+	}
+	var decoded Config
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.Prompt.AskHints == nil || len(decoded.Prompt.AskHints) != 0 {
+		t.Fatalf("expected non-nil empty AskHints slice after round-trip, got %#v", decoded.Prompt.AskHints)
+	}
+	if got := expandDefaults(decoded.Prompt.AskHints, builtinClassifierAskHints); len(got) != 0 {
+		t.Fatalf("explicit empty slice must disable $defaults, got %v", got)
+	}
+	if got := expandDefaults(decoded.Prompt.Context, builtinClassifierContext); len(got) == 0 {
+		t.Fatalf("unset (nil) slice must expand $defaults by default")
+	}
+}
+
+func TestNoBuiltinGitPushRestrictions(t *testing.T) {
+	for _, s := range append([]string{SystemPrompt}, builtinClassifierAskHints...) {
+		lower := strings.ToLower(s)
+		if strings.Contains(lower, "git push") || strings.Contains(lower, "force-push") {
+			t.Errorf("unexpected built-in git push restriction in %q", s)
+		}
 	}
 }

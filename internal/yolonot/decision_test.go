@@ -204,11 +204,14 @@ func TestCallDecisionWorkersAIEnvelope(t *testing.T) {
 }
 
 func TestDecisionHints(t *testing.T) {
-	if got := DecisionHints(PromptConfig{}, WalkupHints{}); got != "" {
-		t.Fatalf("no hints should render nothing, got %q", got)
+	if got := DecisionHints(PromptConfig{Context: []string{}, AllowHints: []string{}, AskHints: []string{}}, WalkupHints{}); got != "" {
+		t.Fatalf("explicitly empty hint lists should render nothing, got %q", got)
 	}
-	got := DecisionHints(PromptConfig{AskHints: []string{"$defaults", "", "touching billing/ asks"}}, WalkupHints{Context: []string{"monorepo"}})
-	for _, want := range []string{"\n\nProject context:\n- monorepo\n", "\n\nAsk when:\n- Granting", "- Force-pushing", "- touching billing/ asks\n"} {
+	if got := DecisionHints(PromptConfig{}, WalkupHints{}); !strings.Contains(got, "Project context:") || !strings.Contains(got, "Allow when:") || !strings.Contains(got, "Ask when:") {
+		t.Fatalf("nil hint lists should default to $defaults, got %q", got)
+	}
+	got := DecisionHints(PromptConfig{Context: []string{}, AllowHints: []string{}, AskHints: []string{"$defaults", "", "touching billing/ asks"}}, WalkupHints{Context: []string{"monorepo"}})
+	for _, want := range []string{"\n\nProject context:\n- monorepo\n", "\n\nAsk when:\n- Granting", "- Downloading and executing", "- touching billing/ asks\n"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in %q", want, got)
 		}

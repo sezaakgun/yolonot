@@ -109,28 +109,33 @@ files.
 
 ## The `$defaults` sentinel
 
-Each list accepts the literal string `"$defaults"`, which is replaced
-with yolonot's built-in entries at the position you wrote it:
+When a hint list (`context`, `allow_hints`, or `ask_hints`) is omitted in
+`~/.yolonot/config.json`, `"$defaults"` is active by default. When you define
+a custom list in `config.json`, include the literal string `"$defaults"` to
+keep yolonot's built-in entries at the position you wrote it:
 
 ```json
 "context": ["my entry before", "$defaults", "my entry after"]
 ```
 
+To disable the built-in defaults for a section completely, set an empty array
+(`"ask_hints": []`) or provide your own entries without `"$defaults"`.
+
 yolonot ships a small set of generic defaults — trust framing, scoping
-hints for IAM and cloud-storage verbs, the pre-existing-vs-generated
-distinction for destructive ops, and a few other patterns the base
-prompt doesn't already cover. They are deliberately org-agnostic: no
+hints for IAM, production infrastructure, and cloud-storage verbs, the
+pre-existing-vs-generated distinction for destructive ops, and remote code
+execution / hook-bypass checks. They are deliberately org-agnostic: no
 domains, repo orgs, or path prefixes. Print them with:
 
 ```bash
 yolonot rules defaults
 ```
 
-> **Footgun:** omitting `"$defaults"` from a list takes full ownership
-> of that list — the built-ins are dropped, and you also stop inheriting
-> any new defaults yolonot ships in future releases. Keep `"$defaults"`
-> unless you have a deliberate reason to fully replace the built-in
-> behavior. Same contract as Claude Code's `autoMode`.
+> **Footgun:** omitting `"$defaults"` from a configured list takes full
+> ownership of that list — the built-ins are dropped, and you also stop
+> inheriting any new defaults yolonot ships in future releases. Keep
+> `"$defaults"` unless you have a deliberate reason to fully replace or
+> disable the built-in behavior. Same contract as Claude Code's `autoMode`.
 
 ## Fully replacing the base prompt
 
@@ -276,8 +281,9 @@ environment (such as `prod` when the human asked for `staging`).
 The block was called `classifier` and carried an unused `impl` field. A v0
 file still loads: `classifier.*` is read as `prompt.*` and `impl` is dropped.
 `yolonot migrate` rewrites the file; see [upgrading.md](upgrading.md). With no
-hints set anywhere, the system prompt sent to the model is byte-equal to the
-built-in `SystemPrompt` const.
+custom `prompt` lists configured, `BuildSystemPrompt` and `DecisionHints`
+automatically include the built-in `$defaults` sections on top of the base
+`SystemPrompt`.
 
 ## Security notes
 

@@ -353,13 +353,21 @@ func clipOneLine(s string, max int) string {
 	return s
 }
 
+func customHintsOnly(input []string) []string {
+	var out []string
+	for _, s := range input {
+		if s == DefaultsSentinel || strings.TrimSpace(s) == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 func buildClassifierReviewUserPrompt(cfg PromptConfig, walkup WalkupHints) string {
-	context := expandDefaults(cfg.Context, builtinClassifierContext)
-	context = append(context, walkup.Context...)
-	allow := expandDefaults(cfg.AllowHints, builtinClassifierAllowHints)
-	allow = append(allow, walkup.AllowHints...)
-	ask := expandDefaults(cfg.AskHints, builtinClassifierAskHints)
-	ask = append(ask, walkup.AskHints...)
+	context := append(customHintsOnly(cfg.Context), walkup.Context...)
+	allow := append(customHintsOnly(cfg.AllowHints), walkup.AllowHints...)
+	ask := append(customHintsOnly(cfg.AskHints), walkup.AskHints...)
 
 	if len(context) == 0 && len(allow) == 0 && len(ask) == 0 {
 		return ""

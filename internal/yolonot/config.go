@@ -78,9 +78,9 @@ type ModelConfig = ProviderConfig
 
 // PromptConfig is the chat-model prompt tuning (v0: classifier.*).
 type PromptConfig struct {
-	Context    []string `json:"context,omitempty"`     // prose describing trusted infra (repos, buckets, domains)
-	AllowHints []string `json:"allow_hints,omitempty"` // prose nudging the model toward allow on routine patterns
-	AskHints   []string `json:"ask_hints,omitempty"`   // prose nudging the model toward ask on environment-specific risks
+	Context    []string `json:"context,omitzero"`     // prose describing trusted infra (repos, buckets, domains); nil = $defaults, [] = none
+	AllowHints []string `json:"allow_hints,omitzero"` // prose nudging the model toward allow on routine patterns; nil = $defaults, [] = none
+	AskHints   []string `json:"ask_hints,omitzero"`   // prose nudging the model toward ask on environment-specific risks; nil = $defaults, [] = none
 	// SystemPrompt fully replaces the built-in base prompt when non-empty.
 	// Context/AllowHints/AskHints still append after it. A per-project
 	// .yolonot `system-prompt` directive overrides this. An override that
@@ -88,6 +88,10 @@ type PromptConfig struct {
 	// (BuildSystemPrompt); unparseable output then passes through to the
 	// host's permission layer. Empty = built-in prompt, byte-for-byte.
 	SystemPrompt string `json:"system_prompt,omitempty"`
+}
+
+func (p PromptConfig) IsZero() bool {
+	return p.Context == nil && p.AllowHints == nil && p.AskHints == nil && p.SystemPrompt == ""
 }
 
 // PolicyConfig is the risk-tier policy (v0: profile, custom_profiles,
@@ -125,9 +129,9 @@ type HarnessPolicy struct {
 // sentinel takes full ownership of the list.
 type ClassifierConfig struct {
 	Impl       string   `json:"impl,omitempty"`        // "llm" (default), "heuristic", "knn", ...
-	Context    []string `json:"context,omitempty"`     // prose describing trusted infra (repos, buckets, domains)
-	AllowHints []string `json:"allow_hints,omitempty"` // prose nudging classifier toward allow on routine patterns
-	AskHints   []string `json:"ask_hints,omitempty"`   // prose nudging classifier toward ask on environment-specific risks
+	Context    []string `json:"context,omitzero"`      // prose describing trusted infra (repos, buckets, domains)
+	AllowHints []string `json:"allow_hints,omitzero"`  // prose nudging classifier toward allow on routine patterns
+	AskHints   []string `json:"ask_hints,omitzero"`    // prose nudging classifier toward ask on environment-specific risks
 	// SystemPrompt fully replaces the built-in classifier base prompt when
 	// non-empty. Unlike the hint slices (which append), this owns the whole
 	// base — but Context/AllowHints/AskHints still append after it, so the
@@ -171,7 +175,7 @@ func (c *ClassifierConfig) UnmarshalJSON(data []byte) error {
 // "classifier": "llm" round-trips unchanged through Save — important so we
 // don't silently rewrite every user's config the first time they upgrade.
 func (c ClassifierConfig) MarshalJSON() ([]byte, error) {
-	if len(c.Context) == 0 && len(c.AllowHints) == 0 && len(c.AskHints) == 0 && c.SystemPrompt == "" {
+	if c.Context == nil && c.AllowHints == nil && c.AskHints == nil && c.SystemPrompt == "" {
 		if c.Impl == "" {
 			return []byte(`""`), nil
 		}

@@ -303,8 +303,8 @@ func (c *Config) normalize() {
 		}
 		c.Judges = kept
 	}
-	if cl := c.Classifier; len(cl.Context)+len(cl.AllowHints)+len(cl.AskHints) > 0 || cl.SystemPrompt != "" || cl.Impl != "" {
-		if len(c.Prompt.Context)+len(c.Prompt.AllowHints)+len(c.Prompt.AskHints) == 0 && c.Prompt.SystemPrompt == "" {
+	if cl := c.Classifier; cl.Context != nil || cl.AllowHints != nil || cl.AskHints != nil || cl.SystemPrompt != "" || cl.Impl != "" {
+		if c.Prompt.Context == nil && c.Prompt.AllowHints == nil && c.Prompt.AskHints == nil && c.Prompt.SystemPrompt == "" {
 			c.Prompt = PromptConfig{Context: cl.Context, AllowHints: cl.AllowHints, AskHints: cl.AskHints, SystemPrompt: cl.SystemPrompt}
 		}
 		c.Classifier = ClassifierConfig{}
