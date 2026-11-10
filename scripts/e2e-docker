@@ -59,7 +59,10 @@ fi
 
 COMMON_DOCKER_ARGS=(
   --rm
-  --privileged
+  --security-opt seccomp=unconfined
+  --security-opt apparmor=unconfined
+  --security-opt systempaths=unconfined
+  -e GOFLAGS=-buildvcs=false
   -v "$ROOT:/workspace:ro"
   -v "$GOCACHE_VOL:/home/e2e/.cache/go-build"
   -w /workspace

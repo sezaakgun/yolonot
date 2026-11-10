@@ -157,21 +157,23 @@ func TestOpencodeV2(t *testing.T) {
 		t.Skip("installed opencode binary is V1 (1.x); V2 permission/tool hook server API is covered by TestOpencodeV2PluginNativePermissionLifecycle")
 	}
 	for _, c := range []struct {
-		name, token, host, reply string
-		marker                   bool
+		name, token, host, reply, wantSource string
+		marker                               bool
 	}{
-		{"allow", "ALLOWED", "ask", "", true},
-		{"deny", "DENIED", "allow", "", false},
-		{"ask-approved", "ASKED", "allow", "once", true},
-		{"ask-rejected", "ASKED", "allow", "reject", false},
-		{"host-deny", "ALLOWED", "deny", "", false},
+		{"allow", "ALLOWED", "ask", "", "", true},
+		{"deny", "DENIED", "allow", "", "", false},
+		{"ask-approved", "ASKED", "allow", "once", "allow_once", true},
+		{"ask-always", "ASKED", "allow", "always", "ask_approved", true},
+		{"ask-rejected", "ASKED", "allow", "reject", "ask_rejected", false},
+		{"host-deny", "ALLOWED", "deny", "", "", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			sess := srv.call(t, "POST", "/api/session", obj{"location": obj{"directory": s.Work}, "permissions": []any{obj{"action": "shell", "resource": "*", "effect": c.host}}})
 			sid := sess["data"].(obj)["id"].(string)
 			marker := filepath.Join(s.Work, c.token+"-"+c.name+".marker")
 			result := filepath.Join(s.Home, c.name+"-result.json")
-			spec, _ := json.Marshal(obj{"command": "touch " + marker, "id": "call_" + strings.ReplaceAll(c.name, "-", "_"), "file": result})
+			cmdText := "touch " + marker
+			spec, _ := json.Marshal(obj{"command": cmdText, "id": "call_" + strings.ReplaceAll(c.name, "-", "_"), "file": result})
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
@@ -200,6 +202,22 @@ func TestOpencodeV2(t *testing.T) {
 			out, _ := os.ReadFile(result)
 			if _, err := os.Stat(marker); (err == nil) != c.marker {
 				t.Errorf("marker exists=%v, want %v; result=%s", err == nil, c.marker, out)
+			}
+			if c.wantSource != "" {
+				logRaw, _ := os.ReadFile(filepath.Join(s.Home, ".yolonot", "decisions.jsonl"))
+				humanMatches := 0
+				for _, line := range strings.Split(strings.TrimSpace(string(logRaw)), "\n") {
+					var entry map[string]any
+					if json.Unmarshal([]byte(line), &entry) == nil && entry["session_id"] == sid && entry["command"] == cmdText && entry["layer"] == "human" {
+						humanMatches++
+						if entry["source"] != c.wantSource {
+							t.Errorf("human decision source=%v, want %s; entry=%s", entry["source"], c.wantSource, line)
+						}
+					}
+				}
+				if humanMatches != 1 {
+					t.Errorf("expected exactly 1 human decision entry (%s) for %s, got %d; log=\n%s", c.wantSource, c.name, humanMatches, logRaw)
+				}
 			}
 		})
 	}

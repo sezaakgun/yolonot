@@ -58,7 +58,6 @@ RUN curl -fsSL https://bun.sh/install | bash
 # 1. Node/npm-distributed agent CLIs (installed individually so versions/errors are clear)
 RUN for pkg in \
       "@openai/codex" \
-      "opencode-ai" \
       "@earendil-works/pi-coding-agent" \
       "@qwen-code/qwen-code" \
       "@kilocode/cli" \
@@ -100,11 +99,11 @@ RUN set -eux; \
       curl --proto '=https' --tlsv1.2 -fsSL "https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-${KIRO_ARCH}-linux.zip" -o /tmp/kiro/kirocli.zip && \
       unzip -q /tmp/kiro/kirocli.zip -d /tmp/kiro && \
       find /tmp/kiro -type f \( -name "kiro-cli" -o -name "kiro-cli-chat" \) -exec cp {} /home/e2e/.local/bin/ \; && \
-      chmod +x /home/e2e/.local/bin/kiro-cli* 2>/dev/null || true; \
-      rm -rf /tmp/kiro) || echo "WARN: kiro-cli install failed"
+      chmod +x /home/e2e/.local/bin/kiro-cli*) || echo "WARN: kiro-cli install failed"; \
+    rm -rf /tmp/kiro
 
-# 3. Python uv-distributed agent CLIs (Kimi, Reflection Mirror, OpenHands)
-RUN for tool in "kimi-cli" "reflection-mirror" "openhands"; do \
+# 3. Python uv-distributed agent CLIs (Reflection Mirror, OpenHands)
+RUN for tool in "reflection-mirror" "openhands"; do \
       echo "=== Installing uv tool: $tool ===" && \
       uv tool install "$tool" || echo "WARN: uv tool install $tool failed"; \
     done && uv cache clean

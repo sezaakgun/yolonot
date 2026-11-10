@@ -69,15 +69,20 @@ def evaluate_bash(command, cwd="", session_id="", tool_use_id="", event="PreTool
     except Exception:
         return "deny", "Blocked by yolonot (invalid hook response)"
 
-def resolve_bash(command, cwd="", session_id="", tool_use_id="", verdict="allow-once"):
-    payload = {"harness": "mirror", "session_id": session_id, "tool_use_id": tool_use_id or "mirror-ask", "cwd": cwd or os.getcwd(), "command": command, "verdict": verdict, "completed": True}
+def resolve_bash(command, cwd="", session_id="", tool_use_id="", verdict="allow-once", bypass_sandbox=False):
+    payload = {"harness": "mirror", "session_id": session_id, "tool_use_id": tool_use_id or "mirror-ask", "cwd": cwd or os.getcwd(), "command": command, "verdict": verdict, "bypass_sandbox": bool(bypass_sandbox), "completed": True}
     try:
         subprocess.run([BIN, "mod", "resolve"], input=json.dumps(payload), text=True, capture_output=True, timeout=60)
     except Exception:
         pass
 
 class YolonotExtension(_Base):
-    _pending = {}
+    def __init__(self, *a, **kw):
+        try:
+            super().__init__(*a, **kw)
+        except Exception:
+            pass
+        self._pending = {}
 
     @classmethod
     def id(cls) -> str:
@@ -97,10 +102,12 @@ class YolonotExtension(_Base):
     async def handle_effect(self, context, request):
         if isinstance(request, tuple) and len(request) == 4 and request[0] == "resolve":
             _, call_id, info, verdict = request
+            raw_args = info.get("args") or {}
+            bypass = bool(raw_args.get("dangerouslyDisableSandbox") or raw_args.get("BypassSandbox") or raw_args.get("sandbox") is False or raw_args.get("with_escalated_permissions") is True or raw_args.get("sandbox_permissions") == "require_escalated")
             if verdict == "allow-once":
                 evaluate_bash(info["cmd"], cwd=info["cwd"], session_id=info["sid"], tool_use_id=call_id, event="PostToolUse", tool_input=info.get("args"))
             else:
-                resolve_bash(info["cmd"], cwd=info["cwd"], session_id=info["sid"], tool_use_id=call_id, verdict=verdict)
+                resolve_bash(info["cmd"], cwd=info["cwd"], session_id=info["sid"], tool_use_id=call_id, verdict=verdict, bypass_sandbox=bypass)
             return
         try:
             args = json.loads(request.args or "{}")

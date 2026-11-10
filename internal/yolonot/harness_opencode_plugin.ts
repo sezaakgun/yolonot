@@ -18,6 +18,28 @@ import { resolve } from "node:path"
 type Any = any
 
 const YOLONOT_BIN = "__YOLONOT_BIN__" // rewritten at install time
+const MAX_PENDING_ENTRIES = 256
+
+function setBounded<K, V>(map: Map<K, V>, k: K, v: V): void {
+  if (!map.has(k) && map.size >= MAX_PENDING_ENTRIES) {
+    const oldest = map.keys().next().value
+    if (oldest !== undefined) map.delete(oldest)
+  }
+  map.set(k, v)
+}
+
+function extractBypassSandbox(rawInput: Any): boolean {
+  if (!rawInput || typeof rawInput !== "object") return false
+  return Boolean(
+    rawInput.dangerouslyDisableSandbox === true ||
+      rawInput.BypassSandbox === true ||
+      rawInput.bypass_sandbox === true ||
+      rawInput.requestSandboxBypass === true ||
+      rawInput.with_escalated_permissions === true ||
+      rawInput.sandbox === false ||
+      rawInput.sandbox_permissions === "require_escalated",
+  )
+}
 
 async function runYolonotProcess(args: string[], inputJSON: string, nativeAsk: boolean): Promise<{ stdout: string; exitCode: number }> {
   const env = {
@@ -54,6 +76,7 @@ async function resolveYolonot(
   verdict: "allow-once" | "allow-session" | "deny",
   nativeAsk = false,
   toolUseID = "",
+  bypassSandbox = false,
 ): Promise<void> {
   if (!sessionID || !command) return
   const payload = {
@@ -62,6 +85,7 @@ async function resolveYolonot(
     cwd,
     command,
     verdict,
+    ...(bypassSandbox ? { bypass_sandbox: true } : {}),
     completed: true,
   }
   await runYolonotProcess(["mod", "resolve"], JSON.stringify(payload), nativeAsk)
@@ -82,13 +106,18 @@ async function askYolonot(
   toolResponse: Any,
   nativeAsk = false,
   toolUseID = "",
+  rawInput?: Any,
 ): Promise<{ decision: string; reason: string }> {
+  const toolInput =
+    rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)
+      ? { ...rawInput, command }
+      : { command }
   const payload = {
     hook_event_name: event,
     tool_name: "Bash",
     session_id: sessionID,
     cwd,
-    tool_input: { command },
+    tool_input: toolInput,
     ...(toolUseID ? { tool_use_id: toolUseID } : {}),
     ...(toolResponse !== undefined ? { tool_response: toolResponse } : {}),
   }
@@ -127,15 +156,17 @@ async function askYolonot(
 // exports and PluginModule-shaped wrappers are not recognised by the
 // loader. Keep the name stable so users can see it in `opencode --plugins`.
 export const YolonotPlugin = async (_ctx: Any) => {
-  const pendingAsks = new Map<string, { sessionID: string; command: string; cwd: string; callID: string }>()
+  const pendingAsks = new Map<string, { sessionID: string; command: string; cwd: string; callID: string; bypass: boolean }>()
+  const reqToCallKey = new Map<string, string>()
   const askKey = (sessionID: string, callID: string) => `${sessionID}:${callID}`
   return {
     "tool.execute.before": async (input: Any, output: Any) => {
       if (input.tool !== "bash") return
-      const command = output?.args?.command ?? ""
+      const args = output?.args
+      const command = args?.command ?? ""
       if (!command) return
       const directory = _ctx.directory ?? process.cwd()
-      const cwd = resolve(directory, output?.args?.workdir ?? output?.args?.cwd ?? directory)
+      const cwd = resolve(directory, args?.workdir ?? args?.cwd ?? directory)
       const sessionID = input.sessionID ?? ""
       const callID = input.callID ?? ""
       const { decision, reason } = await askYolonot(
@@ -146,6 +177,7 @@ export const YolonotPlugin = async (_ctx: Any) => {
         undefined,
         false,
         callID,
+        args,
       )
       // OpenCode's plugin API has no "ask" primitive: only throw-to-block
       // or return-to-allow. Risk map now expresses policy via allow/deny/
@@ -156,8 +188,14 @@ export const YolonotPlugin = async (_ctx: Any) => {
       if (decision === "deny") {
         throw new Error(`yolonot: ${reason || decision}`)
       }
-      if (decision === "ask") {
-        pendingAsks.set(askKey(sessionID, callID), { sessionID, command, cwd, callID })
+      if (decision === "ask" && sessionID && callID) {
+        setBounded(pendingAsks, askKey(sessionID, callID), {
+          sessionID,
+          command,
+          cwd,
+          callID,
+          bypass: extractBypassSandbox(args),
+        })
       }
     },
 
@@ -167,13 +205,13 @@ export const YolonotPlugin = async (_ctx: Any) => {
     // The command lives on input.args; the stdout/stderr/title lives on output.
     "tool.execute.after": async (input: Any, output: Any) => {
       if (input.tool !== "bash") return
-      const command = input?.args?.command ?? ""
+      const args = input?.args
+      const command = args?.command ?? ""
       if (!command) return
       const directory = _ctx.directory ?? process.cwd()
-      const cwd = resolve(directory, input?.args?.workdir ?? input?.args?.cwd ?? directory)
+      const cwd = resolve(directory, args?.workdir ?? args?.cwd ?? directory)
       const sessionID = input.sessionID ?? ""
       const callID = input.callID ?? ""
-      pendingAsks.delete(askKey(sessionID, callID))
       await askYolonot(
         "PostToolUse",
         sessionID,
@@ -182,23 +220,35 @@ export const YolonotPlugin = async (_ctx: Any) => {
         { output: output?.output ?? "", title: output?.title ?? "" },
         false,
         callID,
+        args,
       )
     },
 
     event: async ({ event }: Any) => {
-      if (event?.type !== "permission.replied") return
-      const props = event.properties ?? {}
+      const type = event?.type
+      const props = event?.properties ?? event?.data ?? {}
+      if (type === "permission.asked") {
+        const reqID = props.id ?? ""
+        const sessionID = props.sessionID ?? ""
+        const callID = props.tool?.callID ?? props.source?.id ?? props.callID ?? ""
+        if (reqID && sessionID && callID) {
+          setBounded(reqToCallKey, reqID, askKey(sessionID, callID))
+        }
+        return
+      }
+      if (type !== "permission.replied") return
       const sessionID = props.sessionID ?? ""
-      const callID = props.callID ?? props.tool?.callID ?? ""
-      const verdict = mapReplyToVerdict(props.reply ?? props.response)
-      if (!verdict) return
-      const k = askKey(sessionID, callID)
+      const reqID = props.requestID ?? props.permissionID ?? props.id ?? ""
+      const directCallID = props.callID ?? props.tool?.callID ?? props.source?.id ?? ""
+      const k = (reqID && reqToCallKey.get(reqID)) || (sessionID && directCallID ? askKey(sessionID, directCallID) : "")
+      if (reqID) reqToCallKey.delete(reqID)
+      if (!k) return
       const info = pendingAsks.get(k)
+      if (!info) return
       pendingAsks.delete(k)
-      const command = info?.command ?? props.command ?? props.metadata?.command ?? ""
-      const directory = _ctx.directory ?? process.cwd()
-      const cwd = info?.cwd ?? resolve(directory, props.cwd ?? directory)
-      await resolveYolonot(sessionID || info?.sessionID || "", command, cwd, verdict, false, callID || info?.callID || "")
+      const verdict = mapReplyToVerdict(props.reply ?? props.response ?? props.decision)
+      if (!verdict) return
+      await resolveYolonot(info.sessionID, info.command, info.cwd, verdict, false, info.callID, info.bypass)
     },
   }
 }
@@ -210,32 +260,89 @@ export default {
   // Current V1 loaders recognize {id, server}; V2 recognizes {id, setup}.
   server: YolonotPlugin,
   async setup(ctx: Any) {
-    const pending = new Map<string, { decision: string; reason: string; command: string; cwd: string; sessionID: string; id: string }>()
+    type AskState = {
+      command: string
+      cwd: string
+      sessionID: string
+      id: string
+      bypass: boolean
+      resolved: boolean
+      resolving: Promise<void> | null
+    }
+    const evalPending = new Map<string, { decision: string; reason: string }>()
+    const askPending = new Map<string, AskState>()
+    const reqToCallKey = new Map<string, string>()
     const key = (sessionID: string, id: string) => JSON.stringify([sessionID, id])
     const directory = ctx.location.directory
+    let disposed = false
+    let activeStream: Any = null
+
+    const resolveOnce = async (info: AskState, callKey: string, verdict: "allow-once" | "allow-session" | "deny") => {
+      if (info.resolved) {
+        if (info.resolving) await info.resolving
+        return
+      }
+      info.resolved = true
+      askPending.delete(callKey)
+      // In V2 (nativeAsk=true), PostToolUse already records allow_once for
+      // approved one-shot executions; only session grants and rejections need
+      // explicit mod resolve.
+      if (verdict === "allow-once") return
+      info.resolving = resolveYolonot(info.sessionID, info.command, info.cwd, verdict, true, info.id, info.bypass)
+      await info.resolving
+    }
+
+    const handleBusEvent = async (rawEv: Any) => {
+      const event = rawEv?.event ?? rawEv
+      const type = event?.type
+      const props = event?.data ?? event?.properties ?? event ?? {}
+      if (type === "permission.asked") {
+        if (props.action && props.action !== "shell") return
+        const reqID = props.id ?? ""
+        const sessionID = props.sessionID ?? ""
+        const callID = props.source?.id ?? props.tool?.callID ?? props.callID ?? ""
+        if (reqID && sessionID && callID) {
+          setBounded(reqToCallKey, reqID, key(sessionID, callID))
+        }
+        return
+      }
+      if (type !== "permission.replied") return
+      const sessionID = props.sessionID ?? ""
+      const reqID = props.requestID ?? props.permissionID ?? props.id ?? ""
+      const directCallID = props.callID ?? props.source?.id ?? props.tool?.callID ?? ""
+      const callKey = (reqID && reqToCallKey.get(reqID)) || (sessionID && directCallID ? key(sessionID, directCallID) : "")
+      if (reqID) reqToCallKey.delete(reqID)
+      if (!callKey) return
+      const info = askPending.get(callKey)
+      if (!info) return
+      const verdict = mapReplyToVerdict(props.reply ?? props.response ?? props.decision)
+      if (!verdict) return
+      await resolveOnce(info, callKey, verdict)
+    }
 
     await ctx.permission.hook("evaluate", async (event: Any) => {
       if (event.action !== "shell" || event.source?.type !== "tool") return
-      const verdict = pending.get(key(event.sessionID, event.source.id))
+      const verdict = evalPending.get(key(event.sessionID, event.source.id))
       if (!verdict || event.effect === "deny") return
       event.effect = verdict.decision
       if (verdict.reason) event.message = `yolonot: ${verdict.reason}`
     })
 
     if (typeof ctx.event?.subscribe === "function") {
-      await ctx.event.subscribe(async (ev: Any) => {
-        const event = ev?.event ?? ev
-        if (event?.type !== "permission.replied") return
-        const props = event.properties ?? event
-        const sessionID = props.sessionID ?? ""
-        const callID = props.callID ?? props.source?.id ?? ""
-        const verdict = mapReplyToVerdict(props.reply ?? props.response)
-        if (!verdict) return
-        const info = pending.get(key(sessionID, callID))
-        const command = info?.command ?? props.command ?? ""
-        const cwd = info?.cwd ?? resolve(directory, props.cwd ?? directory)
-        await resolveYolonot(sessionID || info?.sessionID || "", command, cwd, verdict, true, callID || info?.id || "")
-      })
+      ;(async () => {
+        try {
+          const sub = await ctx.event.subscribe({ types: ["permission.asked", "permission.replied"] })
+          if (sub && typeof sub[Symbol.asyncIterator] === "function") {
+            activeStream = sub
+            for await (const ev of sub) {
+              if (disposed) break
+              await handleBusEvent(ev)
+            }
+          }
+        } catch {
+          // Ignore stream shutdown errors on dispose.
+        }
+      })()
     }
 
     // Wrapping execute inspects the final input after all execute.before
@@ -249,23 +356,61 @@ export default {
           current.execute = async (input: Any, context: Any) => {
             const command = input.command
             const cwd = resolve(directory, input.workdir ?? directory)
-            const callKey = key(context.sessionID, context.id)
-            const verdict = await askYolonot("PreToolUse", context.sessionID, command, cwd, undefined, true, context.id ?? "")
+            const callID = context.id ?? ""
+            const callKey = key(context.sessionID, callID)
+            const verdict = await askYolonot("PreToolUse", context.sessionID, command, cwd, undefined, true, callID, input)
             if (verdict.decision === "deny") throw new Error(`yolonot: ${verdict.reason || "deny"}`)
             // Empty output is passthrough, not an instruction to override
             // OpenCode's own permission policy.
-            if (verdict.decision !== "") pending.set(callKey, { ...verdict, command, cwd, sessionID: context.sessionID, id: context.id ?? "" })
+            if (verdict.decision !== "") evalPending.set(callKey, verdict)
+            let askInfo: AskState | null = null
+            if (verdict.decision === "ask" && context.sessionID && callID) {
+              askInfo = {
+                command,
+                cwd,
+                sessionID: context.sessionID,
+                id: callID,
+                bypass: extractBypassSandbox(input),
+                resolved: false,
+                resolving: null,
+              }
+              setBounded(askPending, callKey, askInfo)
+            }
             try {
               const result = await execute(input, context)
-              await askYolonot("PostToolUse", context.sessionID, command, cwd, result, true, context.id ?? "")
+              if (askInfo) {
+                if (!askInfo.resolved) await new Promise((r) => setTimeout(r, 20))
+                if (askInfo.resolving) await askInfo.resolving
+                askPending.delete(callKey)
+              }
+              await askYolonot("PostToolUse", context.sessionID, command, cwd, result, true, callID, input)
               return result
+            } catch (err: Any) {
+              if (askInfo) {
+                if (!askInfo.resolved) await new Promise((r) => setTimeout(r, 20))
+                if (!askInfo.resolved && String(err?.name || err || "").includes("DeclinedError")) {
+                  await resolveOnce(askInfo, callKey, "deny")
+                } else if (askInfo.resolving) {
+                  await askInfo.resolving
+                }
+                askPending.delete(callKey)
+              }
+              throw err
             } finally {
-              pending.delete(callKey)
+              evalPending.delete(callKey)
             }
           }
         })
       }
     })
-    return () => pending.clear()
+    return () => {
+      disposed = true
+      evalPending.clear()
+      askPending.clear()
+      reqToCallKey.clear()
+      try {
+        activeStream?.return?.()
+      } catch {}
+    }
   },
 }

@@ -6,8 +6,41 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
+
+var (
+	realProcessEnv  = os.Environ()
+	shimTestBinOnce sync.Once
+	shimTestBinPath string
+	shimTestBinErr  error
+)
+
+func shimTestYolonotBinary(t *testing.T) string {
+	t.Helper()
+	shimTestBinOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "yolonot-shim-bin-")
+		if err != nil {
+			shimTestBinErr = err
+			return
+		}
+		bin := filepath.Join(dir, "yolonot")
+		cmd := exec.Command("go", "build", "-o", bin, "../..")
+		cmd.Env = realProcessEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			os.RemoveAll(dir)
+			shimTestBinErr = err
+			_ = out
+			return
+		}
+		shimTestBinPath = bin
+	})
+	if shimTestBinErr != nil {
+		t.Fatalf("build yolonot test binary: %v", shimTestBinErr)
+	}
+	return shimTestBinPath
+}
 
 func TestGroupDHarnessesLifecycleAndProtocol(t *testing.T) {
 	home, _ := withFakeHome(t)
@@ -138,16 +171,7 @@ func TestPluginShimsHumanResolutionLifecycle(t *testing.T) {
 	}
 	writeGlobalRules(t, home, "allow-cmd touch *\nask-cmd git push *\ndeny-cmd rm -rf /*\n")
 
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrapperPath := filepath.Join(home, "yolonot-shim-helper")
-	quotedExec := "'" + strings.ReplaceAll(executable, "'", "'\"'\"'") + "'"
-	wrapper := "#!/bin/sh\nexec " + quotedExec + " -test.run=^TestPluginShimCLIHelperProcess$ -- \"$@\"\n"
-	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	wrapperPath := shimTestYolonotBinary(t)
 
 	if nodeBin, err := exec.LookPath("node"); err == nil {
 		for _, name := range []string{"openclaw", "pi", "amp"} {
@@ -171,6 +195,12 @@ if (typeof askAlways?.requireApproval?.onResolution === "function") {
 await afterFn({ toolName: "exec", toolCallId: "oc-1", params: { command: "git push origin oc-always" } }, ctx);
 const replayAlways = await beforeFn({ toolName: "exec", toolCallId: "oc-2", params: { command: "git push origin oc-always" } }, ctx);
 
+const askOnce = await beforeFn({ toolName: "exec", toolCallId: "oc-once-1", params: { command: "git push origin oc-once" } }, ctx);
+if (typeof askOnce?.requireApproval?.onResolution === "function") {
+  askOnce.requireApproval.onResolution("allow-once");
+}
+await afterFn({ toolName: "exec", toolCallId: "oc-once-1", params: { command: "git push origin oc-once" } }, ctx);
+
 const askDeny = await beforeFn({ toolName: "exec", toolCallId: "oc-3", params: { command: "git push origin oc-reject" } }, ctx);
 if (typeof askDeny?.requireApproval?.onResolution === "function") {
   askDeny.requireApproval.onResolution("deny");
@@ -190,20 +220,34 @@ console.log(JSON.stringify({ replayAlways: replayAlways || null, replayDeny: rep
 		if !strings.Contains(string(out), `"replayAlways":null`) || !strings.Contains(string(out), `"block":true`) {
 			t.Fatalf("openclaw resolution replay unexpected: %s", out)
 		}
+		ocProj := ProjectSessionID("oc-res-1", ws)
+		if ContainsLine(ocProj, "once", "git push origin oc-once") {
+			t.Fatalf("openclaw allow-once with completed=true must not leave stranded .once marker")
+		}
 
 		// 2. Pi: ctx.ui.select("Allow for session") -> ask_approved + session allow on replay;
+		//    unsandboxed Allow for session -> isolated in .approved_unsandboxed (never .approved);
+		//    script modified during dialog -> downgraded to allow-once (not persisted to .approved);
 		//    ctx.ui.confirm() == false -> ask_rejected + session_deny on replay.
+		writeGlobalRules(t, home, "ask-cmd git push *\nask-cmd bash *\n")
+		dialogScript := filepath.Join(ws, "deploy.sh")
+		if err := os.WriteFile(dialogScript, []byte("echo safe-v1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		piShim := GetHarness("pi").SettingsPath()
 		piDriver := filepath.Join(home, "pi-driver.mjs")
-		piCode := `import register from ` + mustJSONQuote(piShim) + `;
+		piCode := `import { writeFileSync } from "node:fs";
+import register from ` + mustJSONQuote(piShim) + `;
 let fn;
 register({ on(ev, cb) { if (ev === "tool_call") fn = cb; } });
 const sidMgr = { getSessionId() { return "pi-res-1"; } };
 const selectSession = await fn({ toolName: "bash", toolCallId: "pi-1", input: { command: "git push origin pi-sess" } }, { hasUI: true, cwd: ` + mustJSONQuote(ws) + `, sessionManager: sidMgr, ui: { async select() { return "Allow for session"; } } });
 const replaySession = await fn({ toolName: "bash", toolCallId: "pi-2", input: { command: "git push origin pi-sess" } }, { hasUI: true, cwd: ` + mustJSONQuote(ws) + `, sessionManager: sidMgr, ui: { async confirm() { return false; } } });
+const unsandboxedSession = await fn({ toolName: "bash", toolCallId: "pi-u1", input: { command: "git push origin pi-unsb", dangerouslyDisableSandbox: true } }, { hasUI: true, cwd: ` + mustJSONQuote(ws) + `, sessionManager: sidMgr, ui: { async select() { return "Allow for session"; } } });
+const toctouSession = await fn({ toolName: "bash", toolCallId: "pi-t1", input: { command: "bash ./deploy.sh" } }, { hasUI: true, cwd: ` + mustJSONQuote(ws) + `, sessionManager: sidMgr, ui: { async select() { writeFileSync(` + mustJSONQuote(dialogScript) + `, "echo swapped-v2\n"); return "Allow for session"; } } });
 const rejectOnce = await fn({ toolName: "bash", toolCallId: "pi-3", input: { command: "git push origin pi-deny" } }, { hasUI: true, cwd: ` + mustJSONQuote(ws) + `, sessionManager: sidMgr, ui: { async confirm() { return false; } } });
 const replayReject = await fn({ toolName: "bash", toolCallId: "pi-4", input: { command: "git push origin pi-deny" } }, { hasUI: true, cwd: ` + mustJSONQuote(ws) + `, sessionManager: sidMgr, ui: { async confirm() { return true; } } });
-console.log(JSON.stringify({ selectSession: selectSession || null, replaySession: replaySession || null, rejectOnce: rejectOnce || null, replayReject: replayReject || null }));
+console.log(JSON.stringify({ selectSession: selectSession || null, replaySession: replaySession || null, unsandboxedSession: unsandboxedSession || null, toctouSession: toctouSession || null, rejectOnce: rejectOnce || null, replayReject: replayReject || null }));
 `
 		if err := os.WriteFile(piDriver, []byte(piCode), 0o600); err != nil {
 			t.Fatal(err)
@@ -216,6 +260,13 @@ console.log(JSON.stringify({ selectSession: selectSession || null, replaySession
 		}
 		if !strings.Contains(string(out), `"selectSession":null`) || !strings.Contains(string(out), `"replaySession":null`) || !strings.Contains(string(out), "previously rejected this session") {
 			t.Fatalf("pi resolution replay unexpected: %s", out)
+		}
+		piProj := ProjectSessionID("pi-res-1", ws)
+		if !ContainsLine(piProj, "approved_unsandboxed", "git push origin pi-unsb") || ContainsLine(piProj, "approved", "git push origin pi-unsb") {
+			t.Fatalf("unsandboxed Pi session approval must write to .approved_unsandboxed only")
+		}
+		if ContainsLine(piProj, "approved", "bash ./deploy.sh") {
+			t.Fatalf("TOCTOU script edit during Pi dialog must downgrade allow-session to allow-once")
 		}
 
 		// 3. Amp: ctx.ui.confirm() == false -> ask_rejected + session_deny on replay.
@@ -335,25 +386,4 @@ asyncio.run(main())
 func mustJSONQuote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
-}
-
-func TestPluginShimCLIHelperProcess(t *testing.T) {
-	if os.Getenv("YOLONOT_TEST_SHIM_CLI_HELPER") != "1" {
-		return
-	}
-	for i, a := range os.Args {
-		if a == "--" && i+1 < len(os.Args) {
-			os.Args = append([]string{os.Args[0]}, os.Args[i+1:]...)
-			break
-		}
-	}
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "hook":
-			cmdHook()
-		case "mod":
-			cmdMod(os.Args[2:])
-		}
-	}
-	os.Exit(0)
 }

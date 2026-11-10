@@ -47,7 +47,9 @@ export default function (amp: any) {
     const cmd = inp.cmd || inp.command || "";
     const cwd = inp.cwd || inp.workdir || process.cwd();
     const sid = (ctx && (ctx.threadId || ctx.sessionId)) || process.env.YOLONOT_AMP_SESSION_ID || process.env.AMP_CURRENT_THREAD_ID || process.env.AMP_THREAD_ID || process.env.AGENT_THREAD_ID || process.env.YOLONOT_FORCE_SESSION_ID || "";
-    const payload = { hook_event_name: "PreToolUse", tool_name: tool, session_id: sid, cwd, tool_input: { ...inp, command: cmd } };
+    const toolUseId = event.id || event.toolUseId || "";
+    const bypass = Boolean(inp.dangerouslyDisableSandbox || inp.BypassSandbox || inp.sandbox === false || inp.with_escalated_permissions === true || inp.sandbox_permissions === "require_escalated");
+    const payload = { hook_event_name: "PreToolUse", tool_name: tool, session_id: sid, tool_use_id: toolUseId, cwd, tool_input: { ...inp, command: cmd } };
     const res = spawnSync(BIN, ["hook", "--harness", "amp"], { input: JSON.stringify(payload), encoding: "utf8", timeout: 60000 });
     const raw = (res.stdout || "").trim();
     let out: any = {};
@@ -63,7 +65,7 @@ export default function (amp: any) {
         const ok = await ctx.ui.confirm({ title: "Allow command?", message: msg, requireHuman: true });
         if (!ok) {
           if (sid) {
-            spawnSync(BIN, ["mod", "resolve"], { input: JSON.stringify({ harness: "amp", session_id: sid, tool_use_id: event.id || event.toolUseId || "amp-ask", cwd, command: cmd, verdict: "deny", completed: true }), encoding: "utf8", timeout: 60000 });
+            spawnSync(BIN, ["mod", "resolve"], { input: JSON.stringify({ harness: "amp", session_id: sid, tool_use_id: toolUseId || "amp-ask", cwd, command: cmd, verdict: "deny", bypass_sandbox: bypass, completed: true }), encoding: "utf8", timeout: 60000 });
           }
           return { action: "reject-and-continue", message: "Denied by user" };
         }

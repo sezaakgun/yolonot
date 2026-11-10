@@ -212,6 +212,11 @@ func ActiveHarness() Harness {
 	if h := GetHarness("claude"); h != nil && h.SessionIDFromEnv() != "" {
 		return h
 	}
+	if os.Getenv("YOLONOT_MOD") == "1" || os.Getenv("CLAUDECODE") == "1" || os.Getenv("CLAUDE_CODE_ENTRYPOINT") != "" {
+		if h := GetHarness("claude"); h != nil {
+			return h
+		}
+	}
 	if name := detectHarnessFromShellEnv(); name != "" {
 		if h := GetHarness(name); h != nil {
 			return h
@@ -257,7 +262,7 @@ func detectHarnessFromShellEnv() string {
 		return "openclaw"
 	case os.Getenv("KILO_PROCESS_ROLE") != "":
 		return "kilo"
-	case os.Getenv("CURSOR_AGENT") == "1" || os.Getenv("CURSOR_TRACE_ID") != "":
+	case os.Getenv("CURSOR_AGENT") == "1":
 		return "cursor"
 	case os.Getenv("OPENCODE") == "1":
 		return "opencode"

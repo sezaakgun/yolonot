@@ -491,12 +491,22 @@ func TestDiscoverManagedAndExtendedHarnessConfigs(t *testing.T) {
 	writeAbs(filepath.Join(home, ".config", "crush", "crushrc"), "permissions allow bash\n")
 
 	// 4. Kiro V3 permissions.yaml, sandbox.json, and V3 permissions.rules in agents/*.json
+	//    (including non-shell tools that must NOT become allow-cmd rules, and wildcard "*")
 	writeAbs(filepath.Join(home, ".kiro", "settings", "permissions.yaml"), "allow:\n  - \"npm run build\"\n")
 	writeAbs(filepath.Join(home, ".kiro", "settings", "sandbox.json"), `{"enabled":false}`)
-	writeAbs(filepath.Join(home, ".kiro", "agents", "v3.json"), `{"permissions":{"rules":[{"tool":"execute_bash","action":"allow","command":"cargo check"}]}}`)
+	writeAbs(filepath.Join(home, ".kiro", "agents", "v3.json"), `{
+  "permissions": {
+    "allow": ["fs_read", "@git", "execute_bash(cargo fmt *)"],
+    "rules": [
+      {"tool": "execute_bash", "action": "allow", "command": "cargo check"},
+      {"tool": "shell", "action": "ask", "pattern": "*"}
+    ]
+  }
+}`)
 
-	// 5. Hermes profile config and unattended_mode: approve
+	// 5. Hermes profile config (including commented-out / unrelated mode keys that must not alert)
 	writeAbs(filepath.Join(home, ".hermes", "profiles", "ci", "config.yaml"), "approvals:\n  unattended_mode: approve\n  command_allowlist:\n    - \"ruff check\"\n")
+	writeAbs(filepath.Join(home, ".hermes", "config.yaml"), "# unattended_mode: approve\nvim_mode: false\n")
 
 	// 6. OpenHands conversation base_state.json
 	writeAbs(filepath.Join(home, ".openhands", "conversations", "conv-1", "base_state.json"), `{"confirmation_policy":{"kind":"NeverConfirm"}}`)
@@ -554,12 +564,24 @@ func TestDiscoverManagedAndExtendedHarnessConfigs(t *testing.T) {
 		"devin:allow-cmd go vet *",
 		"kiro:allow-cmd npm run build",
 		"kiro:allow-cmd cargo check *",
+		"kiro:allow-cmd cargo fmt *",
+		"kiro:ask-cmd *",
 		"hermes:allow-cmd ruff check",
 		"antigravity:allow-cmd git diff",
 		"antigravity:deny-cmd rm -rf /",
 	} {
 		if !bySuggested[wantRule] {
 			t.Errorf("missing discovered rule %s; got %v", wantRule, bySuggested)
+		}
+	}
+	for _, unwanted := range []string{"kiro:allow-cmd fs_read", "kiro:allow-cmd @git", "kiro:ask-cmd * *"} {
+		if bySuggested[unwanted] {
+			t.Errorf("unexpected bogus rule %s in %v", unwanted, bySuggested)
+		}
+	}
+	for _, f := range summary.HostFiles {
+		if f.Harness == "hermes" && strings.HasSuffix(f.Path, filepath.Join(".hermes", "config.yaml")) && len(f.PolicyAlerts) > 0 {
+			t.Errorf("commented-out or unrelated YAML keys in %s triggered false alerts: %+v", f.Path, f.PolicyAlerts)
 		}
 	}
 }

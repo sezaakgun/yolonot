@@ -305,6 +305,27 @@ func TestActiveHarnessDetectsShellEnvironmentMarkers(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("CURSOR_TRACE_ID_does_not_hijack_claude", func(t *testing.T) {
+		t.Setenv("CURSOR_TRACE_ID", "trace-123")
+		if h := ActiveHarness(); h == nil || h.Name() != "claude" {
+			t.Fatalf("ActiveHarness() with CURSOR_TRACE_ID = %v, want claude", h)
+		}
+	})
+
+	t.Run("CLAUDECODE_and_YOLONOT_MOD_beat_IDE_terminal_env", func(t *testing.T) {
+		t.Setenv("ANTIGRAVITY_AGENT", "1")
+		t.Setenv("CURSOR_AGENT", "1")
+		t.Setenv("CLAUDECODE", "1")
+		if h := ActiveHarness(); h == nil || h.Name() != "claude" {
+			t.Fatalf("ActiveHarness() with CLAUDECODE=1 inside IDE terminal = %v, want claude", h)
+		}
+		t.Setenv("CLAUDECODE", "")
+		t.Setenv("YOLONOT_MOD", "1")
+		if h := ActiveHarness(); h == nil || h.Name() != "claude" {
+			t.Fatalf("ActiveHarness() with YOLONOT_MOD=1 inside IDE terminal = %v, want claude", h)
+		}
+	})
 }
 
 // TestCmdHookRoutesThroughActiveHarness exercises the full cmdHook pipeline

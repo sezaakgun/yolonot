@@ -34,7 +34,7 @@ async function judge($: any, command: string, id: string, cwd: string, ev?: any)
     payload.permission_mode = ev.permission_mode
   }
   const t0 = Date.now()
-  const r = await $.process.run([BIN, 'hook'], { stdin: JSON.stringify(payload), env: { YOLONOT_MOD: '1' }, timeoutMs: 65000 })
+  const r = await $.process.run([BIN, 'hook', '--harness', 'claude'], { stdin: JSON.stringify(payload), env: { YOLONOT_MOD: '1', YOLONOT_HARNESS: 'claude' }, timeoutMs: 65000 })
   const ms = Date.now() - t0
   // Empty output with exit 0 is the core's pause/passthrough answer; any
   // other unreadable answer fails closed like the classic hook's onFailure.
@@ -55,7 +55,7 @@ async function judge($: any, command: string, id: string, cwd: string, ev?: any)
 }
 
 async function resolve($: any, verdict: string, id: string, cwd: string, command: string, reason: string) {
-  await $.process.run([BIN, 'mod', 'resolve'], { stdin: JSON.stringify({ session_id: sid, tool_use_id: id, cwd, command, verdict, reason }) })
+  await $.process.run([BIN, 'mod', 'resolve'], { stdin: JSON.stringify({ session_id: sid, tool_use_id: id, cwd, command, verdict, reason }), env: { YOLONOT_MOD: '1', YOLONOT_HARNESS: 'claude' } })
 }
 
 async function explain($: any, command: string, reason: string): Promise<string> {

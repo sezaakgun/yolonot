@@ -850,6 +850,10 @@ func parseOpencodeConfigFile(scope, path string) *DiscoveredHostFile {
 	if !ok {
 		return nil
 	}
+	return parseOpencodeConfigObject(scope, path, raw)
+}
+
+func parseOpencodeConfigObject(scope, path string, raw map[string]interface{}) *DiscoveredHostFile {
 	out := &DiscoveredHostFile{Harness: "opencode", Scope: scope, Path: path}
 	perm, _ := raw["permission"].(map[string]interface{})
 	if perm == nil {

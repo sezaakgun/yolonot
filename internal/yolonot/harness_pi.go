@@ -67,14 +67,15 @@ export default function (pi: any) {
         const ok = await ctx.ui.confirm("yolonot: Allow command?", detail);
         verdict = ok ? "allow-once" : "deny";
       }
+      const bypass = Boolean(input.dangerouslyDisableSandbox || input.BypassSandbox || input.sandbox === false || input.with_escalated_permissions === true || input.sandbox_permissions === "require_escalated");
       if (verdict === "deny") {
         if (sid) {
-          spawnSync(BIN, ["mod", "resolve"], { input: JSON.stringify({ harness: "pi", session_id: sid, tool_use_id: event.toolCallId || "pi-ask", cwd: payload.cwd, command: cmdStr, verdict: "deny", completed: true }), encoding: "utf8", timeout: 60000 });
+          spawnSync(BIN, ["mod", "resolve"], { input: JSON.stringify({ harness: "pi", session_id: sid, tool_use_id: event.toolCallId || "pi-ask", cwd: payload.cwd, command: cmdStr, verdict: "deny", bypass_sandbox: bypass, completed: true }), encoding: "utf8", timeout: 60000 });
         }
         return { block: true, reason: "Denied by user" };
       }
       if (verdict === "allow-session" && sid) {
-        spawnSync(BIN, ["mod", "resolve"], { input: JSON.stringify({ harness: "pi", session_id: sid, tool_use_id: event.toolCallId || "pi-ask", cwd: payload.cwd, command: cmdStr, verdict: "allow-session", completed: true }), encoding: "utf8", timeout: 60000 });
+        spawnSync(BIN, ["mod", "resolve"], { input: JSON.stringify({ harness: "pi", session_id: sid, tool_use_id: event.toolCallId || "pi-ask", cwd: payload.cwd, command: cmdStr, verdict: "allow-session", bypass_sandbox: bypass, completed: true }), encoding: "utf8", timeout: 60000 });
       } else {
         spawnSync(BIN, ["hook", "--harness", "pi"], { input: JSON.stringify({ ...payload, hook_event_name: "PostToolUse" }), encoding: "utf8", timeout: 60000 });
       }
