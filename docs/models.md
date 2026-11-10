@@ -163,6 +163,10 @@ H100. Run it on a shared GPU box and point every developer's entry at
 2.0) serve `/v1/systemone` through SGLang on a GPU; there is no Apple
 Silicon build, use the Workers AI preset instead.
 
+To train a local typed model on yolonot's own questions and run it on a
+laptop instead of a chat model, see [ml/README.md](../ml/README.md)
+(experimental).
+
 `yolonot setup` step 3b offers TypeSafe Jev and writes the chain
 `fast_allow → <typed> → <chat>`. A typed entry looks like any other catalog
 entry; set its protocol explicitly:

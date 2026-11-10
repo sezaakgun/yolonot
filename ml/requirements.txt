@@ -1,0 +1,4 @@
+# Data generation + leakage checks (CPU, any machine)
+requests>=2.31
+# Fine-tuning and serving (Colab GPU or a Mac with MPS)
+laya[serve]
