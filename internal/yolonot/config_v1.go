@@ -304,7 +304,7 @@ func (c *Config) normalize() {
 		c.Judges = kept
 	}
 	if cl := c.Classifier; cl.Context != nil || cl.AllowHints != nil || cl.AskHints != nil || cl.SystemPrompt != "" || cl.Impl != "" {
-		if c.Prompt.Context == nil && c.Prompt.AllowHints == nil && c.Prompt.AskHints == nil && c.Prompt.SystemPrompt == "" {
+		if c.Prompt.IsZero() {
 			c.Prompt = PromptConfig{Context: cl.Context, AllowHints: cl.AllowHints, AskHints: cl.AskHints, SystemPrompt: cl.SystemPrompt}
 		}
 		c.Classifier = ClassifierConfig{}

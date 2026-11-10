@@ -33,11 +33,48 @@ func TestPrintClassifierDefaultsJSONShape(t *testing.T) {
 
 // TestBuildClassifierReviewUserPromptEmpty confirms the review subcommand
 // short-circuits when there's nothing to audit — we don't want to burn an
-// LLM call for an empty hint set.
+// LLM call for an empty hint set or when only $defaults is active.
 func TestBuildClassifierReviewUserPromptEmpty(t *testing.T) {
 	got := buildClassifierReviewUserPrompt(PromptConfig{}, WalkupHints{})
 	if got != "" {
 		t.Errorf("expected empty prompt for empty hints; got %q", got)
+	}
+	if got := buildClassifierReviewUserPrompt(PromptConfig{AskHints: []string{DefaultsSentinel, "   "}}, WalkupHints{}); got != "" {
+		t.Errorf("expected empty prompt when only $defaults/blank entries exist; got %q", got)
+	}
+	mixed := buildClassifierReviewUserPrompt(PromptConfig{AskHints: []string{DefaultsSentinel, "confirm schema drops"}}, WalkupHints{})
+	if !strings.Contains(mixed, "confirm schema drops") || strings.Contains(mixed, DefaultsSentinel) || strings.Contains(mixed, builtinClassifierAskHints[0]) {
+		t.Errorf("review prompt should include only custom entries: %q", mixed)
+	}
+}
+
+func TestPrintClassifierEffectiveSuppressesNilDefaultsOnOverride(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	repo := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(filepath.Join(home, ".yolonot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	cfgJSON := `{"prompt":{"system_prompt":"Custom base prompt. Output ONLY JSON: {\"decision\":\"allow|ask\",\"risk\":\"safe|low\"}"}}`
+	if err := os.WriteFile(filepath.Join(home, ".yolonot", "config.json"), []byte(cfgJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+
+	out := captureStdout(func() { printClassifierEffective(os.Stdout) })
+	var payload classifierEffectivePayload
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	if len(payload.Context) != 0 || len(payload.AllowHints) != 0 || len(payload.AskHints) != 0 {
+		t.Errorf("nil hint lists with system_prompt override should report empty arrays, got %+v", payload)
+	}
+	if strings.Contains(payload.SystemPrompt, builtinClassifierAskHints[0]) {
+		t.Errorf("system_prompt should omit $defaults when overridden with nil lists: %s", payload.SystemPrompt)
 	}
 }
 
@@ -564,7 +601,7 @@ func TestExecuteClassifierVerifyTransportErrorNotPromptFail(t *testing.T) {
 
 	orig := verifyCallLLM
 	verifyCallLLM = func(c LLMConfig, system, user string, maxTokens int) (string, error) {
-		if strings.Contains(user, "git push --force") {
+		if strings.Contains(user, classifierVerifyProbes[2].cmd) {
 			return "", fmt.Errorf("no content in response")
 		}
 		return `{"decision":"ask","risk":"high"}`, nil

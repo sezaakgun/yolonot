@@ -125,6 +125,7 @@ type Verdict struct {
 	ApprovalHashes []string // session approvals use that same snapshot
 	Prompt         string   // user prompt the classifier saw; escalation reuses it
 	Sys            string
+	DecisionHints  string   // state hint block for typed decision models (primary + escalation)
 	Attached       []string // script paths shown to the judge
 	Withheld       []string // script paths referenced but not shown, with the reason
 	Esc            escalationOutcome
@@ -209,6 +210,7 @@ func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 	}
 	hints := LoadHints(in.Cwd)
 	sysPrompt := BuildSystemPrompt(in.Config.Prompt, hints)
+	decHints := DecisionHints(in.Config.Prompt, hints)
 	override := HasSystemPromptOverride(in.Config.Prompt, hints)
 
 	replayBinding, approvalHashes := replaySnapshotFromCollected(in.Command, in.Cwd, attached, withheld)
@@ -216,7 +218,7 @@ func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 	var text string
 	var err error
 	if spec.Kind() == judgeTyped {
-		text, err = callDecision(cfg, userPrompt+DecisionHints(in.Config.Prompt, hints))
+		text, err = callDecision(cfg, userPrompt+decHints)
 	} else {
 		text, err = CallLLM(cfg, sysPrompt, userPrompt, 4096)
 	}
@@ -242,7 +244,7 @@ func runClassifierJudge(spec JudgeSpec, in *JudgeInput) (Verdict, bool, error) {
 		CacheContext:   classifierContextFingerprint(in.Config, hints, in.Command, in.Cwd),
 		ReplayBinding:  replayBinding,
 		ApprovalHashes: approvalHashes,
-		Prompt:         userPrompt, Sys: sysPrompt, CacheOK: true, Override: override,
+		Prompt:         userPrompt, Sys: sysPrompt, DecisionHints: decHints, CacheOK: true, Override: override,
 	}, true, nil
 }
 
@@ -253,7 +255,7 @@ func escalateUncertain(in *JudgeInput, v *Verdict) {
 	if v.Dec == nil {
 		return
 	}
-	v.Esc, v.CacheOK = maybeEscalateContext(in.Context, in.Harness, in.Config, v.Dec, v.Sys, v.Prompt, in.HookStart)
+	v.Esc, v.CacheOK = maybeEscalateContextWithHints(in.Context, in.Harness, in.Config, v.Dec, v.Sys, v.Prompt, v.DecisionHints, true, in.HookStart)
 	v.Decision, v.Risk, v.Short, v.Reason = v.Dec.Decision, v.Dec.Risk, v.Dec.Short, v.Dec.Reasoning
 	if v.Dec.Escalated && !strings.HasSuffix(v.Layer, "+esc") {
 		v.Layer += "+esc"

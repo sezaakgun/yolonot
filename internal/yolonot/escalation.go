@@ -134,6 +134,10 @@ func maybeEscalate(h Harness, cfg Config, d *Decision, sysPrompt, userPrompt str
 }
 
 func maybeEscalateContext(parent context.Context, h Harness, cfg Config, d *Decision, sysPrompt, userPrompt string, hookStart time.Time) (out escalationOutcome, cacheOK bool) {
+	return maybeEscalateContextWithHints(parent, h, cfg, d, sysPrompt, userPrompt, "", false, hookStart)
+}
+
+func maybeEscalateContextWithHints(parent context.Context, h Harness, cfg Config, d *Decision, sysPrompt, userPrompt, decHints string, hasHints bool, hookStart time.Time) (out escalationOutcome, cacheOK bool) {
 	cacheOK = true
 	ctx, cancel := hookBudgetContext(parent, hookStart)
 	defer cancel()
@@ -166,8 +170,15 @@ func maybeEscalateContext(parent context.Context, h Harness, cfg Config, d *Deci
 	out.Fired = true
 	out.Model = esc.Model
 	esc.Context = ctx
+	escPrompt := userPrompt
+	if isDecisionConfig(esc) {
+		if !hasHints {
+			decHints = DecisionHints(cfg.Prompt, LoadHints())
+		}
+		escPrompt += decHints
+	}
 	start := time.Now()
-	text, err := escalationCallLLM(esc, sysPrompt, userPrompt, 4096)
+	text, err := escalationCallLLM(esc, sysPrompt, escPrompt, 4096)
 	out.Ms = time.Since(start).Milliseconds()
 	if err != nil {
 		out.Err = classifyLLMError(err)

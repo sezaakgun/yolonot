@@ -124,14 +124,14 @@ type HarnessPolicy struct {
 //
 // Hint slices accept the literal string "$defaults" as a sentinel that is
 // spliced in place of yolonot's built-in lists when the system prompt is
-// assembled (today the built-in lists are empty; the sentinel is reserved for
-// forward-compat parity with Claude Code's autoMode contract). Omitting the
-// sentinel takes full ownership of the list.
+// assembled. Unset (nil) slices expand $defaults by default; an explicit
+// empty slice ([]) or a custom list without "$defaults" disables the built-in
+// entries for that section.
 type ClassifierConfig struct {
-	Impl       string   `json:"impl,omitempty"`        // "llm" (default), "heuristic", "knn", ...
-	Context    []string `json:"context,omitzero"`      // prose describing trusted infra (repos, buckets, domains)
-	AllowHints []string `json:"allow_hints,omitzero"`  // prose nudging classifier toward allow on routine patterns
-	AskHints   []string `json:"ask_hints,omitzero"`    // prose nudging classifier toward ask on environment-specific risks
+	Impl       string   `json:"impl,omitempty"`       // "llm" (default), "heuristic", "knn", ...
+	Context    []string `json:"context,omitzero"`     // prose describing trusted infra (repos, buckets, domains)
+	AllowHints []string `json:"allow_hints,omitzero"` // prose nudging classifier toward allow on routine patterns
+	AskHints   []string `json:"ask_hints,omitzero"`   // prose nudging classifier toward ask on environment-specific risks
 	// SystemPrompt fully replaces the built-in classifier base prompt when
 	// non-empty. Unlike the hint slices (which append), this owns the whole
 	// base — but Context/AllowHints/AskHints still append after it, so the
@@ -1034,18 +1034,24 @@ func cmdRules() {
 	}
 
 	cfg := LoadConfig()
-	if len(cfg.Prompt.Context) > 0 || len(cfg.Prompt.AllowHints) > 0 || len(cfg.Prompt.AskHints) > 0 || cfg.Prompt.SystemPrompt != "" {
+	if !cfg.Prompt.IsZero() {
 		anyPrinted = true
 		fmt.Printf("%s (prompt):\n", configPath())
-		for _, c := range cfg.Prompt.Context {
-			fmt.Printf("  context %q\n", c)
+		printPromptSliceSummary := func(label string, list []string) {
+			if list == nil {
+				return
+			}
+			if len(list) == 0 {
+				fmt.Printf("  %s (none — $defaults disabled)\n", label)
+				return
+			}
+			for _, item := range list {
+				fmt.Printf("  %s %q\n", label, item)
+			}
 		}
-		for _, h := range cfg.Prompt.AllowHints {
-			fmt.Printf("  allow-hint %q\n", h)
-		}
-		for _, h := range cfg.Prompt.AskHints {
-			fmt.Printf("  ask-hint %q\n", h)
-		}
+		printPromptSliceSummary("context", cfg.Prompt.Context)
+		printPromptSliceSummary("allow-hint", cfg.Prompt.AllowHints)
+		printPromptSliceSummary("ask-hint", cfg.Prompt.AskHints)
 		if cfg.Prompt.SystemPrompt != "" {
 			fmt.Printf("  system-prompt %q\n", truncateStr(cfg.Prompt.SystemPrompt, 80))
 		}

@@ -4,6 +4,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"os"
 	"strings"
 	"testing"
 )
@@ -260,5 +261,46 @@ func TestPageHoverFollowsMouse(t *testing.T) {
 	out, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionMotion, X: 3, Y: 4})
 	if pm := out.(pageModel); pm.hover != -1 {
 		t.Fatalf("display-only row should not hover, got %d", pm.hover)
+	}
+}
+
+func TestEditPromptListPreservesAndDisablesDefaults(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Chdir(t.TempDir())
+
+	cfg := Config{}
+	for _, r := range configRows(cfg) {
+		if r.Section == "PROMPT" && r.Label == "Ask hints" && r.Value != "defaults" {
+			t.Fatalf("default PROMPT/Ask hints = %q, want %q", r.Value, "defaults")
+		}
+	}
+
+	dir := t.TempDir()
+	appendScript := dir + "/append.sh"
+	if err := os.WriteFile(appendScript, []byte("#!/bin/sh\nprintf 'confirm billing migrations\\n' >> \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EDITOR", appendScript)
+
+	edit := editPromptList("Ask hints", "risks", func(c *Config) *[]string { return &c.Prompt.AskHints })
+	edit(&cfg)
+	if len(cfg.Prompt.AskHints) != 2 || cfg.Prompt.AskHints[0] != DefaultsSentinel || cfg.Prompt.AskHints[1] != "confirm billing migrations" {
+		t.Fatalf("appending hint should preserve $defaults, got %#v", cfg.Prompt.AskHints)
+	}
+
+	clearScript := dir + "/clear.sh"
+	if err := os.WriteFile(clearScript, []byte("#!/bin/sh\n: > \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EDITOR", clearScript)
+	edit(&cfg)
+	if cfg.Prompt.AskHints == nil || len(cfg.Prompt.AskHints) != 0 {
+		t.Fatalf("clearing editor should save non-nil empty slice [] to disable defaults, got %#v", cfg.Prompt.AskHints)
+	}
+	for _, r := range configRows(cfg) {
+		if r.Section == "PROMPT" && r.Label == "Ask hints" && r.Value != "none" {
+			t.Fatalf("disabled PROMPT/Ask hints = %q, want %q", r.Value, "none")
+		}
 	}
 }

@@ -1,12 +1,14 @@
 package yolonot
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func decisionFakeServer(t *testing.T, risk string, conf, noul float64) *httptest.Server {
@@ -246,5 +248,51 @@ func TestSystemPromptMatchesDecisionCriteria(t *testing.T) {
 				t.Errorf("SystemPrompt missing %s fragment %q", c.id, want)
 			}
 		}
+	}
+	if got := BuildSystemPrompt(PromptConfig{Context: []string{}, AllowHints: []string{}, AskHints: []string{"   "}}, WalkupHints{}); got != SystemPrompt {
+		t.Errorf("whitespace-only hints should not emit empty sections: %q", got)
+	}
+}
+
+func TestTypedEscalationReceivesDecisionHints(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	isolateEscalationEnv(t)
+
+	var seenState string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			State string `json:"state"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		seenState = req.State
+		answers := map[string]decisionAnswer{
+			"risk": {Type: "choice", Choice: RiskModerate, Confidence: 0.9, Probabilities: map[string]float64{RiskModerate: 0.9}},
+		}
+		for _, c := range decisionAskConditions {
+			p := 0.05
+			if c.id == "project_ask" && strings.Contains(req.State, "touching billing/ asks") {
+				p = 0.95
+			}
+			answers[c.id] = decisionAnswer{Type: "noul", Noul: p}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"model": "jev-1.13.0", "answers": answers})
+	}))
+	defer srv.Close()
+
+	cfg := Config{
+		ConfigVersion: 1,
+		Models: map[string]ModelConfig{
+			"typed-esc": {URL: srv.URL + "/v1/systemone", Model: "jev-latest", APIKey: "k"},
+		},
+		Escalation: &EscalationConfig{Model: "typed-esc"},
+		Prompt:     PromptConfig{AskHints: []string{"$defaults", "touching billing/ asks"}},
+	}
+	SaveConfig(cfg)
+
+	d := Decision{Decision: "ask", Risk: RiskModerate, Short: "s", Reasoning: "r"}
+	decHints := DecisionHints(cfg.Prompt, WalkupHints{})
+	out, _ := maybeEscalateContextWithHints(context.Background(), GetHarness("claude"), cfg, &d, SystemPrompt, "Command: ls billing/", decHints, true, time.Time{})
+	if !out.Fired || out.Decision != "ask" || !strings.Contains(seenState, "touching billing/ asks") {
+		t.Fatalf("typed escalation must receive DecisionHints; outcome=%+v state=%q", out, seenState)
 	}
 }
