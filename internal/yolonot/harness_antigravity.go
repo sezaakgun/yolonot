@@ -52,7 +52,9 @@ func newAntigravityHarness() *AntigravityHarness {
 				if err != nil {
 					return false
 				}
-				return dirExists(filepath.Join(home, ".gemini", "antigravity-cli"))
+				return dirExists(filepath.Join(home, ".gemini", "antigravity-cli")) ||
+					dirExists(filepath.Join(home, ".gemini", "antigravity")) ||
+					dirExists(filepath.Join(home, ".gemini", "config"))
 			},
 			parseFn: func(input []byte) (HookPayload, error) {
 				if len(input) == 0 {
@@ -184,4 +186,29 @@ func (a *AntigravityHarness) loadHooks() (map[string]interface{}, error) {
 
 func antigravitySkillDir() string {
 	return newAntigravityHarness().skillDir()
+}
+
+func antigravityConfigSkillDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".gemini", "config", "skills", "yolonot")
+}
+
+func (a *AntigravityHarness) InstallSkill() (string, error) {
+	primary, err := installHarnessSkill(a.name, a.skillDir())
+	if err != nil {
+		return "", err
+	}
+	if _, err := installHarnessSkill(a.name, antigravityConfigSkillDir()); err != nil {
+		return "", err
+	}
+	return primary, nil
+}
+
+func (a *AntigravityHarness) UninstallSkill() error {
+	err1 := uninstallHarnessSkill(a.skillDir())
+	err2 := uninstallHarnessSkill(antigravityConfigSkillDir())
+	if err1 != nil {
+		return err1
+	}
+	return err2
 }

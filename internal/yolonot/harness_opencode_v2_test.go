@@ -147,3 +147,76 @@ console.log(JSON.stringify({error, executed, effect, cleaned: after.effect === "
 		})
 	}
 }
+
+func TestOpencodePluginPermissionRepliedHumanResolutions(t *testing.T) {
+	runner, runnerArgs := "", []string{}
+	if bun, err := exec.LookPath("bun"); err == nil {
+		runner, runnerArgs = bun, []string{"run"}
+	} else if node, err := exec.LookPath("node"); err == nil {
+		runner = node
+	} else {
+		t.Skip("Bun or Node.js is required to execute the OpenCode plugin")
+	}
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+	ws := filepath.Join(home, "workspace")
+	if err := os.MkdirAll(ws, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeGlobalRules(t, home, "ask-cmd git push *\n")
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperPath := filepath.Join(home, "yolonot-oc-helper")
+	quotedExec := "'" + strings.ReplaceAll(executable, "'", "'\"'\"'") + "'"
+	wrapper := "#!/bin/sh\nexec " + quotedExec + " -test.run=^TestPluginShimCLIHelperProcess$ -- \"$@\"\n"
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0700); err != nil {
+		t.Fatal(err)
+	}
+	h := newOpencodeHarness()
+	if err := h.Install(wrapperPath); err != nil {
+		t.Fatal(err)
+	}
+	pluginPath, _ := json.Marshal(h.SettingsPath())
+	driver := "import plugin, { YolonotPlugin } from " + string(pluginPath) + `;
+const ws = process.argv[2];
+// 1. V1 YolonotPlugin: ask + permission.replied("always") -> session allow; ask + permission.replied("reject") -> session_deny
+const v1 = await YolonotPlugin({ directory: ws });
+await v1["tool.execute.before"]({ tool: "bash", sessionID: "oc-v1-s1", callID: "c1" }, { args: { command: "git push origin v1-always", cwd: ws } });
+if (typeof v1.event === "function") {
+  await v1.event({ event: { type: "permission.replied", properties: { sessionID: "oc-v1-s1", callID: "c1", reply: "always" } } });
+}
+await v1["tool.execute.before"]({ tool: "bash", sessionID: "oc-v1-s1", callID: "c2" }, { args: { command: "git push origin v1-reject", cwd: ws } });
+if (typeof v1.event === "function") {
+  await v1.event({ event: { type: "permission.replied", properties: { sessionID: "oc-v1-s1", callID: "c2", reply: "reject" } } });
+}
+let v1RejectBlocked = false;
+try {
+  await v1["tool.execute.before"]({ tool: "bash", sessionID: "oc-v1-s1", callID: "c3" }, { args: { command: "git push origin v1-reject", cwd: ws } });
+} catch {
+  v1RejectBlocked = true;
+}
+console.log(JSON.stringify({ v1RejectBlocked }));
+`
+	driverPath := filepath.Join(home, "driver-replied.ts")
+	if err := os.WriteFile(driverPath, []byte(driver), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, runner, append(runnerArgs, driverPath, ws)...)
+	cmd.Env = append(os.Environ(), "HOME="+home, "YOLONOT_TEST_SHIM_CLI_HELPER=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("OpenCode replied driver failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), `"v1RejectBlocked":true`) {
+		t.Fatalf("expected v1RejectBlocked=true, got: %s", out)
+	}
+	proj := ProjectSessionID("oc-v1-s1", ws)
+	if !ContainsLine(proj, "approved", "git push origin v1-always") || !ContainsLine(proj, "denied", "git push origin v1-reject") {
+		t.Fatalf("expected session approved and denied entries for oc-v1-s1")
+	}
+}

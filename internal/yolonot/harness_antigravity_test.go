@@ -166,6 +166,62 @@ func TestAntigravitySkillAndSessionOverride(t *testing.T) {
 	}
 }
 
+func TestAntigravityIDEDetectionAndDualSkillInstall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir()) // ensure agy binary is not on PATH
+
+	h := newAntigravityHarness()
+	if h.IsDetected() {
+		t.Fatal("should not be detected in empty HOME without agy on PATH")
+	}
+
+	// Antigravity 2.0 / IDE creates ~/.gemini/antigravity or ~/.gemini/config
+	ideDir := filepath.Join(home, ".gemini", "antigravity")
+	if err := os.MkdirAll(ideDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !h.IsDetected() {
+		t.Fatal("expected Antigravity to be detected when ~/.gemini/antigravity exists")
+	}
+	_ = os.RemoveAll(ideDir)
+
+	cfgDir := filepath.Join(home, ".gemini", "config")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !h.IsDetected() {
+		t.Fatal("expected Antigravity to be detected when ~/.gemini/config exists")
+	}
+
+	// InstallSkill must populate both CLI skill dir and global config skill dir
+	path, err := h.InstallSkill()
+	if err != nil || path == "" {
+		t.Fatalf("InstallSkill failed: %v", err)
+	}
+	for _, skillFile := range []string{
+		filepath.Join(home, ".gemini", "antigravity-cli", "skills", "yolonot", "SKILL.md"),
+		filepath.Join(home, ".gemini", "config", "skills", "yolonot", "SKILL.md"),
+	} {
+		data, err := os.ReadFile(skillFile)
+		if err != nil || !strings.Contains(string(data), "name: yolonot") {
+			t.Fatalf("expected skill at %s, err=%v", skillFile, err)
+		}
+	}
+
+	if err := h.UninstallSkill(); err != nil {
+		t.Fatalf("UninstallSkill failed: %v", err)
+	}
+	for _, skillFile := range []string{
+		filepath.Join(home, ".gemini", "antigravity-cli", "skills", "yolonot", "SKILL.md"),
+		filepath.Join(home, ".gemini", "config", "skills", "yolonot", "SKILL.md"),
+	} {
+		if _, err := os.Stat(skillFile); !os.IsNotExist(err) {
+			t.Fatalf("expected %s to be removed on UninstallSkill, err=%v", skillFile, err)
+		}
+	}
+}
+
 func TestAntigravityActualHookCommandUsesNativeDecisions(t *testing.T) {
 	_, cleanup := withFakeHome(t)
 	defer cleanup()

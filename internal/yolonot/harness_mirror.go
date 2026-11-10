@@ -69,6 +69,13 @@ def evaluate_bash(command, cwd="", session_id="", tool_use_id="", event="PreTool
     except Exception:
         return "deny", "Blocked by yolonot (invalid hook response)"
 
+def resolve_bash(command, cwd="", session_id="", tool_use_id="", verdict="allow-once"):
+    payload = {"harness": "mirror", "session_id": session_id, "tool_use_id": tool_use_id or "mirror-ask", "cwd": cwd or os.getcwd(), "command": command, "verdict": verdict, "completed": True}
+    try:
+        subprocess.run([BIN, "mod", "resolve"], input=json.dumps(payload), text=True, capture_output=True, timeout=60)
+    except Exception:
+        pass
+
 class YolonotExtension(_Base):
     _pending = {}
 
@@ -82,14 +89,18 @@ class YolonotExtension(_Base):
             return st, (self.effect(action.request),)
         if actions is not None and isinstance(action, actions.DecideApproval) and action.call_id in self._pending:
             info = self._pending.pop(action.call_id, None)
-            if action.approved and info:
-                return st, (self.effect(("post", action.call_id, info)),)
+            if info:
+                verdict = "allow-session" if (action.approved and getattr(action, "remember", False)) else ("allow-once" if action.approved else "deny")
+                return st, (self.effect(("resolve", action.call_id, info, verdict)),)
         return st, ()
 
     async def handle_effect(self, context, request):
-        if isinstance(request, tuple) and len(request) == 3 and request[0] == "post":
-            _, call_id, info = request
-            evaluate_bash(info["cmd"], cwd=info["cwd"], session_id=info["sid"], tool_use_id=call_id, event="PostToolUse", tool_input=info.get("args"))
+        if isinstance(request, tuple) and len(request) == 4 and request[0] == "resolve":
+            _, call_id, info, verdict = request
+            if verdict == "allow-once":
+                evaluate_bash(info["cmd"], cwd=info["cwd"], session_id=info["sid"], tool_use_id=call_id, event="PostToolUse", tool_input=info.get("args"))
+            else:
+                resolve_bash(info["cmd"], cwd=info["cwd"], session_id=info["sid"], tool_use_id=call_id, verdict=verdict)
             return
         try:
             args = json.loads(request.args or "{}")

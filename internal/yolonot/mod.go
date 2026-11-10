@@ -275,12 +275,15 @@ func dropLineOrVariant(sessionID, suffix, command string) bool {
 }
 
 type modResolve struct {
-	SessionID string `json:"session_id"`
-	ToolUseID string `json:"tool_use_id"`
-	Cwd       string `json:"cwd"`
-	Command   string `json:"command"`
-	Verdict   string `json:"verdict"`
-	Reason    string `json:"reason"`
+	Harness       string `json:"harness,omitempty"`
+	SessionID     string `json:"session_id"`
+	ToolUseID     string `json:"tool_use_id"`
+	Cwd           string `json:"cwd"`
+	Command       string `json:"command"`
+	Verdict       string `json:"verdict"`
+	Reason        string `json:"reason"`
+	BypassSandbox bool   `json:"bypass_sandbox,omitempty"`
+	Completed     bool   `json:"completed,omitempty"`
 }
 
 func cmdMod(args []string) {
@@ -295,15 +298,18 @@ func cmdMod(args []string) {
 			fmt.Fprintln(os.Stderr, "yolonot mod resolve: expects JSON on stdin: session_id, tool_use_id, cwd, command, verdict")
 			os.Exit(2)
 		}
+		if r.Harness != "" && os.Getenv("YOLONOT_HARNESS") == "" {
+			os.Setenv("YOLONOT_HARNESS", r.Harness)
+		}
 		proj := ProjectSessionID(r.SessionID, r.Cwd)
 		cfg := LoadConfig()
 		attachOutsideRoot = cfg.AttachOutsideRoot
 		fastallow.AddWrappers(cfg.Wrappers...)
 		previous := modLookup(r.SessionID, r.ToolUseID)
-		currentBypassSandbox = previous != nil && previous.BypassSandbox
+		currentBypassSandbox = r.BypassSandbox || (previous != nil && previous.BypassSandbox)
 		binding, hashes := modCommandSnapshot(r.Command, r.Cwd)
 		entry := modEntry{ID: r.ToolUseID, Command: r.Command, Cwd: r.Cwd,
-			Binding: binding, ApprovalHashes: hashes, BypassSandbox: currentBypassSandbox, Layer: "human", Grant: r.Verdict}
+			Binding: binding, ApprovalHashes: hashes, BypassSandbox: currentBypassSandbox, Completed: r.Completed, Layer: "human", Grant: r.Verdict}
 		// A human answer is about the snapshot originally judged. Do not
 		// silently bind it to script edits made while the dialog was open.
 		snapshotUnchanged := true
@@ -334,6 +340,7 @@ func cmdMod(args []string) {
 				entry.Decision, entry.Reason = "allow", "allowed once (script modified since prompt)"
 			}
 		case "deny":
+			dropLine(proj, "asked", r.Command)
 			AppendLine(proj, "denied", r.Command)
 			LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "deny", Source: "ask_rejected", ToolUseID: r.ToolUseID})
 			entry.Decision, entry.Reason = "deny", "rejected by the user"

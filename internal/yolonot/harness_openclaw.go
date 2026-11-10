@@ -76,8 +76,28 @@ export default function register(api) {
     if (out.permissionDecision === "deny") return { block: true, blockReason: out.permissionDecisionReason || "Blocked by yolonot" };
     if (out.permissionDecision === "ask") {
       pendingAsk.add(callKey);
-      const desc = out.permissionDecisionReason ? String(params.command || "") + "\n" + out.permissionDecisionReason : String(params.command || "");
-      return { requireApproval: { title: "Allow command?", description: desc, severity: "warning", allowedDecisions: ["allow-once", "allow-always", "deny"] } };
+      const cmdStr = String(params.command || "");
+      const desc = out.permissionDecisionReason ? cmdStr + "\n" + out.permissionDecisionReason : cmdStr;
+      const bypass = Boolean(params.elevated || params.host === "gateway" || params.host === "node");
+      return {
+        requireApproval: {
+          title: "Allow command?",
+          description: desc,
+          severity: "warning",
+          allowedDecisions: ["allow-once", "allow-always", "deny"],
+          onResolution: (decision) => {
+            pendingAsk.delete(callKey);
+            const verdict = decision === "allow-always" ? "allow-session" : decision === "allow-once" ? "allow-once" : decision === "deny" ? "deny" : "";
+            if (verdict && sid) {
+              spawnSync(BIN, ["mod", "resolve"], {
+                input: JSON.stringify({ harness: "openclaw", session_id: sid, tool_use_id: event.toolCallId || "oc-ask", cwd, command: cmdStr, verdict, bypass_sandbox: bypass, completed: true }),
+                encoding: "utf8",
+                timeout: 60000,
+              });
+            }
+          },
+        },
+      };
     }
   }, { priority: 100 });
   api.on("after_tool_call", async (event, ctx) => {

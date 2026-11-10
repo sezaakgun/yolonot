@@ -8,7 +8,20 @@ import (
 // Tests fake HOME; host config directories set by the caller's environment
 // (a CI runner sets XDG_CONFIG_HOME) would point them at real files instead.
 func TestMain(m *testing.M) {
-	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"} {
+	for _, name := range []string{
+		"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+		"CODEX_HOME", "CLAUDE_CONFIG_DIR",
+		"AI_AGENT", "AGENT", "ANTIGRAVITY_CLI", "ANTIGRAVITY_AGENT",
+		"CRUSH", "CRUSH_EVENT",
+		"ZCODE_RUNTIME_ENV", "ZCODE_APP_CLI_VERSION", "ZCODE_PROJECT_DIR",
+		"COPILOT_CLI_BINARY_VERSION", "COPILOT_CLI_RESOLVED_DIST_DIR", "COPILOT_PROJECT_DIR",
+		"GROK_AGENT", "GROK_HOOK_EVENT", "GROK_WORKSPACE_ROOT",
+		"DSH_SHELL", "DEVIN_PROJECT_DIR", "OPENHANDS_PROJECT_DIR",
+		"KIRO_CHAT_SHELL", "AMAZON_Q_CHAT_SHELL", "AWS_SDK_UA_APP_ID",
+		"OPENCLAW_CLI", "OPENCLAW_SUBAGENT_EXEC",
+		"KILO_PROCESS_ROLE", "CURSOR_AGENT", "CURSOR_TRACE_ID",
+		"OPENCODE", "GOOSE_TERMINAL",
+	} {
 		os.Unsetenv(name)
 	}
 	os.Exit(m.Run())

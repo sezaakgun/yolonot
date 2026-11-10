@@ -268,6 +268,45 @@ func TestGetSessionIDFromEnvClaudeOnly(t *testing.T) {
 	}
 }
 
+func TestActiveHarnessDetectsShellEnvironmentMarkers(t *testing.T) {
+	t.Setenv("YOLONOT_HARNESS", "")
+	t.Setenv("CLAUDE_SESSION_ID", "")
+
+	cases := []struct {
+		envKey string
+		envVal string
+		want   string
+	}{
+		{"ANTIGRAVITY_CLI", "1", "antigravity"},
+		{"CRUSH", "1", "crush"},
+		{"AI_AGENT", "crush", "crush"},
+		{"ZCODE_RUNTIME_ENV", "cli", "zcode"},
+		{"COPILOT_CLI_BINARY_VERSION", "1.0.26", "copilot"},
+		{"GROK_AGENT", "1", "grok"},
+		{"DSH_SHELL", "1", "deepseek"},
+		{"DEVIN_PROJECT_DIR", "/tmp/proj", "devin"},
+		{"OPENHANDS_PROJECT_DIR", "/tmp/proj", "openhands"},
+		{"KIRO_CHAT_SHELL", "1", "kiro"},
+		{"AWS_SDK_UA_APP_ID", "kiro-agent", "kiro"},
+		{"OPENCLAW_CLI", "1", "openclaw"},
+		{"KILO_PROCESS_ROLE", "worker", "kilo"},
+		{"AI_AGENT", "amp", "amp"},
+		{"CURSOR_AGENT", "1", "cursor"},
+		{"OPENCODE", "1", "opencode"},
+		{"GOOSE_TERMINAL", "1", "goose"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.envKey+"="+tc.envVal, func(t *testing.T) {
+			t.Setenv(tc.envKey, tc.envVal)
+			h := ActiveHarness()
+			if h == nil || h.Name() != tc.want {
+				t.Fatalf("ActiveHarness() with %s=%s = %v, want %s", tc.envKey, tc.envVal, h, tc.want)
+			}
+		})
+	}
+}
+
 // TestCmdHookRoutesThroughActiveHarness exercises the full cmdHook pipeline
 // for each non-Claude harness, pinned via YOLONOT_HARNESS. A deny-rule
 // short-circuits before any LLM call — the only thing varying across the

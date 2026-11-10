@@ -44,7 +44,7 @@ export default function (pi: any) {
     const tool = event.toolName || event.name || "";
     if (tool !== "bash" && tool !== "powershell") return;
     const input = event.input || {};
-    const sid = (ctx && ctx.sessionManager && typeof ctx.sessionManager.getSessionId === "function" && ctx.sessionManager.getSessionId()) || process.env.PI_SESSION_ID || "";
+    const sid = (ctx && ctx.sessionManager && typeof ctx.sessionManager.getSessionId === "function" && ctx.sessionManager.getSessionId()) || process.env.YOLONOT_PI_SESSION_ID || process.env.PI_SESSION_ID || process.env.YOLONOT_FORCE_SESSION_ID || "";
     const payload = { hook_event_name: "PreToolUse", tool_name: tool, tool_use_id: event.toolCallId || "", session_id: sid, cwd: (ctx && ctx.cwd) || process.cwd(), tool_input: input };
     const res = spawnSync(BIN, ["hook", "--harness", "pi"], { input: JSON.stringify(payload), encoding: "utf8", timeout: 60000 });
     const raw = (res.stdout || "").trim();
@@ -56,11 +56,28 @@ export default function (pi: any) {
       return { block: true, reason: out.permissionDecisionReason || (res.stderr || "").trim() || (res.error && res.error.message) || "Blocked by yolonot" };
     }
     if (out.permissionDecision === "ask") {
-      if (!ctx || !ctx.hasUI || !ctx.ui?.confirm) return { block: true, reason: out.permissionDecisionReason || "Approval required in non-interactive mode" };
-      const detail = out.permissionDecisionReason ? String(input.command || "") + "\n" + out.permissionDecisionReason : String(input.command || "");
-      const ok = await ctx.ui.confirm("yolonot: Allow command?", detail);
-      if (!ok) return { block: true, reason: "Denied by user" };
-      spawnSync(BIN, ["hook", "--harness", "pi"], { input: JSON.stringify({ ...payload, hook_event_name: "PostToolUse" }), encoding: "utf8", timeout: 60000 });
+      if (!ctx || !ctx.hasUI || (!ctx.ui?.confirm && !ctx.ui?.select)) return { block: true, reason: out.permissionDecisionReason || "Approval required in non-interactive mode" };
+      const cmdStr = String(input.command || "");
+      const detail = out.permissionDecisionReason ? cmdStr + "\n" + out.permissionDecisionReason : cmdStr;
+      let verdict = "deny";
+      if (typeof ctx.ui.select === "function") {
+        const choice = await ctx.ui.select("yolonot: " + detail, ["Allow once", "Allow for session", "Deny"]);
+        verdict = choice === "Allow for session" ? "allow-session" : choice === "Allow once" ? "allow-once" : "deny";
+      } else {
+        const ok = await ctx.ui.confirm("yolonot: Allow command?", detail);
+        verdict = ok ? "allow-once" : "deny";
+      }
+      if (verdict === "deny") {
+        if (sid) {
+          spawnSync(BIN, ["mod", "resolve"], { input: JSON.stringify({ harness: "pi", session_id: sid, tool_use_id: event.toolCallId || "pi-ask", cwd: payload.cwd, command: cmdStr, verdict: "deny", completed: true }), encoding: "utf8", timeout: 60000 });
+        }
+        return { block: true, reason: "Denied by user" };
+      }
+      if (verdict === "allow-session" && sid) {
+        spawnSync(BIN, ["mod", "resolve"], { input: JSON.stringify({ harness: "pi", session_id: sid, tool_use_id: event.toolCallId || "pi-ask", cwd: payload.cwd, command: cmdStr, verdict: "allow-session", completed: true }), encoding: "utf8", timeout: 60000 });
+      } else {
+        spawnSync(BIN, ["hook", "--harness", "pi"], { input: JSON.stringify({ ...payload, hook_event_name: "PostToolUse" }), encoding: "utf8", timeout: 60000 });
+      }
     }
   });
 }

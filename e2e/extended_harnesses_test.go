@@ -4,8 +4,10 @@ package e2e
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -632,6 +634,36 @@ func TestMuseCLI(t *testing.T) {
 	}
 }
 
+func awsEventStreamFrame(eventType string, payloadObj any) []byte {
+	payload, _ := json.Marshal(payloadObj)
+	var hdrs []byte
+	for _, kv := range [][2]string{
+		{":message-type", "event"},
+		{":event-type", eventType},
+		{":content-type", "application/json"},
+	} {
+		hdrs = append(hdrs, byte(len(kv[0])))
+		hdrs = append(hdrs, kv[0]...)
+		hdrs = append(hdrs, 7) // string header value type
+		var vlen [2]byte
+		binary.BigEndian.PutUint16(vlen[:], uint16(len(kv[1])))
+		hdrs = append(hdrs, vlen[:]...)
+		hdrs = append(hdrs, kv[1]...)
+	}
+	totalLen := uint32(12 + len(hdrs) + len(payload) + 4)
+	var prelude [12]byte
+	binary.BigEndian.PutUint32(prelude[0:4], totalLen)
+	binary.BigEndian.PutUint32(prelude[4:8], uint32(len(hdrs)))
+	binary.BigEndian.PutUint32(prelude[8:12], crc32.ChecksumIEEE(prelude[0:8]))
+	msg := make([]byte, 0, totalLen)
+	msg = append(msg, prelude[:]...)
+	msg = append(msg, hdrs...)
+	msg = append(msg, payload...)
+	var msgCRC [4]byte
+	binary.BigEndian.PutUint32(msgCRC[:], crc32.ChecksumIEEE(msg))
+	return append(msg, msgCRC[:]...)
+}
+
 func TestKiroCLI(t *testing.T) {
 	kiro := extendedHostBinary(t, "kiro-cli-chat", "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat")
 	sqliteBin, err := exec.LookPath("sqlite3")
@@ -644,7 +676,24 @@ func TestKiroCLI(t *testing.T) {
 			s.Install("kiro")
 			cmdStr := s.Command()
 
+			var krsTurn atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.ReadAll(r.Body)
+				if strings.Contains(r.Header.Get("X-Amz-Target"), "GenerateAssistantResponse") {
+					w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+					if krsTurn.Add(1) == 1 {
+						inJSON, _ := json.Marshal(obj{"command": cmdStr})
+						_, _ = w.Write(awsEventStreamFrame("toolUseEvent", obj{
+							"name":      "execute_bash",
+							"toolUseId": "call_1",
+							"input":     string(inJSON),
+							"stop":      true,
+						}))
+					} else {
+						_, _ = w.Write(awsEventStreamFrame("assistantResponseEvent", obj{"content": "Done!"}))
+					}
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, `{"models":[{"modelId":"claude-sonnet-4","modelName":"Claude Sonnet 4","tokenLimits":{"maxInputTokens":200000}}],"defaultModel":{"modelId":"claude-sonnet-4","modelName":"Claude Sonnet 4","tokenLimits":{"maxInputTokens":200000}}}`)
 			}))
@@ -698,8 +747,8 @@ func TestKiroCLI(t *testing.T) {
 func TestMirrorExtensionRuntime(t *testing.T) {
 	realHome, _ := os.UserHomeDir()
 	mirrorPy := filepath.Join(realHome, ".local", "share", "uv", "tools", "reflection-mirror", "bin", "python")
-	if _, err := os.Stat(mirrorPy); err != nil {
-		t.Skip("reflection-mirror uv python not installed")
+	if _, err := os.Stat(mirrorPy); err != nil || exec.Command(mirrorPy, "-c", "import mirror").Run() != nil {
+		t.Skip("reflection-mirror uv python not installed or not runnable in current environment")
 	}
 	s := newSandbox(t, "")
 	s.write(".yolonot/rules", "allow-cmd touch *\nask-cmd git push *\ndeny-cmd rm -rf /*\n")
@@ -823,21 +872,50 @@ console.log(JSON.stringify({ allowRes, denyRes, askApprovedRes, askRejectedRes, 
 		t.Fatalf("Amp shim runtime output unexpected:\n%s", ampOut)
 	}
 
-	// 3. Pi interactive UI confirmation in Node.js (ask approved -> allow_once, ask rejected -> Denied by user)
+	// 3. Pi interactive UI confirmation in Node.js (ask select "Allow for session" -> session allow, ask rejected -> Denied by user + session_deny on replay)
 	s.Install("pi")
 	piShim := s.path(".pi/agent/extensions/yolonot.ts")
 	piDriver := s.path("run-pi-shim.mjs")
 	s.write(piDriver, fmt.Sprintf(`import register from %q;
 let fn;
 register({ on(ev, cb) { if (ev === "tool_call") fn = cb; } });
-const askApproved = await fn({ toolName: "bash", toolCallId: "p1", input: { command: "git push origin pi-ok" } }, { hasUI: true, cwd: %q, sessionManager: { getSessionId() { return "pi-s1"; } }, ui: { async confirm() { return true; } } });
+const askSession = await fn({ toolName: "bash", toolCallId: "p1", input: { command: "git push origin pi-sess" } }, { hasUI: true, cwd: %q, sessionManager: { getSessionId() { return "pi-s1"; } }, ui: { async select() { return "Allow for session"; } } });
+const askSessionReplay = await fn({ toolName: "bash", toolCallId: "p1b", input: { command: "git push origin pi-sess" } }, { hasUI: true, cwd: %q, sessionManager: { getSessionId() { return "pi-s1"; } }, ui: { async select() { return "Deny"; } } });
 const askRejected = await fn({ toolName: "bash", toolCallId: "p2", input: { command: "git push origin pi-no" } }, { hasUI: true, cwd: %q, sessionManager: { getSessionId() { return "pi-s1"; } }, ui: { async confirm() { return false; } } });
-console.log(JSON.stringify({ askApproved: askApproved || null, askRejected: askRejected || null }));
-`, piShim, s.Work, s.Work))
+const askRejectedReplay = await fn({ toolName: "bash", toolCallId: "p3", input: { command: "git push origin pi-no" } }, { hasUI: true, cwd: %q, sessionManager: { getSessionId() { return "pi-s1"; } }, ui: { async confirm() { return true; } } });
+console.log(JSON.stringify({ askSession: askSession || null, askSessionReplay: askSessionReplay || null, askRejected: askRejected || null, askRejectedReplay: askRejectedReplay || null }));
+`, piShim, s.Work, s.Work, s.Work, s.Work))
 
 	piOut := runWithTimeout(t, s.Work, s.Env, 15*time.Second, nodeBin, piDriver)
-	if !strings.Contains(piOut, `"askApproved":null`) || !strings.Contains(piOut, `"Denied by user"`) {
+	if !strings.Contains(piOut, `"askSession":null`) || !strings.Contains(piOut, `"askSessionReplay":null`) || !strings.Contains(piOut, `"Denied by user"`) || !strings.Contains(piOut, "previously rejected this session") {
 		t.Fatalf("Pi interactive shim runtime output unexpected:\n%s", piOut)
+	}
+
+	// 4. OpenCode & Kilo plugin shim runtime in Node.js (tool.execute.before + event permission.replied -> allow-session / deny)
+	s.Install("opencode")
+	s.Install("kilo")
+	ocPluginShim := s.path(".config/opencode/plugins/yolonot.ts")
+	ocPluginDriver := s.path("run-opencode-plugin-shim.mjs")
+	s.write(ocPluginDriver, fmt.Sprintf(`import { YolonotPlugin } from %q;
+const plugin = await YolonotPlugin({ directory: %q });
+await plugin["tool.execute.before"]({ tool: "bash", sessionID: "ocp-s1", callID: "perm-1" }, { args: { command: "git push origin ocp-sess" } });
+await plugin.event({ event: { type: "permission.replied", properties: { sessionID: "ocp-s1", callID: "perm-1", reply: "always" } } });
+await plugin["tool.execute.before"]({ tool: "bash", sessionID: "ocp-s1", callID: "perm-2" }, { args: { command: "git push origin ocp-sess" } });
+
+await plugin["tool.execute.before"]({ tool: "bash", sessionID: "ocp-s1", callID: "perm-3" }, { args: { command: "git push origin ocp-reject" } });
+await plugin.event({ event: { type: "permission.replied", properties: { sessionID: "ocp-s1", callID: "perm-3", reply: "reject" } } });
+let rejectReplayErr = "";
+try {
+  await plugin["tool.execute.before"]({ tool: "bash", sessionID: "ocp-s1", callID: "perm-4" }, { args: { command: "git push origin ocp-reject" } });
+} catch (err) {
+  rejectReplayErr = String(err?.message || err);
+}
+console.log(JSON.stringify({ rejectReplayErr }));
+`, ocPluginShim, s.Work))
+
+	ocPluginOut := runWithTimeout(t, s.Work, s.Env, 15*time.Second, nodeBin, ocPluginDriver)
+	if !strings.Contains(ocPluginOut, "previously rejected this session") {
+		t.Fatalf("OpenCode/Kilo plugin shim runtime output unexpected:\n%s", ocPluginOut)
 	}
 }
 

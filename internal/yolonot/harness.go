@@ -212,6 +212,11 @@ func ActiveHarness() Harness {
 	if h := GetHarness("claude"); h != nil && h.SessionIDFromEnv() != "" {
 		return h
 	}
+	if name := detectHarnessFromShellEnv(); name != "" {
+		if h := GetHarness(name); h != nil {
+			return h
+		}
+	}
 	if h := GetHarness("claude"); h != nil {
 		return h
 	}
@@ -219,6 +224,48 @@ func ActiveHarness() Harness {
 		return list[0]
 	}
 	return nil
+}
+
+func detectHarnessFromShellEnv() string {
+	for _, k := range []string{"AI_AGENT", "AGENT"} {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			if c := canonicalHarnessName(v); GetHarness(c) != nil {
+				return c
+			}
+		}
+	}
+	switch {
+	case os.Getenv("ANTIGRAVITY_CLI") == "1" || os.Getenv("ANTIGRAVITY_AGENT") == "1":
+		return "antigravity"
+	case os.Getenv("CRUSH") == "1" || os.Getenv("CRUSH_EVENT") != "":
+		return "crush"
+	case os.Getenv("ZCODE_RUNTIME_ENV") != "" || os.Getenv("ZCODE_APP_CLI_VERSION") != "" || os.Getenv("ZCODE_PROJECT_DIR") != "":
+		return "zcode"
+	case os.Getenv("COPILOT_CLI_BINARY_VERSION") != "" || os.Getenv("COPILOT_CLI_RESOLVED_DIST_DIR") != "" || os.Getenv("COPILOT_PROJECT_DIR") != "":
+		return "copilot"
+	case os.Getenv("GROK_AGENT") == "1" || os.Getenv("GROK_HOOK_EVENT") != "" || os.Getenv("GROK_WORKSPACE_ROOT") != "":
+		return "grok"
+	case os.Getenv("DSH_SHELL") == "1":
+		return "deepseek"
+	case os.Getenv("DEVIN_PROJECT_DIR") != "":
+		return "devin"
+	case os.Getenv("OPENHANDS_PROJECT_DIR") != "":
+		return "openhands"
+	case os.Getenv("KIRO_CHAT_SHELL") == "1" || os.Getenv("AMAZON_Q_CHAT_SHELL") == "1" || os.Getenv("AWS_SDK_UA_APP_ID") == "kiro-agent":
+		return "kiro"
+	case os.Getenv("OPENCLAW_CLI") == "1" || os.Getenv("OPENCLAW_SUBAGENT_EXEC") == "1":
+		return "openclaw"
+	case os.Getenv("KILO_PROCESS_ROLE") != "":
+		return "kilo"
+	case os.Getenv("CURSOR_AGENT") == "1" || os.Getenv("CURSOR_TRACE_ID") != "":
+		return "cursor"
+	case os.Getenv("OPENCODE") == "1":
+		return "opencode"
+	case os.Getenv("GOOSE_TERMINAL") == "1":
+		return "goose"
+	default:
+		return ""
+	}
 }
 
 // GetSessionIDFromEnv returns the first non-empty session id exposed by a
