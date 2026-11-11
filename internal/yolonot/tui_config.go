@@ -149,9 +149,10 @@ func configRows(cfg Config) []configRow {
 	}})
 
 	// PROMPT — what the chat model (and, as state text, the typed model) sees.
-	add(configRow{"PROMPT", "Context", hintListSummary(cfg.Prompt.Context), "", editPromptList("Context", "trusted background facts", func(c *Config) *[]string { return &c.Prompt.Context })})
-	add(configRow{"PROMPT", "Allow hints", hintListSummary(cfg.Prompt.AllowHints), "", editPromptList("Allow hints", "routine patterns to lean allow on", func(c *Config) *[]string { return &c.Prompt.AllowHints })})
-	add(configRow{"PROMPT", "Ask hints", hintListSummary(cfg.Prompt.AskHints), "", editPromptList("Ask hints", "environment-specific risks to lean ask on", func(c *Config) *[]string { return &c.Prompt.AskHints })})
+	hasPromptOverride := HasSystemPromptOverride(cfg.Prompt, LoadHints())
+	add(configRow{"PROMPT", "Context", promptListSummary(cfg.Prompt.Context, hasPromptOverride), "", editPromptList("Context", "trusted background facts", func(c *Config) *[]string { return &c.Prompt.Context })})
+	add(configRow{"PROMPT", "Allow hints", promptListSummary(cfg.Prompt.AllowHints, hasPromptOverride), "", editPromptList("Allow hints", "routine patterns to lean allow on", func(c *Config) *[]string { return &c.Prompt.AllowHints })})
+	add(configRow{"PROMPT", "Ask hints", promptListSummary(cfg.Prompt.AskHints, hasPromptOverride), "", editPromptList("Ask hints", "environment-specific risks to lean ask on", func(c *Config) *[]string { return &c.Prompt.AskHints })})
 	sys := "built-in"
 	if cfg.Prompt.SystemPrompt != "" {
 		sys = fmt.Sprintf("custom (%d chars)", len(cfg.Prompt.SystemPrompt))
@@ -192,6 +193,15 @@ func harnessOverridesSummary(cfg Config) string {
 		return "none"
 	}
 	return strings.Join(parts, "; ")
+}
+
+// promptListSummary treats a nil slice as "defaults" unless a base-prompt
+// override suppresses automatic $defaults expansion.
+func promptListSummary(list []string, hasOverride bool) string {
+	if list == nil && !hasOverride {
+		return "defaults"
+	}
+	return hintListSummary(list)
 }
 
 // hintListSummary: "none", "defaults", "defaults + 2", "3 lines".
@@ -882,23 +892,31 @@ func editProjectRules(cfg *Config) {
 func editPromptList(title, what string, get func(*Config) *[]string) func(*Config) {
 	return func(cfg *Config) {
 		list := get(cfg)
+		hasOverride := HasSystemPromptOverride(cfg.Prompt, LoadHints())
 		var b strings.Builder
 		fmt.Fprintf(&b, "# %s: %s. One entry per line.\n", title, what)
-		b.WriteString("# Keep `$defaults` to include yolonot's built-in list; `#` lines are ignored.\n\n")
-		for _, s := range *list {
-			b.WriteString(s + "\n")
+		b.WriteString("# Keep `$defaults` to include yolonot's built-in list; delete all lines to disable defaults (`[]`). `#` lines are ignored.\n\n")
+		if *list == nil && !hasOverride {
+			b.WriteString(DefaultsSentinel + "\n")
+		} else {
+			for _, s := range *list {
+				b.WriteString(s + "\n")
+			}
 		}
 		text, ok := editText("yolonot-"+strings.ToLower(strings.ReplaceAll(title, " ", "-"))+"-*.txt", b.String())
 		if !ok {
 			return
 		}
-		var out []string
+		out := make([]string, 0)
 		for _, line := range strings.Split(text, "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "#") {
 				continue
 			}
 			out = append(out, line)
+		}
+		if *list == nil && !hasOverride && len(out) == 1 && out[0] == DefaultsSentinel {
+			return
 		}
 		*list = out
 	}

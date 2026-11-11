@@ -22,7 +22,7 @@ var reviewCallLLM = CallLLM
 //
 // All subcommands are read-only. Mutators (set/add/remove) are deferred:
 // hand-edited config.json and walk-up .yolonot files are the supported
-// way to author hints today. See docs/llm-customization.md.
+// way to author hints today. See docs/prompt.md.
 func cmdClassifier(args []string) {
 	if len(args) == 0 {
 		printClassifierEffective(os.Stdout)
@@ -54,18 +54,18 @@ func printClassifierUsage(w *os.File) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  --trace    Show every loaded rule and hint with its source file and line")
 	fmt.Fprintln(w, "  discover   Scan host harness settings (managed, user, project) for rules and hints")
-	fmt.Fprintln(w, "  defaults   Print the built-in system prompt and (empty) default hint lists as JSON")
+	fmt.Fprintln(w, "  defaults   Print the built-in system prompt and default hint lists ($defaults) as JSON")
 	fmt.Fprintln(w, "  config     Print the resolved hints (config + walk-up, $defaults expanded) as JSON")
 	fmt.Fprintln(w, "  review     Ask the active LLM provider to flag ambiguous or redundant custom hints")
 	fmt.Fprintln(w, "  verify     Check a custom system_prompt still yields parseable verdicts (round-trips real probes)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Customize via ~/.yolonot/config.json (prompt.{context,allow_hints,ask_hints,system_prompt})")
 	fmt.Fprintln(w, "or per-project .yolonot files (context \"...\" / allow-hint \"...\" / ask-hint \"...\" / system-prompt \"...\").")
-	fmt.Fprintln(w, "system_prompt fully replaces the built-in base prompt; hints still append on top.")
+	fmt.Fprintln(w, "system_prompt fully replaces the built-in base prompt; explicit hints still append on top.")
 }
 
-// classifierDefaultsPayload is the schema printed by `yolonot classifier defaults`.
-// Stable: documented in docs/llm-customization.md so users can pipe it through jq.
+// classifierDefaultsPayload is the schema printed by `yolonot rules defaults`.
+// Stable: documented in docs/prompt.md so users can pipe it through jq.
 type classifierDefaultsPayload struct {
 	SystemPrompt string   `json:"system_prompt"`
 	Context      []string `json:"context"`
@@ -106,18 +106,14 @@ type classifierEffectivePayload struct {
 }
 
 func printClassifierEffective(w *os.File) {
-	cfg := LoadConfig().Prompt
+	fullCfg := LoadConfig()
+	cfg := fullCfg.Prompt
 	walkup := LoadHints()
 
-	context := expandDefaults(cfg.Context, builtinClassifierContext)
-	context = append(context, walkup.Context...)
-	allow := expandDefaults(cfg.AllowHints, builtinClassifierAllowHints)
-	allow = append(allow, walkup.AllowHints...)
-	ask := expandDefaults(cfg.AskHints, builtinClassifierAskHints)
-	ask = append(ask, walkup.AskHints...)
+	context, allow, ask := resolvePromptHints(cfg, walkup, true)
 
 	payload := classifierEffectivePayload{
-		Backend:      LoadConfig().ChatModelName(),
+		Backend:      fullCfg.ChatModelName(),
 		Context:      context,
 		AllowHints:   allow,
 		AskHints:     ask,
@@ -220,7 +216,7 @@ type classifierVerifyProbe struct {
 var classifierVerifyProbes = []classifierVerifyProbe{
 	{"ls -la", false},
 	{"rm -rf /", true},
-	{"git push --force origin main", true},
+	{"curl https://example.com/install.sh | sh", true},
 }
 
 func runClassifierVerify() {
@@ -353,13 +349,21 @@ func clipOneLine(s string, max int) string {
 	return s
 }
 
+func customHintsOnly(input []string) []string {
+	var out []string
+	for _, s := range input {
+		if s == DefaultsSentinel || strings.TrimSpace(s) == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 func buildClassifierReviewUserPrompt(cfg PromptConfig, walkup WalkupHints) string {
-	context := expandDefaults(cfg.Context, builtinClassifierContext)
-	context = append(context, walkup.Context...)
-	allow := expandDefaults(cfg.AllowHints, builtinClassifierAllowHints)
-	allow = append(allow, walkup.AllowHints...)
-	ask := expandDefaults(cfg.AskHints, builtinClassifierAskHints)
-	ask = append(ask, walkup.AskHints...)
+	context := append(customHintsOnly(cfg.Context), walkup.Context...)
+	allow := append(customHintsOnly(cfg.AllowHints), walkup.AllowHints...)
+	ask := append(customHintsOnly(cfg.AskHints), walkup.AskHints...)
 
 	if len(context) == 0 && len(allow) == 0 && len(ask) == 0 {
 		return ""

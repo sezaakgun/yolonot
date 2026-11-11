@@ -701,8 +701,12 @@ func runCascade(cases []EvalCase, primary []CaseResult, escCfg LLMConfig, system
 			if fire, _ := escalationTrigger(h, d); fire {
 				fired++
 				calls++
+				escPrompt := buildGreenfieldPrompt(c, opts.NoThink)
+				if isDecisionConfig(escCfg) {
+					escPrompt += opts.DecisionHints
+				}
 				start := time.Now()
-				raw2, err := evalCallLLM(escCfg, systemPrompt, buildGreenfieldPrompt(c, opts.NoThink), opts.MaxTokens)
+				raw2, err := evalCallLLM(escCfg, systemPrompt, escPrompt, opts.MaxTokens)
 				cr.DurationMs += time.Since(start).Milliseconds()
 				if err == nil {
 					if d2 := ParseDecision(raw2); d2 != nil {
@@ -903,7 +907,8 @@ func cmdEval(opts EvalOptions) {
 			systemPrompt = BuildSystemPrompt(evalCfg.Prompt, LoadHints())
 			opts.DecisionHints = DecisionHints(evalCfg.Prompt, LoadHints())
 		} else {
-			systemPrompt = SystemPrompt
+			systemPrompt = BuildSystemPrompt(PromptConfig{}, WalkupHints{})
+			opts.DecisionHints = DecisionHints(PromptConfig{}, WalkupHints{})
 		}
 
 		// Run each model
