@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -233,7 +234,7 @@ func cmdUpgrade() {
 
 	fmt.Printf("\nUpgraded to %s.\n", latest)
 
-	refreshed := refreshSkillsForInstalled()
+	refreshed := refreshSkillsWithBinary(resolveGoInstalledBinary())
 	switch {
 	case len(refreshed) == 1:
 		fmt.Printf("Skill refreshed: %s\n", refreshed[0])
@@ -271,6 +272,65 @@ func refreshSkillsForInstalled() []string {
 			continue
 		}
 		out = append(out, fmt.Sprintf("%s → %s", h.Name(), path))
+	}
+	return out
+}
+
+func resolveGoInstalledBinary() string {
+	exeName := "yolonot"
+	if runtime.GOOS == "windows" {
+		exeName += ".exe"
+	}
+	if out, err := exec.Command("go", "env", "GOBIN").Output(); err == nil {
+		if gobin := strings.TrimSpace(string(out)); gobin != "" {
+			cand := filepath.Join(gobin, exeName)
+			if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+				return cand
+			}
+		}
+	}
+	if out, err := exec.Command("go", "env", "GOPATH").Output(); err == nil {
+		for _, gp := range filepath.SplitList(strings.TrimSpace(string(out))) {
+			if gp == "" {
+				continue
+			}
+			cand := filepath.Join(gp, "bin", exeName)
+			if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+				return cand
+			}
+		}
+	}
+	if p, err := exec.LookPath("yolonot"); err == nil {
+		return p
+	}
+	return ""
+}
+
+// refreshSkillsWithBinary invokes the newly installed yolonot binary so the
+// refreshed SKILL.md comes from the upgraded binary's embedded assets rather
+// than the currently running (older) process. Falls back to in-process
+// refreshSkillsForInstalled when newBin is empty.
+func refreshSkillsWithBinary(newBin string) []string {
+	if newBin == "" {
+		return refreshSkillsForInstalled()
+	}
+	var out []string
+	for _, h := range Harnesses() {
+		if !h.IsInstalled() {
+			continue
+		}
+		cmd := exec.Command(newBin, "install", "--skill-only", "--harness", h.Name())
+		raw, err := cmd.CombinedOutput()
+		if err != nil {
+			Verbosef("skill refresh for %s via %s failed: %v (%s)", h.Name(), newBin, err, strings.TrimSpace(string(raw)))
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.Contains(trimmed, " → ") {
+				out = append(out, trimmed)
+			}
+		}
 	}
 	return out
 }

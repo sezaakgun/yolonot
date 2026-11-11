@@ -153,8 +153,9 @@ func healthChecks(cfg Config, targets []Harness, probe bool) []diagnosticCheck {
 			version = harnessVersion(h.Name(), path)
 		}
 		checks = append(checks, diagnosticCheck{Name: "host_version", Harness: h.Name(), Status: status, Detail: version})
-		defer prepareHarnessCapabilities(h, version)()
+		restore := prepareHarnessCapabilities(h, version)
 		checks = append(checks, diagnosticCheck{Name: "native_ask", Harness: h.Name(), Status: "info", Detail: fmt.Sprintf("%t (runtime capability; see docs/harnesses.md)", harnessSupportsAsk(h))})
+		restore()
 		if h.Name() == "codex" {
 			checks = append(checks, diagnosticCheck{Name: "hook_trust", Harness: h.Name(), Status: "warning", Detail: "Review and trust this exact hook in Codex /hooks; registration alone does not activate it."})
 		}
@@ -385,7 +386,9 @@ func policyRiskChecks(cfg Config, targets []Harness) []diagnosticCheck {
 		if len(targets) != 1 && !hasHarnessRiskOverride(cfg, h.Name()) {
 			continue
 		}
+		restore := prepareHarnessCapabilities(h)
 		risky := riskyTiersFromMap(ResolveRiskMap(h))
+		restore()
 		if len(targets) != 1 && len(globalRisky) > 0 {
 			var extra []string
 			for _, item := range risky {

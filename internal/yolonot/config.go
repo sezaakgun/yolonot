@@ -1970,28 +1970,54 @@ suggestLoop:
 		return
 	}
 
-	header := fmt.Sprintf("\n# Suggested by yolonot (%s)\n", time.Now().Format("2006-01-02"))
+	applyEvolveChanges(cwd, changes, time.Now().Format("2006-01-02"))
+	fmt.Println("Done.")
+
+}
+
+func applyEvolveChanges(cwd string, changes []evolveChange, dateStr string) {
+	header := fmt.Sprintf("# Suggested by yolonot (%s)\n", dateStr)
+	wroteHeader := map[string]bool{}
+	projRoot := projectRoot(cwd)
 
 	for _, c := range changes {
 		var path string
 		if c.Scope == "g" {
 			path = filepath.Join(YolonotDir(), "rules")
 		} else {
-			path = filepath.Join(cwd, ".yolonot")
+			path = filepath.Join(projRoot, ".yolonot")
 		}
-		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		draft, err := readRuleDraft(path)
 		if err != nil {
 			fmt.Printf("  Error writing %s: %v\n", path, err)
 			continue
 		}
-		f.WriteString(header)
-		f.WriteString(c.Rule + "\n")
-		f.Close()
-		header = "" // only write header once per file
+		mode := draft.mode
+		if c.Scope != "g" && !draft.existed {
+			mode = 0644
+		}
+		buf := append([]byte(nil), draft.data...)
+		if len(buf) > 0 && buf[len(buf)-1] != '\n' {
+			buf = append(buf, '\n')
+		}
+		if !wroteHeader[path] {
+			if len(buf) > 0 {
+				buf = append(buf, '\n')
+			}
+			buf = append(buf, header...)
+			wroteHeader[path] = true
+		}
+		buf = append(buf, (c.Rule + "\n")...)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			fmt.Printf("  Error writing %s: %v\n", path, err)
+			continue
+		}
+		if err := atomicWriteFile(path, buf, mode); err != nil {
+			fmt.Printf("  Error writing %s: %v\n", path, err)
+			continue
+		}
 		fmt.Printf("  Updated %s\n", path)
 	}
-	fmt.Println("Done.")
-
 }
 
 func cmdQuiet(args []string) {
