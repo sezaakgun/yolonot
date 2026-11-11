@@ -614,11 +614,20 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 
 	var body map[string]interface{}
 	if isAnthropic {
+		// Anthropic models with default adaptive thinking (e.g. Claude 5.x)
+		// count thinking_tokens toward max_tokens and reject disabling thinking
+		// on some tiers. Small caller caps (32 for doctor, 256 for compare/probes,
+		// 300 for explain/verify) would otherwise exhaust max_tokens inside the
+		// thinking block before emitting any text block.
+		anthropicMax := maxTokens
+		if anthropicMax < 1536 {
+			anthropicMax = 1536
+		}
 		body = map[string]interface{}{
 			"model":    cfg.Model,
 			"system":   systemPrompt,
 			"messages": []map[string]string{{"role": "user", "content": userPrompt}},
-			tokenKey:   maxTokens,
+			tokenKey:   anthropicMax,
 		}
 	} else {
 		body = map[string]interface{}{
@@ -690,12 +699,25 @@ func CallLLM(cfg LLMConfig, systemPrompt, userPrompt string, maxTokens int) (str
 	}
 
 	if isAnthropic {
-		// Anthropic: content[0].text
-		if content, ok := result["content"].([]interface{}); ok && len(content) > 0 {
-			if block, ok := content[0].(map[string]interface{}); ok {
-				if text, ok := block["text"].(string); ok {
-					return text, nil
+		// Anthropic Messages API may emit {"type":"thinking",...} blocks
+		// before {"type":"text","text":"..."} (e.g. Claude 5.x adaptive
+		// thinking by default). Scan all content blocks for text blocks.
+		if content, ok := result["content"].([]interface{}); ok {
+			var parts []string
+			for _, item := range content {
+				block, ok := item.(map[string]interface{})
+				if !ok {
+					continue
 				}
+				if btype, _ := block["type"].(string); btype != "" && btype != "text" {
+					continue
+				}
+				if text, ok := block["text"].(string); ok && text != "" {
+					parts = append(parts, text)
+				}
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, "\n"), nil
 			}
 		}
 		return "", fmt.Errorf("no content in Anthropic response")

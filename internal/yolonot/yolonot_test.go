@@ -793,6 +793,55 @@ func TestCallLLMAnthropicFormat(t *testing.T) {
 	}
 }
 
+func TestCallLLMAnthropicThinkingBlocksAndTokenFloor(t *testing.T) {
+	var gotMaxTokens float64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		gotMaxTokens, _ = body["max_tokens"].(float64)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "thinking", "thinking": "", "signature": "opaque-sig"},
+				{"type": "text", "text": `{"decision":"allow","risk":"safe","short":"read only","reasoning":"safe inspection"}`},
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := LLMConfig{URL: server.URL + "/v1/messages", Protocol: "anthropic", Model: "claude-haiku-5-5", APIKey: "test-key"}
+	text, err := CallLLM(cfg, "system", "user", 300)
+	if err != nil {
+		t.Fatalf("CallLLM failed on thinking+text blocks: %v", err)
+	}
+	if gotMaxTokens < 1536 {
+		t.Errorf("Anthropic max_tokens = %v, want >= 1536 so adaptive thinking cannot starve text output", gotMaxTokens)
+	}
+	d := ParseDecision(text)
+	if d == nil || d.Decision != "allow" {
+		t.Errorf("got %+v, want allow", d)
+	}
+}
+
+func TestCallLLMAnthropicThinkingOnlyReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "thinking", "thinking": `{"decision":"allow"}`, "signature": "opaque-sig"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := LLMConfig{URL: server.URL + "/v1/messages", Protocol: "anthropic", Model: "claude-sonnet-5-5", APIKey: "test-key"}
+	if _, err := CallLLM(cfg, "system", "user", 300); err == nil || !strings.Contains(err.Error(), "no content in Anthropic response") {
+		t.Fatalf("expected no content error when only thinking block is present, got %v", err)
+	}
+}
+
 func TestCallLLMNewTokenParam(t *testing.T) {
 	var receivedBody map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
