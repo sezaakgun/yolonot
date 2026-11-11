@@ -131,8 +131,8 @@ func TestGroupCHarnessesLifecycleAndProtocol(t *testing.T) {
 		t.Fatalf("kiro Install: %v", err)
 	}
 	kiroAgent, err := os.ReadFile(filepath.Join(home, ".kiro", "agents", "default.json"))
-	if err != nil || !strings.Contains(string(kiroAgent), `"matcher": "execute_bash"`) {
-		t.Fatalf("kiro default.json matcher unexpected: err=%v, body=%s", err, string(kiroAgent))
+	if err != nil || !strings.Contains(string(kiroAgent), `"matcher": "execute_bash"`) || !strings.Contains(string(kiroAgent), `"tools"`) {
+		t.Fatalf("kiro default.json matcher/tools unexpected: err=%v, body=%s", err, string(kiroAgent))
 	}
 	kiroCLI, err := os.ReadFile(filepath.Join(home, ".kiro", "settings", "cli.json"))
 	if err != nil || !strings.Contains(string(kiroCLI), `"chat.defaultAgent": "default"`) {

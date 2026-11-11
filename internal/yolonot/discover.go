@@ -269,9 +269,14 @@ func DiscoverHostPermissions(cwd string, targets ...Harness) DiscoverSummary {
 			}
 			if home != "" {
 				addFile(parseAntigravitySettingsFile("user", filepath.Join(home, ".gemini", "config", "config.json")))
+				addFile(parseAntigravitySettingsFile("user", filepath.Join(home, ".gemini", "antigravity-cli", "settings.json")))
 				for _, p := range matchingAntigravityProjectFiles(home, projDirs) {
 					addFile(parseAntigravitySettingsFile("project", p))
 				}
+			}
+			for _, d := range projDirs {
+				addFile(parseAntigravitySettingsFile("project", filepath.Join(d, ".agents", "settings.json")))
+				addFile(parseAntigravitySettingsFile("project", filepath.Join(d, ".gemini", "config", "config.json")))
 			}
 
 		case "codex":
@@ -845,6 +850,10 @@ func parseOpencodeConfigFile(scope, path string) *DiscoveredHostFile {
 	if !ok {
 		return nil
 	}
+	return parseOpencodeConfigObject(scope, path, raw)
+}
+
+func parseOpencodeConfigObject(scope, path string, raw map[string]interface{}) *DiscoveredHostFile {
 	out := &DiscoveredHostFile{Harness: "opencode", Scope: scope, Path: path}
 	perm, _ := raw["permission"].(map[string]interface{})
 	if perm == nil {

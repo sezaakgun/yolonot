@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Run yolonot's full multi-harness E2E suite inside an isolated Linux container.
+#
+# Usage:
+#   ./scripts/e2e-docker                    # build image (if needed) & run full E2E suite
+#   ./scripts/e2e-docker -run TestQwenCLI   # pass custom flags to `go test`
+#   ./scripts/e2e-docker --build            # incremental Docker build (cached layers), then test
+#   ./scripts/e2e-docker --rebuild          # full no-cache rebuild from upstream CLIs, then test
+#   ./scripts/e2e-docker --build-only       # build/update the Docker image and exit
+#   ./scripts/e2e-docker --versions         # list installed harness versions in the image
+#   ./scripts/e2e-docker --shell            # open interactive bash inside the container
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+IMAGE="${YOLONOT_E2E_IMAGE:-yolonot-e2e:latest}"
+GOCACHE_VOL="yolonot-e2e-gocache"
+
+build=0
+rebuild=0
+build_only=0
+show_versions=0
+open_shell=0
+test_args=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --build) build=1; shift ;;
+    --rebuild) rebuild=1; shift ;;
+    --build-only) build=1; build_only=1; shift ;;
+    --versions) show_versions=1; shift ;;
+    --shell) open_shell=1; shift ;;
+    *) test_args+=("$1"); shift ;;
+  esac
+done
+
+if [ "$rebuild" -eq 1 ]; then
+  docker build --pull --no-cache -t "$IMAGE" -f "$ROOT/e2e/Dockerfile" "$ROOT"
+elif [ "$build" -eq 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  docker build -t "$IMAGE" -f "$ROOT/e2e/Dockerfile" "$ROOT"
+fi
+
+if [ "$build_only" -eq 1 ]; then
+  exit 0
+fi
+
+if [ "$show_versions" -eq 1 ]; then
+  docker run --rm "$IMAGE" bash -c '
+    for bin in claude codex opencode agy cursor-agent pi crush goose qwen kilo openhands kimi zcode cline grok copilot kiro-cli-chat openclaw mirror amp node bun uv tmux; do
+      if p=$(command -v "$bin" 2>/dev/null); then
+        ver=$("$bin" --version 2>/dev/null | head -n1 || echo "installed")
+        printf "%-16s %-42s %s\n" "$bin" "$p" "$ver"
+      else
+        printf "%-16s %s\n" "$bin" "(not installed)"
+      fi
+    done
+  '
+  exit 0
+fi
+
+COMMON_DOCKER_ARGS=(
+  --rm
+  --security-opt seccomp=unconfined
+  --security-opt apparmor=unconfined
+  --security-opt systempaths=unconfined
+  -e GOFLAGS=-buildvcs=false
+  -v "$ROOT:/workspace:ro"
+  -v "$GOCACHE_VOL:/home/e2e/.cache/go-build"
+  -w /workspace
+)
+
+if [ "$open_shell" -eq 1 ]; then
+  exec docker run -it "${COMMON_DOCKER_ARGS[@]}" "$IMAGE" bash
+fi
+
+if [ "${#test_args[@]}" -eq 0 ]; then
+  test_args=(-count=1 -v)
+fi
+
+exec docker run "${COMMON_DOCKER_ARGS[@]}" "$IMAGE" \
+  go test -tags e2e ./e2e/ "${test_args[@]}"

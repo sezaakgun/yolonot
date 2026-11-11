@@ -1,7 +1,7 @@
 #!/bin/sh
-# Sign off native harness checks for the current commit.
+# Sign off native and containerized harness checks for the current commit.
 #
-#   scripts/signoff [--dry-run] [--skip "reason"] <check>... | all
+#   scripts/signoff [--dry-run] [--skip "reason"] <check>... | docker | all
 #
 # Each check runs its e2e tests (or walks the manual desktop checklist in
 # e2e/MANUAL.md) and posts a GitHub commit status on HEAD: e2e/<check> or
@@ -9,7 +9,10 @@
 # sign-off. --skip posts success with the reason visible on the PR.
 set -eu
 
-ALL="claude-cli claude-mod codex opencode agy cursor-cli claude-desktop codex-desktop cursor-ide"
+NATIVE="claude-cli claude-mod codex opencode agy cursor-cli"
+DOCKER="crush goose qwen kilo pi openhands kimi zcode cline grok copilot kiro mirror openclaw amp hermes deepseek devin muse"
+MANUAL="claude-desktop codex-desktop cursor-ide"
+ALL="$NATIVE $DOCKER $MANUAL"
 cd "$(git rev-parse --show-toplevel)"
 
 dry=0
@@ -23,8 +26,16 @@ while [ $# -gt 0 ]; do
 	esac
 done
 [ $# -gt 0 ] || { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; echo "checks: $ALL"; exit 2; }
-# shellcheck disable=SC2086 # split the list into arguments
-[ "$1" = all ] && set -- $ALL
+expanded=""
+for arg in "$@"; do
+	case "$arg" in
+	all) expanded="$expanded $ALL" ;;
+	docker) expanded="$expanded $DOCKER" ;;
+	*) expanded="$expanded $arg" ;;
+	esac
+done
+# shellcheck disable=SC2086 # split expanded check names into arguments
+set -- $expanded
 
 sha=$(git rev-parse HEAD)
 repo=""
@@ -91,6 +102,158 @@ run_tests() { # context host regex [auth]
 	post "$ctx" success "$ver: $pass passed"
 }
 
+docker_regex() { # check → E2E test regex inside yolonot-e2e container
+	case "$1" in
+	crush) echo 'TestCrushCLI' ;;
+	goose) echo 'TestGooseCLI' ;;
+	qwen) echo 'TestQwenCLI' ;;
+	kilo) echo 'TestKiloCLI|TestKiloPluginRuntime' ;;
+	pi) echo 'TestPiCLI|TestPiPluginRuntime' ;;
+	openhands) echo 'TestOpenHandsCLI' ;;
+	kimi) echo 'TestKimiCLI' ;;
+	zcode) echo 'TestZCodeCLI' ;;
+	cline) echo 'TestClineCLI' ;;
+	grok) echo 'TestGrokCLI' ;;
+	copilot) echo 'TestCopilotCLI' ;;
+	kiro) echo 'TestKiroCLI' ;;
+	mirror) echo 'TestMirrorExtensionRuntime' ;;
+	openclaw) echo 'TestOpenClawPluginRuntime' ;;
+	amp) echo 'TestAmpPluginRuntime' ;;
+	hermes) echo 'TestHermesHookRuntime' ;;
+	deepseek) echo 'TestDeepSeekHookRuntime' ;;
+	devin) echo 'TestDevinHookRuntime' ;;
+	muse) echo 'TestMuseHookRuntime' ;;
+	esac
+}
+
+run_docker_batch() { # check...
+	if ! command -v docker >/dev/null 2>&1; then
+		for chk in "$@"; do post "e2e/$chk" failure "docker not found"; done
+		return 1
+	fi
+	combined=""
+	for chk in "$@"; do
+		rx=$(docker_regex "$chk")
+		combined="${combined:+$combined|}$rx"
+	done
+	echo "== docker e2e ($*)"
+	log=$(mktemp)
+	vers=$(mktemp)
+	set +e
+	./scripts/e2e-docker -json -run "^($combined)$" -count=1 >"$log" 2>&1
+	drc=$?
+	docker run --rm yolonot-e2e:latest bash -lc '
+		ver1() { "$@" 2>/dev/null | head -1 | tr -s " " | sed "s/^ *//; s/ *$//" | cut -c1-60; }
+		echo "crush=$(ver1 crush --version)"
+		echo "goose=goose $(ver1 goose --version)"
+		echo "qwen=qwen $(ver1 qwen --version)"
+		echo "kilo=kilo $(ver1 kilo --version)"
+		echo "pi=pi $(ver1 pi --version)"
+		echo "openhands=$(OPENHANDS_SUPPRESS_BANNER=1 openhands --version 2>/dev/null | grep -E "\S" | tail -1 | tr -s " " | sed "s/^ *//; s/ *$//" | cut -c1-60)"
+		echo "kimi=kimi $(ver1 kimi --version)"
+		echo "zcode=$(ver1 zcode --version)"
+		echo "cline=cline $(ver1 cline --version)"
+		echo "grok=$(ver1 grok --version)"
+		echo "copilot=$(ver1 copilot --version)"
+		echo "kiro=$(ver1 kiro-cli-chat --version)"
+		echo "mirror=$(ver1 mirror --version)"
+		echo "openclaw=$(ver1 openclaw --version)"
+		echo "amp=amp $(ver1 amp --version | sed "s/ (released.*//")"
+		echo "hermes=hook contract"
+		echo "deepseek=hook contract"
+		echo "devin=hook contract"
+		echo "muse=hook contract"
+	' >"$vers" 2>/dev/null
+	set -e
+
+	summary=$(mktemp)
+	python3 - "$drc" "$log" "$vers" "$@" >"$summary" <<-'PY'
+	import json, sys
+
+	drc = int(sys.argv[1])
+	log_path, vers_path = sys.argv[2], sys.argv[3]
+	checks = sys.argv[4:]
+
+	spec = {
+	    "crush": ["TestCrushCLI"],
+	    "goose": ["TestGooseCLI"],
+	    "qwen": ["TestQwenCLI"],
+	    "kilo": ["TestKiloCLI", "TestKiloPluginRuntime"],
+	    "pi": ["TestPiCLI", "TestPiPluginRuntime"],
+	    "openhands": ["TestOpenHandsCLI"],
+	    "kimi": ["TestKimiCLI"],
+	    "zcode": ["TestZCodeCLI"],
+	    "cline": ["TestClineCLI"],
+	    "grok": ["TestGrokCLI"],
+	    "copilot": ["TestCopilotCLI"],
+	    "kiro": ["TestKiroCLI"],
+	    "mirror": ["TestMirrorExtensionRuntime"],
+	    "openclaw": ["TestOpenClawPluginRuntime"],
+	    "amp": ["TestAmpPluginRuntime"],
+	    "hermes": ["TestHermesHookRuntime"],
+	    "deepseek": ["TestDeepSeekHookRuntime"],
+	    "devin": ["TestDevinHookRuntime"],
+	    "muse": ["TestMuseHookRuntime"],
+	}
+
+	vers = {}
+	with open(vers_path, encoding="utf-8", errors="replace") as vf:
+	    for line in vf:
+	        if "=" in line:
+	            k, v = line.rstrip("\n").split("=", 1)
+	            vers[k] = v.strip()
+
+	counts = {c: {"pass": 0, "fail": 0, "skip": 0} for c in checks}
+	raw_lines = []
+	with open(log_path, encoding="utf-8", errors="replace") as lf:
+	    for line in lf:
+	        raw_lines.append(line)
+	        s = line.strip()
+	        if not s.startswith("{"):
+	            continue
+	        try:
+	            ev = json.loads(s)
+	        except Exception:
+	            continue
+	        tname = ev.get("Test", "")
+	        act = ev.get("Action", "")
+	        if not tname or act not in ("pass", "fail", "skip"):
+	            continue
+	        for c in checks:
+	            if any(tname == p or tname.startswith(p + "/") for p in spec[c]):
+	                counts[c][act] += 1
+
+	any_bad = False
+	for c in checks:
+	    ver = vers.get(c) or c
+	    st = counts[c]
+	    if st["skip"] > 0:
+	        any_bad = True
+	        print(f"{c}\tfailure\t{ver}: tests skipped")
+	    elif st["fail"] > 0 or st["pass"] == 0 or (drc != 0 and sum(x["fail"] for x in counts.values()) == 0):
+	        any_bad = True
+	        print(f"{c}\tfailure\t{ver}: e2e failed")
+	    else:
+	        print(f"{c}\tsuccess\t{ver}: {st['pass']} passed")
+
+	if any_bad:
+	    sys.stderr.write("".join(raw_lines[-40:]))
+	PY
+
+	brc=0
+	while IFS="$(printf '\t')" read -r chk state desc; do
+		post "e2e/$chk" "$state" "$desc"
+		[ "$state" = success ] || brc=1
+	done <"$summary"
+	rm -f "$vers" "$summary"
+	if [ "$brc" = 0 ]; then
+		rm -f "$log"
+	else
+		echo "full log: $log" >&2
+	fi
+	return $brc
+}
+
 ask() { # prompt → $reply, read from the terminal
 	printf '%s' "$1" >/dev/tty
 	read -r reply </dev/tty
@@ -111,17 +274,28 @@ check() { # file item → status of one Check item from MANUAL.md
 	esac
 }
 
-restore() { # harness usual-binary tmp workspace → put the usual build back
+restore() { # harness usual-binary tmp workspace [restore-claude] → put the usual build back
 	trap - EXIT INT TERM
+	keep_tmp=0
+	if [ "${5:-0}" = 1 ]; then
+		if [ -n "$2" ] && "$2" install --harness claude >/dev/null; then
+			echo "Restored $2 into your claude hooks." >/dev/tty
+		elif [ -z "$2" ] && "$3/yolonot" uninstall --harness claude >/dev/null; then
+			echo "Removed the candidate from your claude hooks." >/dev/tty
+		else
+			echo "Could not restore your claude hooks; they still use the candidate kept in $3." >/dev/tty
+			keep_tmp=1
+		fi
+	fi
 	if [ -n "$2" ] && "$2" install --harness "$1" >/dev/null; then
 		echo "Restored $2 into your $1 hooks." >/dev/tty
-		rm -rf "$3"
 	elif [ -z "$2" ] && "$3/yolonot" uninstall --harness "$1" >/dev/null; then
 		echo "No yolonot on PATH; removed the candidate from your $1 hooks. Reinstall your usual build yourself." >/dev/tty
-		rm -rf "$3"
 	else
 		echo "Could not restore your $1 hooks; they still use the candidate kept in $3. Reinstall your usual build, then delete it." >/dev/tty
+		keep_tmp=1
 	fi
+	[ "$keep_tmp" = 1 ] || rm -rf "$3"
 	rm -rf "$4"
 }
 
@@ -140,13 +314,23 @@ manual() { # context harness heading
 	git -C "$ws" init -q
 	printf 'allow-cmd touch *ALLOW*\ndeny-cmd touch *DENY*\nask-cmd touch *ASK*\n' >"$ws/.yolonot"
 	usual=$(command -v yolonot || true)
+	restore_claude=0
+	claude_settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+	if [ "$harness" = cursor ] && grep -q yolonot "$claude_settings" 2>/dev/null; then
+		restore_claude=1
+	fi
 
 	printf '\n== %s\nWorkspace: %s\nInstalled the candidate into your %s hooks; your usual build is restored when this ends, also on Ctrl+C.\n' \
 		"$heading" "$ws" "$harness" >/dev/tty
 	# shellcheck disable=SC2064 # expand the paths now, they are local to this run
-	trap "restore '$harness' '$usual' '$tmp' '$ws'" EXIT
+	trap "restore '$harness' '$usual' '$tmp' '$ws' '$restore_claude'" EXIT
 	trap 'exit 130' INT TERM
-	(cd "$ws" && "$cand" install --harness "$harness") >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws"; return 1; }
+	(cd "$ws" && "$cand" install --harness "$harness") >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"; return 1; }
+	if [ "$restore_claude" = 1 ]; then
+		# Cursor imports ~/.claude/settings.json before ~/.cursor/hooks.json;
+		# update it to the candidate too so the old system binary is not called.
+		(cd "$ws" && "$cand" install --harness claude) >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"; return 1; }
+	fi
 	if [ "$harness" = cursor ]; then
 		# Native ask is opt-in by env; a wrapper sets it for the hook only.
 		wrap="$tmp/yolonot-cursor-native-ask"
@@ -173,7 +357,7 @@ manual() { # context harness heading
 	else
 		ask "$app.app not found in /Applications; app version: "
 		ver=$reply
-		[ -n "$ver" ] || { echo "version required" >&2; restore "$harness" "$usual" "$tmp" "$ws"; return 1; }
+		[ -n "$ver" ] || { echo "version required" >&2; restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"; return 1; }
 	fi
 
 	failed="" n=0
@@ -229,7 +413,7 @@ ITEMS
 $rows
 EOF
 
-	restore "$harness" "$usual" "$tmp" "$ws"
+	restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"
 	if [ -n "$failed" ]; then
 		post "$ctx" failure "$ver: rows$failed failed"
 		return 1
@@ -237,28 +421,63 @@ EOF
 	post "$ctx" success "$ver: $n/$n rows passed"
 }
 
-rc=0
+is_docker_check() {
+	case " $DOCKER " in
+	*" $1 "*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
 for check in "$@"; do
-	case "$check" in
-	claude-cli | claude-mod | codex | opencode | agy | cursor-cli) ctx=e2e/$check ;;
-	claude-desktop | codex-desktop | cursor-ide) ctx=manual/$check ;;
+	case " $ALL " in
+	*" $check "*) ;;
 	*) echo "unknown check $check (checks: $ALL)" >&2; exit 2 ;;
 	esac
-	if [ -n "$skip" ]; then
+done
+
+rc=0
+if [ -n "$skip" ]; then
+	for check in "$@"; do
+		case "$check" in
+		claude-desktop | codex-desktop | cursor-ide) ctx=manual/$check ;;
+		*) ctx=e2e/$check ;;
+		esac
 		post "$ctx" success "skipped: $skip"
+	done
+	exit 0
+fi
+
+docker_ran=0
+docker_queue=""
+for check in "$@"; do
+	if is_docker_check "$check"; then
+		case " $docker_queue " in
+		*" $check "*) ;;
+		*) docker_queue="${docker_queue:+$docker_queue }$check" ;;
+		esac
+	fi
+done
+
+for check in "$@"; do
+	if is_docker_check "$check"; then
+		if [ "$docker_ran" = 0 ]; then
+			docker_ran=1
+			# shellcheck disable=SC2086
+			run_docker_batch $docker_queue || rc=1
+		fi
 		continue
 	fi
 	echo "== $check"
 	case "$check" in
-	claude-cli) run_tests "$ctx" claude '^(TestClaudeCLI|TestClaudeSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
-	claude-mod) run_tests "$ctx" claude '^(TestClaudeModDialog|TestClaudeModAutoMode)$' ;;
-	codex) run_tests "$ctx" codex '^(TestCodexExec|TestCodexAppServer|TestCodexSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
-	opencode) run_tests "$ctx" opencode '^(TestOpencodeV2|TestOpencodeSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
-	agy) run_tests "$ctx" agy '^(TestAntigravityCLI|TestAntigravityInteractiveAsk|TestCrossHarnessBinaryE2E)$' ;;
-	cursor-cli) run_tests "$ctx" cursor-agent '^(TestCursorCLI|TestCursorInteractiveAsk|TestCrossHarnessBinaryE2E)$' ;;
-	claude-desktop) manual "$ctx" claude "Claude Desktop" ;;
-	codex-desktop) manual "$ctx" codex "Codex Desktop" ;;
-	cursor-ide) manual "$ctx" cursor "Cursor IDE" ;;
+	claude-cli) run_tests "e2e/$check" claude '^(TestClaudeCLI|TestClaudeSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
+	claude-mod) run_tests "e2e/$check" claude '^(TestClaudeModDialog|TestClaudeModAutoMode)$' ;;
+	codex) run_tests "e2e/$check" codex '^(TestCodexExec|TestCodexAppServer|TestCodexSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
+	opencode) run_tests "e2e/$check" opencode '^(TestOpencodeV2|TestOpencodeSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
+	agy) run_tests "e2e/$check" agy '^(TestAntigravityCLI|TestAntigravityInteractiveAsk|TestCrossHarnessBinaryE2E)$' ;;
+	cursor-cli) run_tests "e2e/$check" cursor-agent '^(TestCursorCLI|TestCursorCLIWithClaudeHooksCoexistence|TestCursorInteractiveAsk|TestCrossHarnessBinaryE2E)$' ;;
+	claude-desktop) manual "manual/$check" claude "Claude Desktop" ;;
+	codex-desktop) manual "manual/$check" codex "Codex Desktop" ;;
+	cursor-ide) manual "manual/$check" cursor "Cursor IDE" ;;
 	esac || rc=1
 done
 exit $rc

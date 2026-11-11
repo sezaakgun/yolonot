@@ -127,6 +127,10 @@ func sessionDecision(verb, command, sid, cwd string) error {
 			var e codexPreEntry
 			return json.Unmarshal([]byte(line), &e) != nil || ProjectSessionID(sid, e.Cwd) != project
 		})
+		_ = rewriteSessionLines(sid, "asksnap", func(line string) bool {
+			var e modEntry
+			return json.Unmarshal([]byte(line), &e) != nil || ProjectSessionID(sid, e.Cwd) != project
+		})
 		// Replay belongs to the base session; remove this project's records only.
 		return rewriteSessionLines(sid, "mod", func(line string) bool {
 			var e modEntry
@@ -180,6 +184,10 @@ func sessionDecision(verb, command, sid, cwd string) error {
 	}
 	_ = rewriteSessionLines(sid, "codexpre", func(line string) bool {
 		var e codexPreEntry
+		return json.Unmarshal([]byte(line), &e) != nil || ProjectSessionID(sid, e.Cwd) != project || removeEquivalent(e.Command)
+	})
+	_ = rewriteSessionLines(sid, "asksnap", func(line string) bool {
+		var e modEntry
 		return json.Unmarshal([]byte(line), &e) != nil || ProjectSessionID(sid, e.Cwd) != project || removeEquivalent(e.Command)
 	})
 	// Do not leave an old human/mod replay in authority over a manual update.

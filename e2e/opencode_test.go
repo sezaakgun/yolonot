@@ -46,6 +46,7 @@ export default {
 
 type opencodeServer struct {
 	url, auth string
+	v2        bool
 }
 
 func (o *opencodeServer) call(t *testing.T, method, path string, body any) obj {
@@ -58,31 +59,42 @@ func (o *opencodeServer) call(t *testing.T, method, path string, body any) obj {
 }
 
 func (o *opencodeServer) raw(method, path string, body any) (obj, error) {
+	rawBody, status, err := o.rawBytes(method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	var out obj
+	json.Unmarshal(rawBody, &out)
+	if status >= 300 {
+		return out, fmt.Errorf("%s %s: HTTP %d %v", method, path, status, out)
+	}
+	return out, nil
+}
+
+func (o *opencodeServer) rawBytes(method, path string, body any) ([]byte, int, error) {
 	var r io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
 		r = bytes.NewReader(b)
 	}
 	req, _ := http.NewRequest(method, o.url+path, r)
-	req.Header.Set("Authorization", o.auth)
+	if o.auth != "" {
+		req.Header.Set("Authorization", o.auth)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	var out obj
-	json.NewDecoder(resp.Body).Decode(&out)
-	if resp.StatusCode >= 300 {
-		return out, fmt.Errorf("%s %s: HTTP %d %v", method, path, resp.StatusCode, out)
-	}
-	return out, nil
+	rawBody, err := io.ReadAll(resp.Body)
+	return rawBody, resp.StatusCode, err
 }
 
 func startOpencode(t *testing.T, bin string, s *sandbox) *opencodeServer {
 	t.Helper()
 	cmd := exec.Command(bin, "serve", "--hostname", "127.0.0.1")
-	cmd.Dir, cmd.Env = s.Work, s.Env
+	cmd.Dir, cmd.Env = s.Work, append(s.Env, "OPENCODE_DISABLE_MODELS_FETCH=1")
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw
 	cmd.WaitDelay = 2 * time.Second
@@ -96,20 +108,25 @@ func startOpencode(t *testing.T, bin string, s *sandbox) *opencodeServer {
 	found := make(chan struct{})
 	go func() {
 		var url, auth string
+		unsecured := false
 		reported := false
 		sc := bufio.NewScanner(pr)
 		for sc.Scan() {
 			if reported {
 				continue
 			}
-			if m := listen.FindStringSubmatch(sc.Text()); m != nil {
+			line := sc.Text()
+			if m := listen.FindStringSubmatch(line); m != nil {
 				url = m[1]
 			}
-			if m := pass.FindStringSubmatch(sc.Text()); m != nil {
+			if m := pass.FindStringSubmatch(line); m != nil {
 				auth = "Basic " + base64.StdEncoding.EncodeToString([]byte("opencode:"+m[1]))
 			}
-			if url != "" && auth != "" {
-				o.url, o.auth = url, auth
+			if strings.Contains(line, "server is unsecured") {
+				unsecured = true
+			}
+			if url != "" && (auth != "" || unsecured) {
+				o.url, o.auth, o.v2 = url, auth, auth != ""
 				close(found)
 				reported = true
 			}
@@ -136,22 +153,27 @@ func TestOpencodeV2(t *testing.T) {
 	s.Install("opencode")
 	s.write(".config/opencode/plugins/zz-e2e.ts", smokePlugin)
 	srv := startOpencode(t, bin, s)
+	if !srv.v2 {
+		t.Skip("installed opencode binary is V1 (1.x); V2 permission/tool hook server API is covered by TestOpencodeV2PluginNativePermissionLifecycle")
+	}
 	for _, c := range []struct {
-		name, token, host, reply string
-		marker                   bool
+		name, token, host, reply, wantSource string
+		marker                               bool
 	}{
-		{"allow", "ALLOWED", "ask", "", true},
-		{"deny", "DENIED", "allow", "", false},
-		{"ask-approved", "ASKED", "allow", "once", true},
-		{"ask-rejected", "ASKED", "allow", "reject", false},
-		{"host-deny", "ALLOWED", "deny", "", false},
+		{"allow", "ALLOWED", "ask", "", "", true},
+		{"deny", "DENIED", "allow", "", "", false},
+		{"ask-approved", "ASKED", "allow", "once", "allow_once", true},
+		{"ask-always", "ASKED", "allow", "always", "ask_approved", true},
+		{"ask-rejected", "ASKED", "allow", "reject", "ask_rejected", false},
+		{"host-deny", "ALLOWED", "deny", "", "", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			sess := srv.call(t, "POST", "/api/session", obj{"location": obj{"directory": s.Work}, "permissions": []any{obj{"action": "shell", "resource": "*", "effect": c.host}}})
 			sid := sess["data"].(obj)["id"].(string)
 			marker := filepath.Join(s.Work, c.token+"-"+c.name+".marker")
 			result := filepath.Join(s.Home, c.name+"-result.json")
-			spec, _ := json.Marshal(obj{"command": "touch " + marker, "id": "call_" + strings.ReplaceAll(c.name, "-", "_"), "file": result})
+			cmdText := "touch " + marker
+			spec, _ := json.Marshal(obj{"command": cmdText, "id": "call_" + strings.ReplaceAll(c.name, "-", "_"), "file": result})
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
@@ -181,6 +203,22 @@ func TestOpencodeV2(t *testing.T) {
 			if _, err := os.Stat(marker); (err == nil) != c.marker {
 				t.Errorf("marker exists=%v, want %v; result=%s", err == nil, c.marker, out)
 			}
+			if c.wantSource != "" {
+				logRaw, _ := os.ReadFile(filepath.Join(s.Home, ".yolonot", "decisions.jsonl"))
+				humanMatches := 0
+				for _, line := range strings.Split(strings.TrimSpace(string(logRaw)), "\n") {
+					var entry map[string]any
+					if json.Unmarshal([]byte(line), &entry) == nil && entry["session_id"] == sid && entry["command"] == cmdText && entry["layer"] == "human" {
+						humanMatches++
+						if entry["source"] != c.wantSource {
+							t.Errorf("human decision source=%v, want %s; entry=%s", entry["source"], c.wantSource, line)
+						}
+					}
+				}
+				if humanMatches != 1 {
+					t.Errorf("expected exactly 1 human decision entry (%s) for %s, got %d; log=\n%s", c.wantSource, c.name, humanMatches, logRaw)
+				}
+			}
 		})
 	}
 }
@@ -192,6 +230,29 @@ func TestOpencodeSkillDiscovery(t *testing.T) {
 		t.Fatalf("install --skill-only: %v\n%s", err, out)
 	}
 	srv := startOpencode(t, bin, s)
+	if !srv.v2 {
+		raw, status, err := srv.rawBytes("GET", "/skill", nil)
+		if err != nil || status >= 300 {
+			t.Fatalf("GET /skill failed (status=%d): %v", status, err)
+		}
+		var skills []struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &skills); err != nil {
+			t.Fatalf("unmarshal /skill: %v\n%s", err, string(raw))
+		}
+		seen := map[string]bool{}
+		for _, sk := range skills {
+			seen[sk.Name] = true
+		}
+		if seen["no-such-skill-e2e"] {
+			t.Fatal("control: unknown skill was reported")
+		}
+		if !seen["yolonot"] {
+			t.Fatalf("opencode did not find the yolonot skill in %s", string(raw))
+		}
+		return
+	}
 	sid := srv.call(t, "POST", "/api/session", obj{"location": obj{"directory": s.Work}})["data"].(obj)["id"].(string)
 	if _, err := srv.raw("POST", "/api/experimental/session/"+sid+"/skill", obj{"id": "no-such-skill-e2e"}); err == nil {
 		t.Fatal("control: unknown skill was accepted, so this check proves nothing")

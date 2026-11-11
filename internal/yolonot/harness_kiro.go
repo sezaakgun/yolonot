@@ -40,7 +40,7 @@ func newKiroHarness() *KiroHarness {
 		harnessName:  "kiro",
 		events:       []string{"preToolUse", "postToolUse"},
 		matcher:      "execute_bash",
-		rootDefaults: map[string]interface{}{"name": "default"},
+		rootDefaults: map[string]interface{}{"name": "default", "tools": []interface{}{"*"}},
 		entryExtras:  map[string]interface{}{"timeout_ms": 60000.0},
 		postInstall: func(settingsPath string) error {
 			cliSettingsPath := filepath.Join(filepath.Dir(filepath.Dir(settingsPath)), "settings", "cli.json")

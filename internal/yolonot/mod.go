@@ -121,8 +121,34 @@ func modAppend(sessionID string, e modEntry) {
 	AppendLine(sessionID, "mod", string(b))
 }
 
+func askSnapAppend(sessionID string, e modEntry) {
+	b, err := json.Marshal(e)
+	if err != nil {
+		return
+	}
+	AppendLine(sessionID, "asksnap", string(b))
+}
+
 func modRecord(decision, layer, reason string) {
-	if !modRun || modToolUseID == "" {
+	if modToolUseID == "" || modSessionID == "" {
+		return
+	}
+	if !modRun {
+		// Pin the dialog-time snapshot and BypassSandbox state for plugin shims
+		// that resolve human prompts via `yolonot mod resolve` without setting
+		// YOLONOT_MOD=1, while keeping classic `<session>.mod` untouched.
+		if decision != ActionAsk || modCommand == "" {
+			return
+		}
+		binding, hashes := modBinding, modApprovalHashes
+		if binding == "" && len(hashes) == 0 {
+			binding, hashes = modCommandSnapshot(modCommand, modCwd)
+		}
+		askSnapAppend(modSessionID, modEntry{
+			ID: modToolUseID, Command: modCommand, Cwd: modCwd,
+			Binding: binding, ApprovalHashes: hashes,
+			BypassSandbox: currentBypassSandbox, Decision: decision, Layer: layer, Reason: reason,
+		})
 		return
 	}
 	modAppend(modSessionID, modEntry{ID: modToolUseID, Command: modCommand, Cwd: modCwd, Binding: modBinding, ApprovalHashes: modApprovalHashes,
@@ -194,11 +220,19 @@ func modLookupBound(sessionID, toolUseID, command, cwd string) *modEntry {
 }
 
 func modLookup(sessionID, toolUseID string) *modEntry {
+	return modLookupSuffix(sessionID, "mod", toolUseID)
+}
+
+func askSnapLookup(sessionID, toolUseID string) *modEntry {
+	return modLookupSuffix(sessionID, "asksnap", toolUseID)
+}
+
+func modLookupSuffix(sessionID, suffix, toolUseID string) *modEntry {
 	if toolUseID == "" {
 		return nil
 	}
 	var found *modEntry
-	for _, l := range ReadLines(sessionID, "mod") {
+	for _, l := range ReadLines(sessionID, suffix) {
 		var e modEntry
 		if json.Unmarshal([]byte(l), &e) == nil && e.ID == toolUseID {
 			c := e
@@ -275,12 +309,15 @@ func dropLineOrVariant(sessionID, suffix, command string) bool {
 }
 
 type modResolve struct {
-	SessionID string `json:"session_id"`
-	ToolUseID string `json:"tool_use_id"`
-	Cwd       string `json:"cwd"`
-	Command   string `json:"command"`
-	Verdict   string `json:"verdict"`
-	Reason    string `json:"reason"`
+	Harness       string `json:"harness,omitempty"`
+	SessionID     string `json:"session_id"`
+	ToolUseID     string `json:"tool_use_id"`
+	Cwd           string `json:"cwd"`
+	Command       string `json:"command"`
+	Verdict       string `json:"verdict"`
+	Reason        string `json:"reason"`
+	BypassSandbox bool   `json:"bypass_sandbox,omitempty"`
+	Completed     bool   `json:"completed,omitempty"`
 }
 
 func cmdMod(args []string) {
@@ -295,18 +332,25 @@ func cmdMod(args []string) {
 			fmt.Fprintln(os.Stderr, "yolonot mod resolve: expects JSON on stdin: session_id, tool_use_id, cwd, command, verdict")
 			os.Exit(2)
 		}
+		if r.Harness != "" && os.Getenv("YOLONOT_HARNESS") == "" {
+			os.Setenv("YOLONOT_HARNESS", r.Harness)
+		}
 		proj := ProjectSessionID(r.SessionID, r.Cwd)
 		cfg := LoadConfig()
 		attachOutsideRoot = cfg.AttachOutsideRoot
 		fastallow.AddWrappers(cfg.Wrappers...)
 		previous := modLookup(r.SessionID, r.ToolUseID)
-		currentBypassSandbox = previous != nil && previous.BypassSandbox
+		if previous == nil {
+			previous = askSnapLookup(r.SessionID, r.ToolUseID)
+		}
+		currentBypassSandbox = r.BypassSandbox || (previous != nil && previous.BypassSandbox)
 		binding, hashes := modCommandSnapshot(r.Command, r.Cwd)
 		entry := modEntry{ID: r.ToolUseID, Command: r.Command, Cwd: r.Cwd,
-			Binding: binding, ApprovalHashes: hashes, BypassSandbox: currentBypassSandbox, Layer: "human", Grant: r.Verdict}
+			Binding: binding, ApprovalHashes: hashes, BypassSandbox: currentBypassSandbox, Completed: r.Completed, Layer: "human", Grant: r.Verdict}
 		// A human answer is about the snapshot originally judged. Do not
-		// silently bind it to script edits made while the dialog was open.
-		snapshotUnchanged := true
+		// silently bind it to script edits made while the dialog was open,
+		// or to withheld outside-root scripts whose contents could not be pinned.
+		snapshotUnchanged := binding != ""
 		if previous != nil && previous.Command == r.Command && previous.Cwd == r.Cwd {
 			snapshotUnchanged = previous.Binding != "" && previous.Binding == binding
 			entry.Binding = previous.Binding
@@ -315,7 +359,9 @@ func cmdMod(args []string) {
 		switch r.Verdict {
 		case "allow-once":
 			dropLine(proj, "asked", r.Command)
-			AppendLine(proj, "once", r.Command)
+			if !r.Completed {
+				AppendLine(proj, "once", r.Command)
+			}
 			LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "allow", Source: "allow_once", ToolUseID: r.ToolUseID})
 			entry.Decision, entry.Reason = "allow", "allowed once"
 		case "allow-session":
@@ -329,11 +375,14 @@ func cmdMod(args []string) {
 			} else {
 				entry.Grant = "allow-once"
 				dropLine(proj, "asked", r.Command)
-				AppendLine(proj, "once", r.Command)
+				if !r.Completed {
+					AppendLine(proj, "once", r.Command)
+				}
 				LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "allow", Source: "allow_once", ToolUseID: r.ToolUseID})
 				entry.Decision, entry.Reason = "allow", "allowed once (script modified since prompt)"
 			}
 		case "deny":
+			dropLine(proj, "asked", r.Command)
 			AppendLine(proj, "denied", r.Command)
 			LogDecision(DecisionEntry{SessionID: r.SessionID, Command: r.Command, Cwd: r.Cwd, Layer: "human", Decision: "deny", Source: "ask_rejected", ToolUseID: r.ToolUseID})
 			entry.Decision, entry.Reason = "deny", "rejected by the user"

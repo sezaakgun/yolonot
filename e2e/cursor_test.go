@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -176,6 +178,88 @@ func TestCursorInteractiveAsk(t *testing.T) {
 				yes = []string{"y"}
 			}
 			interactiveAsk(t, s, s.Marker, x, "Hook requested approval", yes, []string{"n"}, func(string) {})
+		})
+	}
+}
+
+// TestCursorCLIWithClaudeHooksCoexistence verifies that when Claude >= 2.1.295
+// exec-form hooks (`"args": ["hook", "--harness", "claude"]`) exist in
+// ~/.claude/settings.json, `cursor-agent` (which imports ~/.claude/settings.json
+// and strips `args`) neither fails with `invalid JSON` nor double-logs decisions
+// alongside ~/.cursor/hooks.json, and also enforces workspace .yolonot rules
+// when only Claude hooks are installed.
+func TestCursorCLIWithClaudeHooksCoexistence(t *testing.T) {
+	bin := hostBinary(t, "cursor-agent")
+	hostVersion(t, bin, "--version")
+
+	installClaudeExecHooks := func(t *testing.T, s *sandbox) {
+		t.Helper()
+		stubDir := filepath.Join(s.Home, "claude-stub-bin")
+		if err := os.MkdirAll(stubDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stubPath := filepath.Join(stubDir, "claude")
+		if err := os.WriteFile(stubPath, []byte("#!/bin/sh\necho '2.1.319 (Claude Code)'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		origEnv := append([]string(nil), s.Env...)
+		for i, kv := range s.Env {
+			if strings.HasPrefix(kv, "PATH=") {
+				s.Env[i] = "PATH=" + stubDir + string(os.PathListSeparator) + strings.TrimPrefix(kv, "PATH=")
+			}
+		}
+		s.Install("claude")
+		s.Env = origEnv
+
+		settings, err := os.ReadFile(s.path(".claude/settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(settings), `"args"`) {
+			t.Fatalf("expected exec-form args in .claude/settings.json, got:\n%s", settings)
+		}
+	}
+
+	for _, c := range []struct {
+		name          string
+		policy        string
+		installCursor bool
+		marker        bool
+	}{
+		{name: "coexist-allow", policy: "allow", installCursor: true, marker: true},
+		{name: "coexist-deny", policy: "deny", installCursor: true, marker: false},
+		{name: "claude-only-deny", policy: "deny", installCursor: false, marker: false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newSandbox(t, "")
+			// Scope rules to the workspace .yolonot so we also verify cwd resolution
+			// when Cursor sends `"cwd": ""` on imported Claude preToolUse payloads.
+			s.write(filepath.Join(s.Work, ".yolonot"), c.policy+"-cmd touch *\n")
+			backend := newCursorBackend(t, s.Command(), s.Work)
+			s.Env = append(s.Env, "CURSOR_API_ENDPOINT="+backend.URL, "AGENT_CLI_E2E=true", "TERM=xterm-256color")
+			installClaudeExecHooks(t, s)
+			if c.installCursor {
+				s.Install("cursor")
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bin, cursorArgs(s, backend, "--print", "--force", "--output-format", "stream-json", "Run the fixture command.")...)
+			cmd.Dir, cmd.Env = s.Work, s.Env
+			out, _ := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("cursor-agent timed out\n%s", tail(string(out)))
+			}
+			if backend.runs.Load() == 0 {
+				t.Fatalf("cursor-agent never reached the fake backend\n%s", tail(string(out)))
+			}
+			if strings.Contains(string(out), "invalid JSON") {
+				t.Fatalf("cursor-agent rejected hook output as invalid JSON:\n%s", tail(string(out)))
+			}
+			s.expect(c.marker, c.policy, string(out))
+			if got := s.Decisions(); len(got) != 1 {
+				t.Fatalf("expected exactly 1 decision entry (no duplicate hook run), got %d: %v", len(got), got)
+			}
 		})
 	}
 }

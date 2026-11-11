@@ -444,3 +444,144 @@ func TestDiscoverExtendedHarnessesAndPayloadEdgeCases(t *testing.T) {
 		t.Errorf("expected ProjectSessionID(%d chars) to remain valid (<=128 chars), got len=%d (%q)", len(longSID), len(projSID), projSID)
 	}
 }
+
+func TestDiscoverManagedAndExtendedHarnessConfigs(t *testing.T) {
+	home, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	origGOOS := discoverGOOS
+	discoverGOOS = "darwin"
+	defer func() { discoverGOOS = origGOOS }()
+
+	sysRoot := os.Getenv("YOLONOT_SYSTEM_ROOT")
+	repo := filepath.Join(home, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeAbs := func(p, content string) {
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 1. Mirror tool_approvals.json using "entries" (both argv_prefix and exact_arguments)
+	writeAbs(filepath.Join(home, ".mirror", "tool_approvals.json"), `{
+  "entries": [
+    {"tool": "bash", "kind": "argv_prefix", "argv": ["pytest", "-q"]},
+    {"tool": "bash", "kind": "exact_arguments", "args": "{\"command\":\"make lint\"}"}
+  ]
+}`)
+
+	// 2. Managed settings across qwen, copilot, grok, devin, kiro, kilo, amp, crush
+	writeAbs(filepath.Join(sysRoot, "Library", "Application Support", "QwenCode", "settings.json"), `{"approvalMode":"yolo"}`)
+	writeAbs(filepath.Join(sysRoot, "Library", "Application Support", "GitHubCopilot", "managed-settings.json"), `{"defaultPermissionMode":"allow-all"}`)
+	writeAbs(filepath.Join(sysRoot, "etc", "grok", "managed_config.toml"), "[ui]\npermission_mode = \"always-approve\"\n")
+	writeAbs(filepath.Join(sysRoot, "Library", "Application Support", "Devin", "system.json"), `{"permissions":{"allow":["Exec(go vet *)"]}}`)
+	writeAbs(filepath.Join(sysRoot, "Library", "Application Support", "Kiro", "managed-settings.json"), `{"policyPreset":["allow-all"]}`)
+	writeAbs(filepath.Join(sysRoot, "Library", "Application Support", "kilo", "kilo.json"), `{"permission":{"bash":"allow"}}`)
+	writeAbs(filepath.Join(sysRoot, "Library", "Application Support", "ampcode", "managed-settings.json"), `{"amp.dangerouslyAllowAll":true}`)
+	writeAbs(filepath.Join(sysRoot, "etc", "crush", "crush.json"), `{"permissions":{"allowed_tools":["bash"]}}`)
+
+	// 3. Crush .crush/crush.json & crushrc
+	writeAbs(filepath.Join(repo, ".crush", "crush.json"), `{"options":{"disabled_tools":["bash"]}}`)
+	writeAbs(filepath.Join(home, ".config", "crush", "crushrc"), "permissions allow bash\n")
+
+	// 4. Kiro V3 permissions.yaml, sandbox.json, and V3 permissions.rules in agents/*.json
+	//    (including non-shell tools that must NOT become allow-cmd rules, and wildcard "*")
+	writeAbs(filepath.Join(home, ".kiro", "settings", "permissions.yaml"), "allow:\n  - \"npm run build\"\n")
+	writeAbs(filepath.Join(home, ".kiro", "settings", "sandbox.json"), `{"enabled":false}`)
+	writeAbs(filepath.Join(home, ".kiro", "agents", "v3.json"), `{
+  "permissions": {
+    "allow": ["fs_read", "@git", "execute_bash(cargo fmt *)"],
+    "rules": [
+      {"tool": "execute_bash", "action": "allow", "command": "cargo check"},
+      {"tool": "shell", "action": "ask", "pattern": "*"}
+    ]
+  }
+}`)
+
+	// 5. Hermes profile config (including commented-out / unrelated mode keys that must not alert)
+	writeAbs(filepath.Join(home, ".hermes", "profiles", "ci", "config.yaml"), "approvals:\n  unattended_mode: approve\n  command_allowlist:\n    - \"ruff check\"\n")
+	writeAbs(filepath.Join(home, ".hermes", "config.yaml"), "# unattended_mode: approve\nvim_mode: false\n")
+
+	// 6. OpenHands conversation base_state.json
+	writeAbs(filepath.Join(home, ".openhands", "conversations", "conv-1", "base_state.json"), `{"confirmation_policy":{"kind":"NeverConfirm"}}`)
+
+	// 7. Muse project .muse/settings.json custom profile
+	writeAbs(filepath.Join(repo, ".muse", "settings.json"), `{
+  "permissions": {
+    "default_profile": "ci",
+    "profiles": {
+      "ci": {"approval": "allow_all", "filesystem": "unrestricted"}
+    }
+  }
+}`)
+
+	// 8. Antigravity ~/.gemini/antigravity-cli/settings.json and <repo>/.agents/settings.json
+	writeAbs(filepath.Join(home, ".gemini", "antigravity-cli", "settings.json"), `{"permissionGrants":{"allow":["command(git diff)"]}}`)
+	writeAbs(filepath.Join(repo, ".agents", "settings.json"), `{"permissionGrants":{"deny":["command(rm -rf /)"]}}`)
+
+	summary := DiscoverHostPermissions(repo)
+	byHarnessScope := map[string]bool{}
+	bySuggested := map[string]bool{}
+	for _, f := range summary.HostFiles {
+		byHarnessScope[f.Harness+":"+f.Scope] = true
+		for _, r := range f.Rules {
+			bySuggested[f.Harness+":"+r.SuggestedRule] = true
+		}
+	}
+
+	for _, wantHS := range []string{
+		"qwen:managed",
+		"copilot:managed",
+		"grok:managed",
+		"devin:managed",
+		"kiro:managed",
+		"kilo:managed",
+		"amp:managed",
+		"crush:managed",
+		"crush:project",
+		"crush:user",
+		"kiro:user",
+		"hermes:user",
+		"openhands:user",
+		"muse:project",
+		"antigravity:user",
+		"antigravity:project",
+	} {
+		if !byHarnessScope[wantHS] {
+			t.Errorf("missing discovered host file for %s; got %v", wantHS, byHarnessScope)
+		}
+	}
+
+	for _, wantRule := range []string{
+		"mirror:allow-cmd pytest -q *",
+		"mirror:allow-cmd make lint",
+		"devin:allow-cmd go vet *",
+		"kiro:allow-cmd npm run build",
+		"kiro:allow-cmd cargo check *",
+		"kiro:allow-cmd cargo fmt *",
+		"kiro:ask-cmd *",
+		"hermes:allow-cmd ruff check",
+		"antigravity:allow-cmd git diff",
+		"antigravity:deny-cmd rm -rf /",
+	} {
+		if !bySuggested[wantRule] {
+			t.Errorf("missing discovered rule %s; got %v", wantRule, bySuggested)
+		}
+	}
+	for _, unwanted := range []string{"kiro:allow-cmd fs_read", "kiro:allow-cmd @git", "kiro:ask-cmd * *"} {
+		if bySuggested[unwanted] {
+			t.Errorf("unexpected bogus rule %s in %v", unwanted, bySuggested)
+		}
+	}
+	for _, f := range summary.HostFiles {
+		if f.Harness == "hermes" && strings.HasSuffix(f.Path, filepath.Join(".hermes", "config.yaml")) && len(f.PolicyAlerts) > 0 {
+			t.Errorf("commented-out or unrelated YAML keys in %s triggered false alerts: %+v", f.Path, f.PolicyAlerts)
+		}
+	}
+}

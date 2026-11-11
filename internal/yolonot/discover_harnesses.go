@@ -1,27 +1,120 @@
 package yolonot
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 )
 
+func programDataDir() string {
+	if pd := os.Getenv("ProgramData"); pd != "" {
+		return pd
+	}
+	return `C:\ProgramData`
+}
+
+func managedConfigDir(darwinSub, winSub, linuxSub string) string {
+	switch discoverGOOS {
+	case "darwin":
+		if darwinSub != "" {
+			return sysPath("Library", "Application Support", darwinSub)
+		}
+		return sysPath("etc", linuxSub)
+	case "windows":
+		return sysPath(programDataDir(), winSub)
+	default:
+		return sysPath("etc", linuxSub)
+	}
+}
+
+func crushManagedFiles() []string {
+	return []string{filepath.Join(managedConfigDir("", "crush", "crush"), "crush.json")}
+}
+
+func qwenManagedFiles() []string {
+	return []string{filepath.Join(managedConfigDir("QwenCode", "qwen-code", "qwen-code"), "settings.json")}
+}
+
+func copilotManagedFiles() []string {
+	files := []string{filepath.Join(managedConfigDir("GitHubCopilot", "GitHubCopilot", "github-copilot"), "managed-settings.json")}
+	if discoverGOOS != "darwin" && discoverGOOS != "windows" {
+		files = append(files, globSorted(sysPath("etc", "github-copilot", "policy.d", "*.json"))...)
+	}
+	return files
+}
+
+func grokManagedFiles() []string {
+	dir := managedConfigDir("", "grok", "grok")
+	return []string{
+		filepath.Join(dir, "requirements.toml"),
+		filepath.Join(dir, "managed_config.toml"),
+		filepath.Join(dir, "config.toml"),
+	}
+}
+
+func devinManagedFiles() []string {
+	return []string{filepath.Join(managedConfigDir("Devin", "Devin", "devin"), "system.json")}
+}
+
+func kiroManagedFiles() []string {
+	return []string{filepath.Join(managedConfigDir("Kiro", "Kiro", "kiro"), "managed-settings.json")}
+}
+
+func kiloManagedFiles() []string {
+	dir := managedConfigDir("kilo", "kilo", "kilo")
+	return []string{
+		filepath.Join(dir, "kilo.json"),
+		filepath.Join(dir, "kilo.jsonc"),
+		filepath.Join(dir, "opencode.json"),
+		filepath.Join(dir, "opencode.jsonc"),
+	}
+}
+
+func ampManagedFiles() []string {
+	return []string{filepath.Join(managedConfigDir("ampcode", "ampcode", "ampcode"), "managed-settings.json")}
+}
+
+const maxHistoricalSessionConfigs = 20
+
+func capTailPaths(paths []string, limit int) []string {
+	if len(paths) <= limit {
+		return paths
+	}
+	return paths[len(paths)-limit:]
+}
+
 func discoverExtendedHarness(name, home string, projDirs []string, addFile func(*DiscoveredHostFile)) {
 	switch name {
 	case "crush":
+		for _, p := range crushManagedFiles() {
+			addFile(parseCrushConfigFile("managed", p))
+		}
 		if h := GetHarness("crush"); h != nil {
 			if p := h.SettingsPath(); p != "" {
 				addFile(parseCrushConfigFile("user", p))
+				addFile(parseCrushRCFile("user", filepath.Join(filepath.Dir(p), "crushrc")))
 			}
+		}
+		if home != "" {
+			addFile(parseCrushConfigFile("user", filepath.Join(home, ".local", "share", "crush", "crush.json")))
+			addFile(parseCrushRCFile("user", filepath.Join(home, ".config", "crush", "crushrc")))
 		}
 		for _, d := range projDirs {
 			addFile(parseCrushConfigFile("project", filepath.Join(d, "crush.json")))
 			addFile(parseCrushConfigFile("project", filepath.Join(d, ".crush.json")))
+			addFile(parseCrushConfigFile("project", filepath.Join(d, ".crush", "crush.json")))
+			addFile(parseCrushRCFile("project", filepath.Join(d, ".crushrc")))
 		}
 
 	case "qwen":
+		for _, p := range qwenManagedFiles() {
+			addFile(parseQwenSettingsFile("managed", p))
+		}
 		if dir := qwenConfigDir(); dir != "" {
 			addFile(parseQwenSettingsFile("user", filepath.Join(dir, "settings.json")))
 		}
@@ -44,6 +137,9 @@ func discoverExtendedHarness(name, home string, projDirs []string, addFile func(
 		}
 
 	case "copilot":
+		for _, p := range copilotManagedFiles() {
+			addFile(parseCopilotSettingsFile("managed", p))
+		}
 		if dir := copilotConfigDir(); dir != "" {
 			addFile(parseCopilotSettingsFile("user", filepath.Join(dir, "settings.json")))
 		}
@@ -53,9 +149,15 @@ func discoverExtendedHarness(name, home string, projDirs []string, addFile func(
 		}
 
 	case "grok":
+		for _, p := range grokManagedFiles() {
+			addFile(parseGrokTOMLFile("managed", p))
+		}
 		if dir := grokConfigDir(); dir != "" {
 			for _, fn := range []string{"requirements.toml", "managed_config.toml", "config.toml"} {
 				addFile(parseGrokTOMLFile("user", filepath.Join(dir, fn)))
+			}
+			for _, p := range capTailPaths(globSorted(filepath.Join(dir, "sessions", "*", "permission.toml")), maxHistoricalSessionConfigs) {
+				addFile(parseGrokTOMLFile("user", p))
 			}
 		}
 		for _, d := range projDirs {
@@ -70,6 +172,9 @@ func discoverExtendedHarness(name, home string, projDirs []string, addFile func(
 	case "hermes":
 		if dir := hermesConfigDir(); dir != "" {
 			addFile(parseHermesConfigFile("user", filepath.Join(dir, "config.yaml")))
+			for _, p := range globSorted(filepath.Join(dir, "profiles", "*", "config.yaml")) {
+				addFile(parseHermesConfigFile("user", p))
+			}
 		}
 
 	case "kimi":
@@ -78,6 +183,9 @@ func discoverExtendedHarness(name, home string, projDirs []string, addFile func(
 		}
 
 	case "devin":
+		for _, p := range devinManagedFiles() {
+			addFile(parseDevinConfigFile("managed", p))
+		}
 		if dir := devinConfigDir(); dir != "" {
 			addFile(parseDevinConfigFile("user", filepath.Join(dir, "config.json")))
 		}
@@ -91,6 +199,10 @@ func discoverExtendedHarness(name, home string, projDirs []string, addFile func(
 			addFile(parseMuseSettingsFile("user", filepath.Join(dir, "settings.json")))
 			addFile(parseMuseApprovalPolicyFile("user", filepath.Join(dir, "approval-policy.json")))
 		}
+		for _, d := range projDirs {
+			addFile(parseMuseSettingsFile("project", filepath.Join(d, ".muse", "settings.json")))
+			addFile(parseMuseApprovalPolicyFile("project", filepath.Join(d, ".muse", "approval-policy.json")))
+		}
 
 	case "goose":
 		if dir := gooseConfigDir(); dir != "" {
@@ -101,16 +213,29 @@ func discoverExtendedHarness(name, home string, projDirs []string, addFile func(
 	case "openhands":
 		if dir := openhandsConfigDir(); dir != "" {
 			addFile(parseOpenhandsSettingsFile("user", filepath.Join(dir, "agent_settings.json")))
+			for _, p := range capTailPaths(globSorted(filepath.Join(dir, "conversations", "*", "base_state.json")), maxHistoricalSessionConfigs) {
+				addFile(parseOpenhandsConversationStateFile("user", p))
+			}
 		}
 
 	case "kiro":
+		for _, p := range kiroManagedFiles() {
+			addFile(parseKiroCLISettingsFile("managed", p))
+		}
 		if dir := kiroConfigDir(); dir != "" {
 			addFile(parseKiroCLISettingsFile("user", filepath.Join(dir, "settings", "cli.json")))
+			addFile(parseKiroPermissionsFile("user", filepath.Join(dir, "settings", "permissions.yaml")))
+			addFile(parseKiroPermissionsFile("user", filepath.Join(dir, "settings", "permissions.json")))
+			addFile(parseKiroSandboxFile("user", filepath.Join(dir, "settings", "sandbox.json")))
 			for _, p := range globSorted(filepath.Join(dir, "agents", "*.json")) {
 				addFile(parseKiroAgentFile("user", p))
 			}
 		}
 		for _, d := range projDirs {
+			addFile(parseKiroCLISettingsFile("project", filepath.Join(d, ".kiro", "settings", "cli.json")))
+			addFile(parseKiroPermissionsFile("project", filepath.Join(d, ".kiro", "settings", "permissions.yaml")))
+			addFile(parseKiroPermissionsFile("project", filepath.Join(d, ".kiro", "settings", "permissions.json")))
+			addFile(parseKiroSandboxFile("project", filepath.Join(d, ".kiro", "settings", "sandbox.json")))
 			for _, p := range globSorted(filepath.Join(d, ".kiro", "agents", "*.json")) {
 				addFile(parseKiroAgentFile("project", p))
 			}
@@ -122,6 +247,9 @@ func discoverExtendedHarness(name, home string, projDirs []string, addFile func(
 		}
 
 	case "kilo":
+		for _, p := range kiloManagedFiles() {
+			addFile(parseKiloConfigFile("managed", p))
+		}
 		if dir := kiloConfigDir(); dir != "" {
 			for _, fn := range []string{"kilo.json", "kilo.jsonc", "opencode.json", "opencode.jsonc", "config.json"} {
 				addFile(parseKiloConfigFile("user", filepath.Join(dir, fn)))
@@ -157,6 +285,9 @@ func discoverExtendedHarness(name, home string, projDirs []string, addFile func(
 		}
 
 	case "amp":
+		for _, p := range ampManagedFiles() {
+			addFile(parseAmpSettingsFile("managed", p))
+		}
 		if dir := ampConfigDir(); dir != "" {
 			addFile(parseAmpSettingsFile("user", filepath.Join(dir, "settings.json")))
 		}
@@ -223,6 +354,43 @@ func parseCrushConfigFile(scope, path string) *DiscoveredHostFile {
 					})
 				}
 			}
+		}
+	}
+	return out
+}
+
+func parseCrushRCFile(scope, path string) *DiscoveredHostFile {
+	data, err := readDiscoveryFile(path, scope == "project")
+	if err != nil {
+		return nil
+	}
+	out := &DiscoveredHostFile{Harness: "crush", Scope: scope, Path: path}
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == "permissions allow bash" || line == "permissions allow *" {
+			out.Rules = append(out.Rules, DiscoveredRule{
+				Action:        "allow",
+				Raw:           line,
+				SuggestedRule: "allow-cmd *",
+			})
+			out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
+				Category: "host_permissions",
+				Detail:   fmt.Sprintf("%q in %s (auto-approves bash commands)", line, path),
+			})
+		} else if line == "permissions deny bash" {
+			out.Rules = append(out.Rules, DiscoveredRule{
+				Action:        "deny",
+				Raw:           line,
+				SuggestedRule: "deny-cmd *",
+			})
+		} else if line == "--yolo" || line == "yolo true" {
+			out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
+				Category: "host_permissions",
+				Detail:   fmt.Sprintf("%q in %s (enables Crush yolo mode)", line, path),
+			})
 		}
 	}
 	return out
@@ -473,6 +641,73 @@ func sliceAny(v interface{}) []interface{} {
 	return s
 }
 
+func stripYAMLComment(line string) string {
+	inSingle, inDouble := false, false
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle && (i == 0 || line[i-1] != '\\') {
+				inDouble = !inDouble
+			}
+		case '#':
+			if !inSingle && !inDouble && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+				return line[:i]
+			}
+		}
+	}
+	return line
+}
+
+func hasYAMLScalar(text, section, key string, values ...string) bool {
+	inSection := section == ""
+	secIndent := 0
+	for _, rawLine := range strings.Split(text, "\n") {
+		line := strings.TrimRight(stripYAMLComment(rawLine), " \t\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if section != "" {
+			if indent <= secIndent && inSection && trimmed != section+":" {
+				inSection = false
+			}
+			if trimmed == section+":" {
+				inSection = true
+				secIndent = indent
+				continue
+			}
+			if !inSection {
+				continue
+			}
+		}
+		if !strings.HasPrefix(trimmed, key+":") {
+			continue
+		}
+		val := strings.TrimSpace(strings.TrimPrefix(trimmed, key+":"))
+		val = strings.Trim(val, `"'`)
+		for _, want := range values {
+			if val == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasYAMLTokenOutsideComments(text, token string) bool {
+	for _, rawLine := range strings.Split(text, "\n") {
+		if strings.Contains(stripYAMLComment(rawLine), token) {
+			return true
+		}
+	}
+	return false
+}
+
 func parseDeepseekCordisFile(scope, path string) *DiscoveredHostFile {
 	data, err := readDiscoveryFile(path, scope == "project")
 	if err != nil {
@@ -480,13 +715,13 @@ func parseDeepseekCordisFile(scope, path string) *DiscoveredHostFile {
 	}
 	text := string(data)
 	out := &DiscoveredHostFile{Harness: "deepseek", Scope: scope, Path: path}
-	if strings.Contains(text, "danger-full-access") {
+	if hasYAMLTokenOutsideComments(text, "danger-full-access") {
 		out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
 			Category: "host_sandbox",
 			Detail:   fmt.Sprintf("danger-full-access configured in %s (disables DSH OS sandbox or permission gate)", path),
 		})
 	}
-	if strings.Contains(text, "policy: never") || strings.Contains(text, `policy: "never"`) {
+	if hasYAMLScalar(text, "", "policy", "never") {
 		out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
 			Category: "host_permissions",
 			Detail:   fmt.Sprintf("approval policy is never in %s", path),
@@ -508,13 +743,21 @@ func parseHermesConfigFile(scope, path string) *DiscoveredHostFile {
 	for _, item := range extractYAMLList(text, "deny") {
 		out.Rules = append(out.Rules, buildSuggestedShellRule("deny", "approvals.deny="+item, item, true))
 	}
-	if strings.Contains(text, "mode: off") || strings.Contains(text, "mode: \"off\"") || strings.Contains(text, "mode: false") {
+	if hasYAMLScalar(text, "approvals", "mode", "off", "false") {
 		out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
 			Category: "host_permissions",
 			Detail:   fmt.Sprintf("approvals.mode is off/false in %s", path),
 		})
 	}
-	if strings.Contains(text, "backend: local") || strings.Contains(text, `backend: "local"`) {
+	for _, k := range []string{"cron_mode", "single_query_mode", "unattended_mode"} {
+		if hasYAMLScalar(text, "approvals", k, "approve") || hasYAMLScalar(text, "", k, "approve") {
+			out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
+				Category: "host_permissions",
+				Detail:   fmt.Sprintf("approvals.%s is approve in %s", k, path),
+			})
+		}
+	}
+	if hasYAMLScalar(text, "terminal", "backend", "local") || hasYAMLScalar(text, "", "backend", "local") {
 		out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
 			Category: "host_sandbox",
 			Detail:   fmt.Sprintf("terminal.backend is local in %s (unsandboxed host execution)", path),
@@ -675,6 +918,31 @@ func parseMuseSettingsFile(scope, path string) *DiscoveredHostFile {
 				},
 			)
 		}
+		if profiles, ok := perms["profiles"].(map[string]interface{}); ok {
+			names := make([]string, 0, len(profiles))
+			for name := range profiles {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				pm, ok := profiles[name].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if asString(pm["approval"]) == "allow_all" {
+					out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
+						Category: "host_permissions",
+						Detail:   fmt.Sprintf("permissions.profiles.%s.approval is allow_all in %s", name, path),
+					})
+				}
+				if asString(pm["filesystem"]) == "unrestricted" {
+					out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
+						Category: "host_sandbox",
+						Detail:   fmt.Sprintf("permissions.profiles.%s.filesystem is unrestricted in %s", name, path),
+					})
+				}
+			}
+		}
 	}
 	return out
 }
@@ -763,7 +1031,7 @@ func parseGooseConfigFile(scope, path string) *DiscoveredHostFile {
 	}
 	text := string(data)
 	out := &DiscoveredHostFile{Harness: "goose", Scope: scope, Path: path}
-	if strings.Contains(text, "GOOSE_MODE: auto") || strings.Contains(text, `GOOSE_MODE: "auto"`) || strings.Contains(text, "GOOSE_MODE: 'auto'") {
+	if hasYAMLScalar(text, "", "GOOSE_MODE", "auto") {
 		out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
 			Category: "host_permissions",
 			Detail:   fmt.Sprintf("GOOSE_MODE is set to auto in %s (skips permission.yaml)", path),
@@ -783,6 +1051,31 @@ func parseOpenhandsSettingsFile(scope, path string) *DiscoveredHostFile {
 			Category: "host_permissions",
 			Detail:   fmt.Sprintf("security_policy_filename is empty in %s", path),
 		})
+	}
+	return out
+}
+
+func parseOpenhandsConversationStateFile(scope, path string) *DiscoveredHostFile {
+	raw, ok := readJSONObjectFile(path, false, scope == "project")
+	if !ok {
+		return nil
+	}
+	out := &DiscoveredHostFile{Harness: "openhands", Scope: scope, Path: path}
+	if cp, ok := raw["confirmation_policy"].(map[string]interface{}); ok {
+		if kind := asString(cp["kind"]); kind == "NeverConfirm" {
+			out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
+				Category: "host_permissions",
+				Detail:   fmt.Sprintf("confirmation_policy.kind is NeverConfirm in %s", path),
+			})
+		}
+	}
+	if sb, ok := raw["sandbox"].(map[string]interface{}); ok {
+		if enabled, ok := sb["enabled"].(bool); ok && !enabled {
+			out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
+				Category: "host_sandbox",
+				Detail:   fmt.Sprintf("sandbox.enabled is false in %s", path),
+			})
+		}
 	}
 	return out
 }
@@ -832,6 +1125,113 @@ func parseKiroAgentFile(scope, path string) *DiscoveredHostFile {
 			}
 		}
 	}
+	if perms, ok := raw["permissions"].(map[string]interface{}); ok {
+		extractKiroPermissionMap(out, perms, true)
+	}
+	return out
+}
+
+func isKiroNonShellToolSpec(s string) bool {
+	if strings.HasPrefix(s, "@") {
+		return true
+	}
+	if idx := strings.IndexByte(s, '('); idx > 0 && strings.HasSuffix(s, ")") {
+		tool := strings.TrimSpace(s[:idx])
+		return tool != "execute_bash" && tool != "shell" && tool != "Bash" && tool != "Shell"
+	}
+	switch s {
+	case "fs_read", "fs_write", "read", "write", "edit", "glob", "grep", "web_search", "web_fetch", "use_aws", "introspect":
+		return true
+	}
+	return false
+}
+
+func extractKiroPermissionMap(out *DiscoveredHostFile, perms map[string]interface{}, requireShellWrapper bool) {
+	for _, action := range []string{"allow", "deny", "ask"} {
+		for _, it := range sliceAny(perms[action]) {
+			if s := strings.TrimSpace(asString(it)); s != "" {
+				if dr, ok := convertExtendedShellPermissionRule(action, s, "execute_bash", "shell"); ok {
+					out.Rules = append(out.Rules, dr)
+				} else if !requireShellWrapper && !isKiroNonShellToolSpec(s) {
+					out.Rules = append(out.Rules, buildSuggestedShellRule(action, action+"="+s, s, true))
+				}
+			}
+		}
+	}
+	for _, key := range []string{"rules", "policies"} {
+		for _, m := range sliceMapAny(perms[key]) {
+			tool := asString(m["tool"])
+			if tool != "" && tool != "execute_bash" && tool != "shell" && tool != "Bash" && tool != "*" {
+				continue
+			}
+			act := asString(m["action"])
+			if act == "" {
+				act = asString(m["effect"])
+			}
+			if act != "allow" && act != "deny" && act != "ask" {
+				continue
+			}
+			pat := strings.TrimSpace(asString(m["command"]))
+			if pat == "" {
+				pat = strings.TrimSpace(asString(m["pattern"]))
+			}
+			if pat == "" {
+				continue
+			}
+			patGlob := pat
+			if !strings.Contains(pat, "*") {
+				patGlob = pat + " *"
+			}
+			out.Rules = append(out.Rules, buildSuggestedShellRule(act, fmt.Sprintf("permissions.%s[%s:%s]", key, tool, pat), patGlob, false))
+		}
+	}
+}
+
+func parseKiroPermissionsFile(scope, path string) *DiscoveredHostFile {
+	if strings.HasSuffix(path, ".json") {
+		raw, ok := readJSONObjectFile(path, true, scope == "project")
+		if !ok {
+			return nil
+		}
+		out := &DiscoveredHostFile{Harness: "kiro", Scope: scope, Path: path}
+		extractKiroPermissionMap(out, raw, false)
+		if perms, ok := raw["permissions"].(map[string]interface{}); ok {
+			extractKiroPermissionMap(out, perms, false)
+		}
+		return out
+	}
+	data, err := readDiscoveryFile(path, scope == "project")
+	if err != nil {
+		return nil
+	}
+	text := string(data)
+	out := &DiscoveredHostFile{Harness: "kiro", Scope: scope, Path: path}
+	for _, action := range []string{"allow", "deny", "ask"} {
+		for _, item := range extractYAMLList(text, action) {
+			out.Rules = append(out.Rules, buildSuggestedShellRule(action, action+"="+item, item, true))
+		}
+	}
+	return out
+}
+
+func parseKiroSandboxFile(scope, path string) *DiscoveredHostFile {
+	raw, ok := readJSONObjectFile(path, true, scope == "project")
+	if !ok {
+		return nil
+	}
+	out := &DiscoveredHostFile{Harness: "kiro", Scope: scope, Path: path}
+	if enabled, ok := raw["enabled"].(bool); ok && !enabled {
+		out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
+			Category: "host_sandbox",
+			Detail:   fmt.Sprintf("sandbox.enabled is false in %s", path),
+		})
+	}
+	if mode := asString(raw["mode"]); mode == "off" || mode == "none" || mode == "disabled" {
+		out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
+			Category: "host_sandbox",
+			Detail:   fmt.Sprintf("sandbox.mode is %q in %s", mode, path),
+		})
+	}
 	return out
 }
 
@@ -857,15 +1257,12 @@ func parseClineSettingsFile(scope, path string) *DiscoveredHostFile {
 }
 
 func parseKiloConfigFile(scope, path string) *DiscoveredHostFile {
-	out := parseOpencodeConfigFile(scope, path)
-	if out == nil {
-		return nil
-	}
-	out.Harness = "kilo"
 	raw, ok := readJSONObjectFile(path, true, scope == "project")
 	if !ok {
-		return out
+		return nil
 	}
+	out := parseOpencodeConfigObject(scope, path, raw)
+	out.Harness = "kilo"
 	if perm, ok := raw["permission"].(map[string]interface{}); ok {
 		if bash, ok := perm["bash"].(string); ok && bash == "allow" {
 			out.PolicyAlerts = append(out.PolicyAlerts, DiscoveredPolicyAlert{
@@ -975,20 +1372,42 @@ func parseMirrorApprovalsFile(scope, path string) *DiscoveredHostFile {
 		return nil
 	}
 	out := &DiscoveredHostFile{Harness: "mirror", Scope: scope, Path: path}
-	for _, it := range sliceAny(raw["approvals"]) {
+	entries := append(sliceAny(raw["entries"]), sliceAny(raw["approvals"])...)
+	for _, it := range entries {
 		m, ok := it.(map[string]interface{})
-		if !ok || asString(m["kind"]) != "argv_prefix" {
+		if !ok {
 			continue
 		}
-		var toks []string
-		for _, t := range sliceAny(m["argv"]) {
-			if s := asString(t); s != "" {
-				toks = append(toks, s)
-			}
+		if tool := asString(m["tool"]); tool != "" && tool != "bash" {
+			continue
 		}
-		if len(toks) > 0 {
-			joined := strings.Join(toks, " ")
-			out.Rules = append(out.Rules, buildSuggestedShellRule("allow", "argv_prefix:"+joined, joined+" *", false))
+		switch asString(m["kind"]) {
+		case "argv_prefix":
+			var toks []string
+			for _, t := range sliceAny(m["argv"]) {
+				if s := asString(t); s != "" {
+					toks = append(toks, s)
+				}
+			}
+			if len(toks) > 0 {
+				joined := strings.Join(toks, " ")
+				out.Rules = append(out.Rules, buildSuggestedShellRule("allow", "argv_prefix:"+joined, joined+" *", false))
+			}
+		case "exact_arguments":
+			cmd := strings.TrimSpace(asString(m["command"]))
+			if cmd == "" {
+				if argsMap, ok := m["args"].(map[string]interface{}); ok {
+					cmd = strings.TrimSpace(asString(argsMap["command"]))
+				} else if argsStr := asString(m["args"]); argsStr != "" {
+					var parsed map[string]interface{}
+					if json.Unmarshal([]byte(argsStr), &parsed) == nil {
+						cmd = strings.TrimSpace(asString(parsed["command"]))
+					}
+				}
+			}
+			if cmd != "" {
+				out.Rules = append(out.Rules, buildSuggestedShellRule("allow", "exact_arguments:"+cmd, cmd, false))
+			}
 		}
 	}
 	return out
