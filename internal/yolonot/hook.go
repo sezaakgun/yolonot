@@ -328,18 +328,113 @@ func activeHarnessFormat(r HookResponse) string {
 }
 
 func cmdHook() {
-	currentHookDecision = ""
-	// Similarity, judges and escalation share one budget, leaving room to
-	// emit a decision before the host's 60-second hook timeout.
-	hookStart := time.Now()
-	hookContext, cancel := hookBudgetContext(context.Background(), hookStart)
-	defer cancel()
-
 	// Read payload from stdin; adapter handles env var fallback and
 	// harness-specific JSON decoding. Cap the read: the command string is
 	// processed by quote-aware scanners downstream, so an unbounded payload
 	// would be an easy CPU/memory amplifier.
 	raw, _ := io.ReadAll(io.LimitReader(os.Stdin, maxHookInputBytes))
+	runHookInput(raw)
+}
+
+type cursorImportedHookProbe struct {
+	CursorVersion  string   `json:"cursor_version"`
+	HookEventName  string   `json:"hook_event_name"`
+	Cwd            string   `json:"cwd"`
+	WorkspaceRoots []string `json:"workspace_roots"`
+}
+
+func parseCursorImportedHookProbe(raw []byte) (cursorImportedHookProbe, bool) {
+	if len(raw) == 0 {
+		return cursorImportedHookProbe{}, false
+	}
+	var p cursorImportedHookProbe
+	if err := json.Unmarshal(raw, &p); err != nil || p.CursorVersion == "" {
+		return cursorImportedHookProbe{}, false
+	}
+	switch p.HookEventName {
+	case "preToolUse", "postToolUse", "PreToolUse", "PostToolUse":
+		return p, true
+	default:
+		return cursorImportedHookProbe{}, false
+	}
+}
+
+func cursorHooksFileHasYolonot(path string) bool {
+	if path == "" {
+		return false
+	}
+	s, err := readHarnessJSON(path)
+	if err != nil || len(s) == 0 {
+		return false
+	}
+	hooks, _ := s["hooks"].(map[string]interface{})
+	if hooks == nil {
+		return false
+	}
+	entries, _ := hooks["beforeShellExecution"].([]interface{})
+	for _, it := range entries {
+		if m, ok := it.(map[string]interface{}); ok {
+			if cmd, _ := m["command"].(string); strings.Contains(cmd, "yolonot") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isCursorNativeYolonotInstalled(p cursorImportedHookProbe) bool {
+	if ch := GetHarness("cursor"); ch != nil && ch.IsInstalled() {
+		return true
+	}
+	if cfgDir := os.Getenv("CURSOR_CONFIG_DIR"); cfgDir != "" {
+		if cursorHooksFileHasYolonot(filepath.Join(cfgDir, "hooks.json")) {
+			return true
+		}
+	}
+	seen := map[string]bool{}
+	checkWorkspace := func(dir string) bool {
+		if dir == "" || seen[dir] {
+			return false
+		}
+		seen[dir] = true
+		if cursorHooksFileHasYolonot(filepath.Join(dir, ".cursor", "hooks.json")) {
+			return true
+		}
+		if root := projectRoot(dir); root != "" && root != dir && !seen[root] {
+			seen[root] = true
+			if cursorHooksFileHasYolonot(filepath.Join(root, ".cursor", "hooks.json")) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, root := range p.WorkspaceRoots {
+		if checkWorkspace(root) {
+			return true
+		}
+	}
+	if checkWorkspace(p.Cwd) {
+		return true
+	}
+	return checkWorkspace(os.Getenv("CURSOR_PROJECT_DIR"))
+}
+
+func runHookInput(raw []byte) {
+	currentHookDecision = ""
+	origHarnessEnv, hadHarnessEnv := os.LookupEnv("YOLONOT_HARNESS")
+	defer func() {
+		if hadHarnessEnv {
+			os.Setenv("YOLONOT_HARNESS", origHarnessEnv)
+		} else {
+			os.Unsetenv("YOLONOT_HARNESS")
+		}
+	}()
+
+	// Similarity, judges and escalation share one budget, leaving room to
+	// emit a decision before the host's 60-second hook timeout.
+	hookStart := time.Now()
+	hookContext, cancel := hookBudgetContext(context.Background(), hookStart)
+	defer cancel()
 
 	// Allow `yolonot hook --harness <name>` to pin the adapter. Harness
 	// CLIs don't all expose a stable session-id env var (Codex, OpenCode
@@ -367,6 +462,23 @@ func cmdHook() {
 	harness := ActiveHarness()
 	if harness == nil {
 		return
+	}
+	// Cursor imports `.claude/settings*.json` by default (`claude-code-mapper`),
+	// running imported `preToolUse`/`postToolUse` hooks in addition to native
+	// `.cursor/hooks.json` (`beforeShellExecution`/`afterShellExecution`).
+	// When native Cursor yolonot hooks are installed, passthrough silently so
+	// the native Cursor hook evaluates once with full sandbox/cwd fidelity;
+	// otherwise route the imported payload through CursorHarness.
+	if probe, ok := parseCursorImportedHookProbe(raw); ok {
+		if isCursorNativeYolonotInstalled(probe) {
+			return
+		}
+		if harness.Name() == "claude" {
+			if ch := GetHarness("cursor"); ch != nil {
+				os.Setenv("YOLONOT_HARNESS", "cursor")
+				harness = ch
+			}
+		}
 	}
 	payload, err := harness.ParseHookInput(raw)
 	if err != nil {

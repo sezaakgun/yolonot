@@ -413,3 +413,203 @@ func TestCursorHarnessRiskMapDenyOnly(t *testing.T) {
 		t.Errorf("high/critical should deny: %v", rm)
 	}
 }
+
+func runWithArgsAndStdin(t *testing.T, args []string, stdin string, fn func()) string {
+	t.Helper()
+	origArgs := os.Args
+	origStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stdin != "" {
+		if _, err := w.Write([]byte(stdin)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Close()
+	os.Args = args
+	os.Stdin = r
+	defer func() {
+		os.Args = origArgs
+		os.Stdin = origStdin
+		r.Close()
+	}()
+	return captureStdout(fn)
+}
+
+func TestCursorBareInvocationRoutesHookAndPreservesEmptyStdin(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, ".yolonot"), []byte("deny-cmd touch *blocked*\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("YOLONOT_HARNESS", "")
+	t.Setenv("CURSOR_VERSION", "3.29.15")
+	t.Setenv("CURSOR_PROJECT_DIR", ws)
+	t.Setenv("CLAUDE_PROJECT_DIR", ws)
+
+	preMap := map[string]interface{}{
+		"cursor_version":  "3.29.15",
+		"hook_event_name": "preToolUse",
+		"conversation_id": "cur-bare-1",
+		"tool_name":       "Shell",
+		"cwd":             "",
+		"workspace_roots": []string{ws},
+		"tool_input":      map[string]interface{}{"command": "touch blocked.txt", "cwd": ""},
+	}
+	preBytes, _ := json.Marshal(preMap)
+
+	// 1. Bare `yolonot` with Cursor preToolUse JSON when native Cursor hook is absent:
+	//    must emit flat Cursor JSON, never cmdDefault() plain text.
+	out := runWithArgsAndStdin(t, []string{"yolonot"}, string(preBytes), Run)
+	var resp cursorResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &resp); err != nil {
+		t.Fatalf("bare Cursor hook emitted non-JSON output: %v\nraw: %q", err, out)
+	}
+	if resp.Permission != ActionDeny {
+		t.Fatalf("resp.Permission = %q, want %q", resp.Permission, ActionDeny)
+	}
+
+	// 2. Bare `yolonot` with Cursor preToolUse JSON when native Cursor hook IS installed:
+	//    must emit empty stdout (passthrough) and add zero decision log entries.
+	if err := GetHarness("cursor").Install("/usr/local/bin/yolonot"); err != nil {
+		t.Fatal(err)
+	}
+	beforeCount := len(ReadRecentDecisions(100))
+	outPassthrough := runWithArgsAndStdin(t, []string{"yolonot"}, string(preBytes), Run)
+	if outPassthrough != "" {
+		t.Fatalf("coexisting bare Cursor hook output = %q, want empty passthrough", outPassthrough)
+	}
+	if afterCount := len(ReadRecentDecisions(100)); afterCount != beforeCount {
+		t.Fatalf("coexisting bare Cursor hook logged decision (%d -> %d)", beforeCount, afterCount)
+	}
+
+	// 3. Bare `yolonot </dev/null` (empty stdin) even inside Cursor env:
+	//    must preserve cmdDefault() plain-text output.
+	outEmpty := runWithArgsAndStdin(t, []string{"yolonot"}, "", Run)
+	if !strings.Contains(outEmpty, "Commands:") {
+		t.Fatalf("bare yolonot with empty stdin did not run cmdDefault(): %q", outEmpty)
+	}
+}
+
+func TestCursorImportedClaudeHookDeduplicatesUserAndWorkspaceHooks(t *testing.T) {
+	for _, mode := range []string{"user-hooks", "workspace-hooks"} {
+		t.Run(mode, func(t *testing.T) {
+			_, cleanup := withFakeHome(t)
+			defer cleanup()
+
+			ws := t.TempDir()
+			if err := os.WriteFile(filepath.Join(ws, ".yolonot"), []byte("deny-cmd touch *dup*\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := GetHarness("claude").Install("/usr/local/bin/yolonot"); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "user-hooks" {
+				if err := GetHarness("cursor").Install("/usr/local/bin/yolonot"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				wsCursorDir := filepath.Join(ws, ".cursor")
+				if err := os.MkdirAll(wsCursorDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				wsHooks := `{"version":1,"hooks":{"beforeShellExecution":[{"command":"yolonot hook --harness cursor","timeout":60}]}}`
+				if err := os.WriteFile(filepath.Join(wsCursorDir, "hooks.json"), []byte(wsHooks), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			t.Setenv("YOLONOT_HARNESS", "claude")
+			for _, ev := range []string{"preToolUse", "postToolUse"} {
+				payload, _ := json.Marshal(map[string]interface{}{
+					"cursor_version":  "3.29.15",
+					"hook_event_name": ev,
+					"conversation_id": "cur-dedup-1",
+					"tool_name":       "Shell",
+					"cwd":             "",
+					"workspace_roots": []string{ws},
+					"tool_input":      map[string]interface{}{"command": "touch dup.txt", "cwd": ""},
+				})
+				out := runWithArgsAndStdin(t, []string{"yolonot", "hook", "--harness", "claude"}, string(payload), cmdHook)
+				if out != "" {
+					t.Fatalf("%s (%s): expected silent passthrough, got %q", mode, ev, out)
+				}
+			}
+			if got := ReadRecentDecisions(100); len(got) != 0 {
+				t.Fatalf("%s: expected 0 decisions from deduplicated imported hooks, got %v", mode, got)
+			}
+		})
+	}
+}
+
+func TestCursorImportedClaudeHookWithoutCursorInstallUsesCursorSemantics(t *testing.T) {
+	_, cleanup := withFakeHome(t)
+	defer cleanup()
+
+	ws := t.TempDir()
+	rules := "allow-cmd touch *ok*\ndeny-cmd touch *bad*\nask-cmd touch *review*\n"
+	if err := os.WriteFile(filepath.Join(ws, ".yolonot"), []byte(rules), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("YOLONOT_HARNESS", "claude")
+	t.Setenv("YOLONOT_CURSOR_NATIVE_ASK", "1")
+	t.Setenv("YOLONOT_MOD", "")
+
+	// Non-shell imported preToolUse (e.g. Read) must be ignored silently.
+	readPayload, _ := json.Marshal(map[string]interface{}{
+		"cursor_version":  "3.29.15",
+		"hook_event_name": "preToolUse",
+		"conversation_id": "cur-claude-only",
+		"tool_name":       "Read",
+		"cwd":             "",
+		"workspace_roots": []string{ws},
+		"tool_input":      map[string]interface{}{"file_path": filepath.Join(ws, "README.md")},
+	})
+	if out := runWithArgsAndStdin(t, []string{"yolonot", "hook", "--harness", "claude"}, string(readPayload), cmdHook); out != "" {
+		t.Fatalf("non-shell preToolUse output = %q, want empty", out)
+	}
+
+	// Shell ask -> flat cursorResponse {"permission":"ask",...}, then postToolUse must NOT fabricate human:allow.
+	askPre, _ := json.Marshal(map[string]interface{}{
+		"cursor_version":  "3.29.15",
+		"hook_event_name": "preToolUse",
+		"conversation_id": "cur-claude-only",
+		"tool_name":       "Shell",
+		"cwd":             "",
+		"workspace_roots": []string{ws},
+		"tool_input":      map[string]interface{}{"command": "touch review.txt", "cwd": ""},
+	})
+	askOut := runWithArgsAndStdin(t, []string{"yolonot", "hook", "--harness", "claude"}, string(askPre), cmdHook)
+	var wire map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(askOut)), &wire); err != nil {
+		t.Fatalf("unmarshal askOut: %v (raw=%q)", err, askOut)
+	}
+	if _, nested := wire["hookSpecificOutput"]; nested {
+		t.Fatalf("emitted Claude envelope instead of flat Cursor response: %s", askOut)
+	}
+	if wire["permission"] != ActionAsk {
+		t.Fatalf("permission = %v, want %q", wire["permission"], ActionAsk)
+	}
+
+	askPost, _ := json.Marshal(map[string]interface{}{
+		"cursor_version":  "3.29.15",
+		"hook_event_name": "postToolUse",
+		"conversation_id": "cur-claude-only",
+		"tool_name":       "Shell",
+		"cwd":             "",
+		"workspace_roots": []string{ws},
+		"tool_input":      map[string]interface{}{"command": "touch review.txt", "cwd": ""},
+	})
+	if out := runWithArgsAndStdin(t, []string{"yolonot", "hook", "--harness", "claude"}, string(askPost), cmdHook); out != "" {
+		t.Fatalf("postToolUse output = %q, want empty", out)
+	}
+	for _, entry := range ReadRecentDecisions(100) {
+		if entry.SessionID == "cur-claude-only" && entry.Layer == "human" {
+			t.Fatalf("ambiguous Cursor postToolUse fabricated human approval: %+v", entry)
+		}
+	}
+}

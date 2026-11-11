@@ -14,14 +14,17 @@ type CursorHarness struct {
 }
 
 type cursorPayload struct {
-	ConversationID string   `json:"conversation_id"`
-	ToolUseID      string   `json:"tool_use_id"`
-	HookEventName  string   `json:"hook_event_name"`
-	Cwd            string   `json:"cwd"`
-	Command        string   `json:"command"`
-	WorkspaceRoots []string `json:"workspace_roots"`
-	Sandbox        *bool    `json:"sandbox,omitempty"`
-	TranscriptPath string   `json:"transcript_path,omitempty"`
+	ConversationID string                 `json:"conversation_id"`
+	SessionID      string                 `json:"session_id"`
+	ToolUseID      string                 `json:"tool_use_id"`
+	HookEventName  string                 `json:"hook_event_name"`
+	ToolName       string                 `json:"tool_name"`
+	Cwd            string                 `json:"cwd"`
+	Command        string                 `json:"command"`
+	ToolInput      map[string]interface{} `json:"tool_input"`
+	WorkspaceRoots []string               `json:"workspace_roots"`
+	Sandbox        *bool                  `json:"sandbox,omitempty"`
+	TranscriptPath string                 `json:"transcript_path,omitempty"`
 }
 
 type cursorResponse struct {
@@ -68,21 +71,53 @@ func newCursorHarness() *CursorHarness {
 					event = "PreToolUse"
 				case "afterShellExecution":
 					event = "PostToolUse"
+				case "preToolUse", "PreToolUse":
+					if raw.ToolName != "" && raw.ToolName != "Shell" && raw.ToolName != "Bash" && raw.ToolName != "PowerShell" {
+						return HookPayload{}, nil
+					}
+					event = "PreToolUse"
+				case "postToolUse", "PostToolUse":
+					if raw.ToolName != "" && raw.ToolName != "Shell" && raw.ToolName != "Bash" && raw.ToolName != "PowerShell" {
+						return HookPayload{}, nil
+					}
+					event = "PostToolUse"
+				}
+				cmd := raw.Command
+				if cmd == "" && raw.ToolInput != nil {
+					cmd, _ = raw.ToolInput["command"].(string)
 				}
 				cwd := raw.Cwd
-				if cwd == "" && len(raw.WorkspaceRoots) > 0 {
-					cwd = raw.WorkspaceRoots[0]
-				} else if cwd != "" && !filepath.IsAbs(cwd) && len(raw.WorkspaceRoots) > 0 {
-					cwd = filepath.Join(raw.WorkspaceRoots[0], cwd)
+				if cwd == "" && raw.ToolInput != nil {
+					cwd, _ = raw.ToolInput["cwd"].(string)
 				}
-				bypass := raw.Sandbox != nil && !*raw.Sandbox
+				root := ""
+				if len(raw.WorkspaceRoots) > 0 && raw.WorkspaceRoots[0] != "" {
+					root = raw.WorkspaceRoots[0]
+				} else {
+					root = os.Getenv("CURSOR_PROJECT_DIR")
+				}
+				if cwd == "" {
+					cwd = root
+				} else if !filepath.IsAbs(cwd) && root != "" {
+					cwd = filepath.Join(root, cwd)
+				}
+				toolInput := make(map[string]interface{}, len(raw.ToolInput)+1)
+				for k, v := range raw.ToolInput {
+					toolInput[k] = v
+				}
+				toolInput["command"] = cmd
+				sid := raw.ConversationID
+				if sid == "" {
+					sid = raw.SessionID
+				}
+				bypass := (raw.Sandbox != nil && !*raw.Sandbox) || extractToolInputBypassSandbox(toolInput)
 				return HookPayload{
 					HookEventName:  event,
 					ToolName:       "Bash",
-					SessionID:      raw.ConversationID,
+					SessionID:      sid,
 					ToolUseID:      raw.ToolUseID,
 					Cwd:            cwd,
-					ToolInput:      map[string]interface{}{"command": raw.Command},
+					ToolInput:      toolInput,
 					BypassSandbox:  bypass,
 					TranscriptPath: raw.TranscriptPath,
 				}, nil

@@ -111,17 +111,28 @@ check() { # file item → status of one Check item from MANUAL.md
 	esac
 }
 
-restore() { # harness usual-binary tmp workspace → put the usual build back
+restore() { # harness usual-binary tmp workspace [restore-claude] → put the usual build back
 	trap - EXIT INT TERM
+	keep_tmp=0
+	if [ "${5:-0}" = 1 ]; then
+		if [ -n "$2" ] && "$2" install --harness claude >/dev/null; then
+			echo "Restored $2 into your claude hooks." >/dev/tty
+		elif [ -z "$2" ] && "$3/yolonot" uninstall --harness claude >/dev/null; then
+			echo "Removed the candidate from your claude hooks." >/dev/tty
+		else
+			echo "Could not restore your claude hooks; they still use the candidate kept in $3." >/dev/tty
+			keep_tmp=1
+		fi
+	fi
 	if [ -n "$2" ] && "$2" install --harness "$1" >/dev/null; then
 		echo "Restored $2 into your $1 hooks." >/dev/tty
-		rm -rf "$3"
 	elif [ -z "$2" ] && "$3/yolonot" uninstall --harness "$1" >/dev/null; then
 		echo "No yolonot on PATH; removed the candidate from your $1 hooks. Reinstall your usual build yourself." >/dev/tty
-		rm -rf "$3"
 	else
 		echo "Could not restore your $1 hooks; they still use the candidate kept in $3. Reinstall your usual build, then delete it." >/dev/tty
+		keep_tmp=1
 	fi
+	[ "$keep_tmp" = 1 ] || rm -rf "$3"
 	rm -rf "$4"
 }
 
@@ -140,13 +151,23 @@ manual() { # context harness heading
 	git -C "$ws" init -q
 	printf 'allow-cmd touch *ALLOW*\ndeny-cmd touch *DENY*\nask-cmd touch *ASK*\n' >"$ws/.yolonot"
 	usual=$(command -v yolonot || true)
+	restore_claude=0
+	claude_settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+	if [ "$harness" = cursor ] && grep -q yolonot "$claude_settings" 2>/dev/null; then
+		restore_claude=1
+	fi
 
 	printf '\n== %s\nWorkspace: %s\nInstalled the candidate into your %s hooks; your usual build is restored when this ends, also on Ctrl+C.\n' \
 		"$heading" "$ws" "$harness" >/dev/tty
 	# shellcheck disable=SC2064 # expand the paths now, they are local to this run
-	trap "restore '$harness' '$usual' '$tmp' '$ws'" EXIT
+	trap "restore '$harness' '$usual' '$tmp' '$ws' '$restore_claude'" EXIT
 	trap 'exit 130' INT TERM
-	(cd "$ws" && "$cand" install --harness "$harness") >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws"; return 1; }
+	(cd "$ws" && "$cand" install --harness "$harness") >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"; return 1; }
+	if [ "$restore_claude" = 1 ]; then
+		# Cursor imports ~/.claude/settings.json before ~/.cursor/hooks.json;
+		# update it to the candidate too so the old system binary is not called.
+		(cd "$ws" && "$cand" install --harness claude) >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"; return 1; }
+	fi
 	if [ "$harness" = cursor ]; then
 		# Native ask is opt-in by env; a wrapper sets it for the hook only.
 		wrap="$tmp/yolonot-cursor-native-ask"
@@ -173,7 +194,7 @@ manual() { # context harness heading
 	else
 		ask "$app.app not found in /Applications; app version: "
 		ver=$reply
-		[ -n "$ver" ] || { echo "version required" >&2; restore "$harness" "$usual" "$tmp" "$ws"; return 1; }
+		[ -n "$ver" ] || { echo "version required" >&2; restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"; return 1; }
 	fi
 
 	failed="" n=0
@@ -229,7 +250,7 @@ ITEMS
 $rows
 EOF
 
-	restore "$harness" "$usual" "$tmp" "$ws"
+	restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"
 	if [ -n "$failed" ]; then
 		post "$ctx" failure "$ver: rows$failed failed"
 		return 1
@@ -255,7 +276,7 @@ for check in "$@"; do
 	codex) run_tests "$ctx" codex '^(TestCodexExec|TestCodexAppServer|TestCodexSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
 	opencode) run_tests "$ctx" opencode '^(TestOpencodeV2|TestOpencodeSkillDiscovery|TestCrossHarnessBinaryE2E)$' ;;
 	agy) run_tests "$ctx" agy '^(TestAntigravityCLI|TestAntigravityInteractiveAsk|TestCrossHarnessBinaryE2E)$' ;;
-	cursor-cli) run_tests "$ctx" cursor-agent '^(TestCursorCLI|TestCursorInteractiveAsk|TestCrossHarnessBinaryE2E)$' ;;
+	cursor-cli) run_tests "$ctx" cursor-agent '^(TestCursorCLI|TestCursorCLIWithClaudeHooksCoexistence|TestCursorInteractiveAsk|TestCrossHarnessBinaryE2E)$' ;;
 	claude-desktop) manual "$ctx" claude "Claude Desktop" ;;
 	codex-desktop) manual "$ctx" codex "Codex Desktop" ;;
 	cursor-ide) manual "$ctx" cursor "Cursor IDE" ;;

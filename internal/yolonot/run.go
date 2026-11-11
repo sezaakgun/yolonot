@@ -1,7 +1,10 @@
 package yolonot
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"runtime/debug"
 	"strconv"
@@ -63,6 +66,31 @@ func Run() {
 		}
 		os.Setenv("YOLONOT_HARNESS", h.Name())
 	}
+	// Cursor's Claude-hook importer (`claude-code-mapper`) copies `command`
+	// from `.claude/settings.json` exec-form entries (`Claude >= 2.1.295`)
+	// while dropping `args: ["hook", "--harness", "claude"]`. When Cursor
+	// invokes bare `yolonot` as a hook process, route stdin through the hook
+	// pipeline instead of printing text status (which Cursor rejects as
+	// invalid JSON). Empty stdin (`yolonot </dev/null`) falls through to
+	// cmdDefault().
+	if len(os.Args) < 2 && !stdinIsTerminal() && isCursorHookEnv() {
+		if raw := readCursorBareHookStdin(); len(raw) > 0 {
+			origHarness, hadHarness := os.LookupEnv("YOLONOT_HARNESS")
+			if origHarness == "" {
+				os.Setenv("YOLONOT_HARNESS", "claude")
+			}
+			defer func() {
+				if hadHarness {
+					os.Setenv("YOLONOT_HARNESS", origHarness)
+				} else {
+					os.Unsetenv("YOLONOT_HARNESS")
+				}
+			}()
+			runHookInput(raw)
+			return
+		}
+	}
+
 	verb := ""
 	if len(os.Args) > 1 {
 		verb = os.Args[1]
@@ -477,4 +505,28 @@ func judgeNames(specs []JudgeSpec) string {
 		names = append(names, sp.Use)
 	}
 	return strings.Join(names, " → ")
+}
+
+func isCursorHookEnv() bool {
+	return os.Getenv("CURSOR_VERSION") != "" &&
+		(os.Getenv("CURSOR_PROJECT_DIR") != "" || os.Getenv("CLAUDE_PROJECT_DIR") != "")
+}
+
+func readCursorBareHookStdin() []byte {
+	raw, _ := io.ReadAll(io.LimitReader(os.Stdin, maxHookInputBytes))
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+		return nil
+	}
+	var probe struct {
+		HookEventName string `json:"hook_event_name"`
+		CursorVersion string `json:"cursor_version"`
+	}
+	if err := json.Unmarshal(trimmed, &probe); err != nil {
+		return nil
+	}
+	if probe.HookEventName == "" && probe.CursorVersion == "" {
+		return nil
+	}
+	return raw
 }
