@@ -666,6 +666,7 @@ func awsEventStreamFrame(eventType string, payloadObj any) []byte {
 
 func TestKiroCLI(t *testing.T) {
 	kiro := extendedHostBinary(t, "kiro-cli-chat", "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat")
+	hostVersion(t, kiro, "--version")
 	sqliteBin, err := exec.LookPath("sqlite3")
 	if err != nil {
 		t.Skip("sqlite3 not installed")
@@ -807,27 +808,19 @@ asyncio.run(main())
 	}
 }
 
-func TestOpenClawAndAmpPluginShimsRuntime(t *testing.T) {
+func TestOpenClawPluginRuntime(t *testing.T) {
 	nodeBin := extendedHostBinary(t, "node")
 	s := newSandbox(t, "")
 	s.write(".yolonot/rules", "allow-cmd touch *\nask-cmd git push *\ndeny-cmd rm -rf /*\n")
 	s.Install("openclaw")
-	s.Install("amp")
-	s.Env = append(s.Env, "YOLONOT_OPENCLAW_SESSION_ID=oc-s1", "YOLONOT_AMP_SESSION_ID=amp-s1")
+	s.Env = append(s.Env, "YOLONOT_OPENCLAW_SESSION_ID=oc-s1")
 	if out, err := s.run(s.Work, yolonotBin, "approve", "--harness", "openclaw", "--session-id", "oc-s1", "--cwd", s.Work, "git push origin oc-approved"); err != nil {
 		t.Fatalf("yolonot approve openclaw: %v\n%s", err, out)
 	}
 	if out, err := s.run(s.Work, yolonotBin, "deny", "--harness", "openclaw", "--session-id", "oc-s1", "--cwd", s.Work, "git push origin oc-denied"); err != nil {
 		t.Fatalf("yolonot deny openclaw: %v\n%s", err, out)
 	}
-	if out, err := s.run(s.Work, yolonotBin, "approve", "--harness", "amp", "--session-id", "amp-s1", "--cwd", s.Work, "git push origin amp-approved"); err != nil {
-		t.Fatalf("yolonot approve amp: %v\n%s", err, out)
-	}
-	if out, err := s.run(s.Work, yolonotBin, "deny", "--harness", "amp", "--session-id", "amp-s1", "--cwd", s.Work, "git push origin amp-denied"); err != nil {
-		t.Fatalf("yolonot deny amp: %v\n%s", err, out)
-	}
 
-	// 1. OpenClaw shim runtime in Node.js (allow, deny, ask + after_tool_call allow_once, session-allow, session-deny, and elevated BypassSandbox)
 	ocShim := s.path(".openclaw/extensions/yolonot/index.js")
 	ocDriver := s.path("run-openclaw-shim.mjs")
 	s.write(ocDriver, fmt.Sprintf(`import register from %q;
@@ -847,19 +840,32 @@ console.log(JSON.stringify({ allowRes: allowRes || null, denyRes: denyRes || nul
 	if !strings.Contains(ocOut, `"allowRes":null`) || !strings.Contains(ocOut, `"block":true`) || !strings.Contains(ocOut, `"requireApproval"`) || !strings.Contains(ocOut, `"sessAllowRes":null`) {
 		t.Fatalf("OpenClaw shim runtime output unexpected:\n%s", ocOut)
 	}
+}
 
-	// 2. Amp shim runtime in Node.js (allow, deny, ask approved -> allow_once, ask rejected, session-allow, session-deny)
+func TestAmpPluginRuntime(t *testing.T) {
+	nodeBin := extendedHostBinary(t, "node")
+	s := newSandbox(t, "")
+	s.write(".yolonot/rules", "allow-cmd touch *\nask-cmd git push *\ndeny-cmd rm -rf /*\n")
+	s.Install("amp")
+	s.Env = append(s.Env, "YOLONOT_AMP_SESSION_ID=amp-s1")
+	if out, err := s.run(s.Work, yolonotBin, "approve", "--harness", "amp", "--session-id", "amp-s1", "--cwd", s.Work, "git push origin amp-approved"); err != nil {
+		t.Fatalf("yolonot approve amp: %v\n%s", err, out)
+	}
+	if out, err := s.run(s.Work, yolonotBin, "deny", "--harness", "amp", "--session-id", "amp-s1", "--cwd", s.Work, "git push origin amp-denied"); err != nil {
+		t.Fatalf("yolonot deny amp: %v\n%s", err, out)
+	}
+
 	ampShim := s.path(".config/amp/plugins/yolonot.ts")
 	ampDriver := s.path("run-amp-shim.mjs")
 	s.write(ampDriver, fmt.Sprintf(`import register from %q;
 let fn;
 register({ on(ev, cb) { if (ev === "tool.call") fn = cb; } });
-const allowRes = await fn({ tool: "Bash", input: { cmd: %q, cwd: %q } }, { ui: { async confirm() { return false; } } });
-const denyRes = await fn({ tool: "Bash", input: { cmd: "rm -rf /tmp/x", cwd: %q } }, { ui: { async confirm() { return true; } } });
-const askApprovedRes = await fn({ tool: "Bash", input: { cmd: "git push origin main", cwd: %q } }, { ui: { async confirm() { return true; } } });
-const askRejectedRes = await fn({ tool: "Bash", input: { cmd: "git push origin other", cwd: %q } }, { ui: { async confirm() { return false; } } });
-const sessAllowRes = await fn({ tool: "Bash", input: { cmd: "git push origin amp-approved", cwd: %q } }, { ui: { async confirm() { return false; } } });
-const sessDenyRes = await fn({ tool: "Bash", input: { cmd: "git push origin amp-denied", cwd: %q } }, { ui: { async confirm() { return true; } } });
+const allowRes = await fn({ id: "a1", tool: "Bash", input: { cmd: %q, cwd: %q } }, { threadId: "amp-s1", ui: { async confirm() { return false; } } });
+const denyRes = await fn({ id: "a2", tool: "Bash", input: { cmd: "rm -rf /tmp/x", cwd: %q } }, { threadId: "amp-s1", ui: { async confirm() { return true; } } });
+const askApprovedRes = await fn({ id: "a3", tool: "Bash", input: { cmd: "git push origin main", cwd: %q } }, { threadId: "amp-s1", ui: { async confirm() { return true; } } });
+const askRejectedRes = await fn({ id: "a4", tool: "Bash", input: { cmd: "git push origin other", cwd: %q } }, { threadId: "amp-s1", ui: { async confirm() { return false; } } });
+const sessAllowRes = await fn({ id: "a5", tool: "Bash", input: { cmd: "git push origin amp-approved", cwd: %q } }, { threadId: "amp-s1", ui: { async confirm() { return false; } } });
+const sessDenyRes = await fn({ id: "a6", tool: "Bash", input: { cmd: "git push origin amp-denied", cwd: %q } }, { threadId: "amp-s1", ui: { async confirm() { return true; } } });
 console.log(JSON.stringify({ allowRes, denyRes, askApprovedRes, askRejectedRes, sessAllowRes, sessDenyRes }));
 `, ampShim, s.Command(), s.Work, s.Work, s.Work, s.Work, s.Work, s.Work))
 
@@ -871,8 +877,12 @@ console.log(JSON.stringify({ allowRes, denyRes, askApprovedRes, askRejectedRes, 
 		!strings.Contains(ampOut, `"sessDenyRes":{"action":"reject-and-continue"`) {
 		t.Fatalf("Amp shim runtime output unexpected:\n%s", ampOut)
 	}
+}
 
-	// 3. Pi interactive UI confirmation in Node.js (ask select "Allow for session" -> session allow, ask rejected -> Denied by user + session_deny on replay)
+func TestPiPluginRuntime(t *testing.T) {
+	nodeBin := extendedHostBinary(t, "node")
+	s := newSandbox(t, "")
+	s.write(".yolonot/rules", "allow-cmd touch *\nask-cmd git push *\ndeny-cmd rm -rf /*\n")
 	s.Install("pi")
 	piShim := s.path(".pi/agent/extensions/yolonot.ts")
 	piDriver := s.path("run-pi-shim.mjs")
@@ -890,20 +900,25 @@ console.log(JSON.stringify({ askSession: askSession || null, askSessionReplay: a
 	if !strings.Contains(piOut, `"askSession":null`) || !strings.Contains(piOut, `"askSessionReplay":null`) || !strings.Contains(piOut, `"Denied by user"`) || !strings.Contains(piOut, "previously rejected this session") {
 		t.Fatalf("Pi interactive shim runtime output unexpected:\n%s", piOut)
 	}
+}
 
-	// 4. OpenCode & Kilo plugin shim runtime in Node.js (tool.execute.before + event permission.replied -> allow-session / deny)
-	s.Install("opencode")
+func TestKiloPluginRuntime(t *testing.T) {
+	nodeBin := extendedHostBinary(t, "node")
+	s := newSandbox(t, "")
+	s.write(".yolonot/rules", "allow-cmd touch *\nask-cmd git push *\ndeny-cmd rm -rf /*\n")
 	s.Install("kilo")
-	ocPluginShim := s.path(".config/opencode/plugins/yolonot.ts")
-	ocPluginDriver := s.path("run-opencode-plugin-shim.mjs")
-	s.write(ocPluginDriver, fmt.Sprintf(`import { YolonotPlugin } from %q;
+	kiloShim := s.path(".config/kilo/plugins/yolonot.ts")
+	kiloDriver := s.path("run-kilo-plugin-shim.mjs")
+	s.write(kiloDriver, fmt.Sprintf(`import { YolonotPlugin } from %q;
 const plugin = await YolonotPlugin({ directory: %q });
 await plugin["tool.execute.before"]({ tool: "bash", sessionID: "ocp-s1", callID: "perm-1" }, { args: { command: "git push origin ocp-sess" } });
-await plugin.event({ event: { type: "permission.replied", properties: { sessionID: "ocp-s1", callID: "perm-1", reply: "always" } } });
+await plugin.event({ event: { type: "permission.asked", properties: { id: "req-1", sessionID: "ocp-s1", tool: { callID: "perm-1" } } } });
+await plugin.event({ event: { type: "permission.replied", properties: { sessionID: "ocp-s1", requestID: "req-1", reply: "always" } } });
 await plugin["tool.execute.before"]({ tool: "bash", sessionID: "ocp-s1", callID: "perm-2" }, { args: { command: "git push origin ocp-sess" } });
 
 await plugin["tool.execute.before"]({ tool: "bash", sessionID: "ocp-s1", callID: "perm-3" }, { args: { command: "git push origin ocp-reject" } });
-await plugin.event({ event: { type: "permission.replied", properties: { sessionID: "ocp-s1", callID: "perm-3", reply: "reject" } } });
+await plugin.event({ event: { type: "permission.asked", properties: { id: "req-3", sessionID: "ocp-s1", tool: { callID: "perm-3" } } } });
+await plugin.event({ event: { type: "permission.replied", properties: { sessionID: "ocp-s1", requestID: "req-3", reply: "reject" } } });
 let rejectReplayErr = "";
 try {
   await plugin["tool.execute.before"]({ tool: "bash", sessionID: "ocp-s1", callID: "perm-4" }, { args: { command: "git push origin ocp-reject" } });
@@ -911,31 +926,99 @@ try {
   rejectReplayErr = String(err?.message || err);
 }
 console.log(JSON.stringify({ rejectReplayErr }));
-`, ocPluginShim, s.Work))
+`, kiloShim, s.Work))
 
-	ocPluginOut := runWithTimeout(t, s.Work, s.Env, 15*time.Second, nodeBin, ocPluginDriver)
-	if !strings.Contains(ocPluginOut, "previously rejected this session") {
-		t.Fatalf("OpenCode/Kilo plugin shim runtime output unexpected:\n%s", ocPluginOut)
+	kiloOut := runWithTimeout(t, s.Work, s.Env, 15*time.Second, nodeBin, kiloDriver)
+	if !strings.Contains(kiloOut, "previously rejected this session") {
+		t.Fatalf("Kilo plugin shim runtime output unexpected:\n%s", kiloOut)
 	}
 }
 
-func TestHermesAndDeepSeekHookRuntimes(t *testing.T) {
+func TestHermesHookRuntime(t *testing.T) {
 	s := newSandbox(t, "")
 	s.write(".yolonot/rules", "allow-cmd touch *\nask-cmd git push *\ndeny-cmd rm -rf /*\n")
 	s.Install("hermes")
-	s.Install("deepseek")
 	if out, err := s.run(s.Work, yolonotBin, "approve", "--harness", "hermes", "--session-id", "h1", "--cwd", s.Work, "git push origin h-approved"); err != nil {
 		t.Fatalf("yolonot approve hermes: %v\n%s", err, out)
 	}
 	if out, err := s.run(s.Work, yolonotBin, "deny", "--harness", "hermes", "--session-id", "h1", "--cwd", s.Work, "git push origin h-denied"); err != nil {
 		t.Fatalf("yolonot deny hermes: %v\n%s", err, out)
 	}
+	hermesCfg, err := os.ReadFile(s.path(".hermes/config.yaml"))
+	if err != nil || !strings.Contains(string(hermesCfg), "--harness hermes") {
+		t.Fatalf("hermes config.yaml missing hook command: err=%v, body=%s", err, string(hermesCfg))
+	}
+	for _, tc := range []struct {
+		name, cmd, want string
+	}{
+		{"allow", s.Command(), ""},
+		{"ask", "git push origin main", `"action":"approve"`},
+		{"deny", "rm -rf /tmp/x", `"action":"block"`},
+		{"session-allow", "git push origin h-approved", ""},
+		{"session-deny", "git push origin h-denied", `"action":"block"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(yolonotBin, "hook", "--harness", "hermes")
+			cmd.Dir, cmd.Env = s.Work, s.Env
+			cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"hook_event_name":"pre_tool_call","session_id":"h1","cwd":%q,"tool_name":"terminal","tool_input":{"command":%q}}`, s.Work, tc.cmd))
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("hermes hook (%s) failed: %v\n%s", tc.cmd, err, string(out))
+			}
+			if tc.want == "" && strings.TrimSpace(string(out)) != "" {
+				t.Fatalf("hermes allow expected empty stdout, got %q", string(out))
+			}
+			if tc.want != "" && !strings.Contains(string(out), tc.want) {
+				t.Fatalf("hermes (%s) expected %s, got %q", tc.cmd, tc.want, string(out))
+			}
+		})
+	}
+}
+
+func TestDeepSeekHookRuntime(t *testing.T) {
+	s := newSandbox(t, "")
+	s.write(".yolonot/rules", "allow-cmd touch *\nask-cmd git push *\ndeny-cmd rm -rf /*\n")
+	s.Install("deepseek")
 	if out, err := s.run(s.Work, yolonotBin, "approve", "--harness", "deepseek", "--session-id", "d1", "--cwd", s.Work, "git push origin d-approved"); err != nil {
 		t.Fatalf("yolonot approve deepseek: %v\n%s", err, out)
 	}
 	if out, err := s.run(s.Work, yolonotBin, "deny", "--harness", "deepseek", "--session-id", "d1", "--cwd", s.Work, "git push origin d-denied"); err != nil {
 		t.Fatalf("yolonot deny deepseek: %v\n%s", err, out)
 	}
+	dshHooks, err := os.ReadFile(s.path(".dsh/yolonot-hooks.json"))
+	if err != nil || !strings.Contains(string(dshHooks), `"Bash|bash|pwsh"`) {
+		t.Fatalf("deepseek yolonot-hooks.json unexpected: err=%v, body=%s", err, string(dshHooks))
+	}
+	for _, tc := range []struct {
+		name, cmd, want string
+	}{
+		{"allow", s.Command(), ""},
+		{"ask", "git push origin main", `"permissionDecision":"ask"`},
+		{"deny", "rm -rf /tmp/x", `"permissionDecision":"deny"`},
+		{"session-allow", "git push origin d-approved", ""},
+		{"session-deny", "git push origin d-denied", `"permissionDecision":"deny"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(yolonotBin, "hook", "--harness", "deepseek")
+			cmd.Dir, cmd.Env = s.Work, s.Env
+			cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"hook_event_name":"PreToolUse","session_id":"d1","cwd":%q,"tool_name":"bash","tool_input":{"command":%q}}`, s.Work, tc.cmd))
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("deepseek hook (%s) failed: %v\n%s", tc.cmd, err, string(out))
+			}
+			if tc.want == "" && strings.TrimSpace(string(out)) != "" {
+				t.Fatalf("deepseek allow expected empty stdout, got %q", string(out))
+			}
+			if tc.want != "" && !strings.Contains(string(out), tc.want) {
+				t.Fatalf("deepseek (%s) expected %s, got %q", tc.cmd, tc.want, string(out))
+			}
+		})
+	}
+}
+
+func TestDevinHookRuntime(t *testing.T) {
+	s := newSandbox(t, "")
+	s.write(".yolonot/rules", "allow-cmd touch *\nask-cmd git push *\ndeny-cmd rm -rf /*\n")
 	s.Install("devin")
 	if out, err := s.run(s.Work, yolonotBin, "approve", "--harness", "devin", "--session-id", "dev1", "--cwd", s.Work, "git push origin dev-approved"); err != nil {
 		t.Fatalf("yolonot approve devin: %v\n%s", err, out)
@@ -943,84 +1026,63 @@ func TestHermesAndDeepSeekHookRuntimes(t *testing.T) {
 	if out, err := s.run(s.Work, yolonotBin, "deny", "--harness", "devin", "--session-id", "dev1", "--cwd", s.Work, "git push origin dev-denied"); err != nil {
 		t.Fatalf("yolonot deny devin: %v\n%s", err, out)
 	}
+	for _, tc := range []struct {
+		name, cmd, want string
+	}{
+		{"allow", s.Command(), `"permissionDecision":"allow"`},
+		{"ask", "git push origin main", `"permissionDecision":"ask"`},
+		{"deny", "rm -rf /tmp/x", `"permissionDecision":"deny"`},
+		{"session-allow", "git push origin dev-approved", `"permissionDecision":"allow"`},
+		{"session-deny", "git push origin dev-denied", `"permissionDecision":"deny"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(yolonotBin, "hook", "--harness", "devin")
+			cmd.Dir, cmd.Env = s.Work, s.Env
+			cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"hook_event_name":"PreToolUse","session_id":"dev1","cwd":%q,"tool_name":"exec","tool_input":{"command":%q}}`, s.Work, tc.cmd))
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("devin hook (%s) failed: %v\n%s", tc.cmd, err, string(out))
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Fatalf("devin (%s) expected %s, got %q", tc.cmd, tc.want, string(out))
+			}
+		})
+	}
+}
 
-	// Verify Hermes config.yaml hook command executes for allow, ask, deny, session-allow, and session-deny
-	hermesCfg, err := os.ReadFile(s.path(".hermes/config.yaml"))
-	if err != nil || !strings.Contains(string(hermesCfg), "--harness hermes") {
-		t.Fatalf("hermes config.yaml missing hook command: err=%v, body=%s", err, string(hermesCfg))
+func TestMuseHookRuntime(t *testing.T) {
+	s := newSandbox(t, "")
+	s.write(".yolonot/rules", "allow-cmd touch *\nask-cmd git push *\ndeny-cmd rm -rf /*\n")
+	s.Install("muse")
+	if out, err := s.run(s.Work, yolonotBin, "approve", "--harness", "muse", "--session-id", "m1", "--cwd", s.Work, "git push origin m-approved"); err != nil {
+		t.Fatalf("yolonot approve muse: %v\n%s", err, out)
+	}
+	if out, err := s.run(s.Work, yolonotBin, "deny", "--harness", "muse", "--session-id", "m1", "--cwd", s.Work, "git push origin m-denied"); err != nil {
+		t.Fatalf("yolonot deny muse: %v\n%s", err, out)
 	}
 	for _, tc := range []struct {
-		cmd, want string
+		name, event, cmd, want string
 	}{
-		{s.Command(), ""},
-		{"git push origin main", `"action":"approve"`},
-		{"rm -rf /tmp/x", `"action":"block"`},
-		{"git push origin h-approved", ""},
-		{"git push origin h-denied", `"action":"block"`},
+		{"pre-allow", "PreToolUse", s.Command(), ""},
+		{"perm-allow", "PermissionRequest", s.Command(), `"behavior":"allow"`},
+		{"pre-deny", "PreToolUse", "rm -rf /tmp/x", `"permissionDecision":"deny"`},
+		{"session-allow", "PermissionRequest", "git push origin m-approved", `"behavior":"allow"`},
+		{"session-deny", "PreToolUse", "git push origin m-denied", `"permissionDecision":"deny"`},
 	} {
-		cmd := exec.Command(yolonotBin, "hook", "--harness", "hermes")
-		cmd.Dir, cmd.Env = s.Work, s.Env
-		cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"hook_event_name":"pre_tool_call","session_id":"h1","cwd":%q,"tool_name":"terminal","tool_input":{"command":%q}}`, s.Work, tc.cmd))
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("hermes hook (%s) failed: %v\n%s", tc.cmd, err, string(out))
-		}
-		if tc.want == "" && strings.TrimSpace(string(out)) != "" {
-			t.Fatalf("hermes allow expected empty stdout, got %q", string(out))
-		}
-		if tc.want != "" && !strings.Contains(string(out), tc.want) {
-			t.Fatalf("hermes (%s) expected %s, got %q", tc.cmd, tc.want, string(out))
-		}
-	}
-
-	// Verify DeepSeek yolonot-hooks.json + cordis.patch.yml hook executes for allow, ask, deny, session-allow, and session-deny
-	dshHooks, err := os.ReadFile(s.path(".dsh/yolonot-hooks.json"))
-	if err != nil || !strings.Contains(string(dshHooks), `"Bash|bash|pwsh"`) {
-		t.Fatalf("deepseek yolonot-hooks.json unexpected: err=%v, body=%s", err, string(dshHooks))
-	}
-	for _, tc := range []struct {
-		cmd, want string
-	}{
-		{s.Command(), ""},
-		{"git push origin main", `"permissionDecision":"ask"`},
-		{"rm -rf /tmp/x", `"permissionDecision":"deny"`},
-		{"git push origin d-approved", ""},
-		{"git push origin d-denied", `"permissionDecision":"deny"`},
-	} {
-		cmd := exec.Command(yolonotBin, "hook", "--harness", "deepseek")
-		cmd.Dir, cmd.Env = s.Work, s.Env
-		cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"hook_event_name":"PreToolUse","session_id":"d1","cwd":%q,"tool_name":"bash","tool_input":{"command":%q}}`, s.Work, tc.cmd))
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("deepseek hook (%s) failed: %v\n%s", tc.cmd, err, string(out))
-		}
-		if tc.want == "" && strings.TrimSpace(string(out)) != "" {
-			t.Fatalf("deepseek allow expected empty stdout, got %q", string(out))
-		}
-		if tc.want != "" && !strings.Contains(string(out), tc.want) {
-			t.Fatalf("deepseek (%s) expected %s, got %q", tc.cmd, tc.want, string(out))
-		}
-	}
-
-	// Verify Devin config.json hook executes for allow, ask, deny, session-allow, and session-deny
-	for _, tc := range []struct {
-		cmd, want string
-	}{
-		{s.Command(), `"permissionDecision":"allow"`},
-		{"git push origin main", `"permissionDecision":"ask"`},
-		{"rm -rf /tmp/x", `"permissionDecision":"deny"`},
-		{"git push origin dev-approved", `"permissionDecision":"allow"`},
-		{"git push origin dev-denied", `"permissionDecision":"deny"`},
-	} {
-		cmd := exec.Command(yolonotBin, "hook", "--harness", "devin")
-		cmd.Dir, cmd.Env = s.Work, s.Env
-		cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"hook_event_name":"PreToolUse","session_id":"dev1","cwd":%q,"tool_name":"exec","tool_input":{"command":%q}}`, s.Work, tc.cmd))
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("devin hook (%s) failed: %v\n%s", tc.cmd, err, string(out))
-		}
-		if !strings.Contains(string(out), tc.want) {
-			t.Fatalf("devin (%s) expected %s, got %q", tc.cmd, tc.want, string(out))
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(yolonotBin, "hook", "--harness", "muse")
+			cmd.Dir, cmd.Env = s.Work, s.Env
+			cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"hook_event_name":%q,"session_id":"m1","cwd":%q,"tool_name":"bash","tool_input":{"command":%q}}`, tc.event, s.Work, tc.cmd))
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("muse hook (%s) failed: %v\n%s", tc.name, err, string(out))
+			}
+			if tc.want == "" && strings.TrimSpace(string(out)) != "" {
+				t.Fatalf("muse (%s) expected empty stdout, got %q", tc.name, string(out))
+			}
+			if tc.want != "" && !strings.Contains(string(out), tc.want) {
+				t.Fatalf("muse (%s) expected %s, got %q", tc.name, tc.want, string(out))
+			}
+		})
 	}
 }
