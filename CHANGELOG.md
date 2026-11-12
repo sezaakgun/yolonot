@@ -5,6 +5,16 @@ All notable changes to yolonot are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Automated macOS desktop sign-off (`scripts/signoff`, `scripts/desktop-signoff.mjs`, `scripts/ax-desktop.swift`).** Automates `manual/cursor-ide` and `manual/codex-desktop` over Chrome DevTools Protocol and `manual/claude-desktop` over native macOS Accessibility while preserving `--manual` guided fallback (`--no-fallback` for strict automated CI/local runs).
+
+### Fixed
+- **Upgrade skill refresh (`yolonot upgrade`).** Refreshes installed harness `SKILL.md` files via the newly upgraded binary after self-upgrade.
+- **Safe `yolonot suggest` rule writes.** Resolves `projectRoot(cwd)` across subdirectories/worktrees, rejects symlinked `.yolonot` targets, writes atomically, and emits a single `# Suggested by yolonot (...)` header cleanly separated by a newline.
+- **Per-harness capability scoping in `doctor` & `audit`.** Scopes `prepareHarnessCapabilities` per iteration inside `healthChecks` and `policyRiskChecks` rather than deferring until function return.
+
 ## [1.1.0] — 2026-11-11
 
 ### Added

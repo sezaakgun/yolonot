@@ -1,7 +1,7 @@
 # Desktop sign-off checklist
 
-`scripts/signoff` automates macOS desktop checks by default (`Cursor.app` over
-Chrome DevTools Protocol, and `Claude.app` / `ChatGPT.app` over native macOS
+`scripts/signoff` automates macOS desktop checks by default (`Cursor.app` and
+`ChatGPT.app` over Chrome DevTools Protocol, and `Claude.app` over native macOS
 Accessibility via `scripts/ax-desktop.swift`), falling back to the guided
 checklist below when `--manual` is passed or Accessibility permission is not
 granted to your terminal:

@@ -18,11 +18,13 @@ cd "$(git rev-parse --show-toplevel)"
 
 dry=0
 force_manual=0
+no_fallback=0
 skip=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--dry-run) dry=1; shift ;;
 	--manual) force_manual=1; shift ;;
+	--no-fallback) no_fallback=1; shift ;;
 	--skip) skip="${2:-}"; [ -n "$skip" ] || { echo "--skip needs a reason" >&2; exit 2; }; shift 2 ;;
 	-*) echo "unknown flag $1" >&2; exit 2 ;;
 	*) break ;;
@@ -341,6 +343,17 @@ setup_claude_env_wrapper() { # cand tmp → wraps cand with exported model env_k
 	lines = ["#!/bin/sh"]
 	for k in sorted(keys):
 	    v = os.environ.get(k, "")
+	    if not v and k.replace("_", "").isalnum():
+	        try:
+	            import subprocess
+	            r = subprocess.run(
+	                ["zsh", "-lic", f'printf %s "${{{k}:-}}"'],
+	                capture_output=True, text=True, timeout=3
+	            )
+	            if r.returncode == 0 and r.stdout:
+	                v = r.stdout
+	        except Exception:
+	            pass
 	    if v and k.replace("_", "").isalnum():
 	        lines.append(f"export {k}={shlex.quote(v)}")
 	lines.append(f'exec {shlex.quote(cand)} "$@"')
@@ -360,7 +373,7 @@ setup_claude_env_wrapper() { # cand tmp → wraps cand with exported model env_k
 	PY
 }
 
-trust_codex_hooks_temp() { # tmp ws → backs up ~/.codex/config.toml and trusts candidate hook hashes
+trust_codex_hooks_temp() { # tmp ws → backs up ~/.codex/config.toml, sets lowest model/reasoning, and trusts candidate hook hashes
 	tmp_dir=$1 ws_dir=$2
 	command -v codex >/dev/null 2>&1 || return 0
 	codex_cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
@@ -370,38 +383,102 @@ trust_codex_hooks_temp() { # tmp ws → backs up ~/.codex/config.toml and trusts
 		mkdir -p "$(dirname "$codex_cfg")"
 		: >"$tmp_dir/codex-config.toml.absent"
 	fi
-	python3 - "$codex_cfg" "$ws_dir" <<-'PY' 2>/dev/null || true
-	import json, subprocess, sys
+	python3 - "$codex_cfg" "$ws_dir" "$tmp_dir/codex-model.json" <<-'PY' 2>/dev/null || true
+	import json, os, re, subprocess, sys
 
-	cfg_path, ws = sys.argv[1], sys.argv[2]
+	cfg_path, ws, out_json = sys.argv[1], sys.argv[2], sys.argv[3]
 	p = subprocess.Popen(
 	    ["codex", "app-server", "--stdio"],
 	    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, cwd=ws
 	)
+
+	def model_rank(m_obj):
+	    name = (m_obj.get("model") or "").lower()
+	    tier = 50
+	    for idx, tok in enumerate(["nano", "mini", "spark", "flash", "small", "haiku", "luna", "codex", "terra", "pro", "max", "ultra"]):
+	        if tok in name:
+	            tier = idx
+	            break
+	    ver_m = re.search(r"(\d+(?:\.\d+)?)", name)
+	    ver = float(ver_m.group(1)) if ver_m else 99.0
+	    return (tier, ver, name)
+
+	effort_order = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+
 	try:
 	    p.stdin.write(json.dumps({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "signoff", "version": "1"}, "capabilities": {"experimentalApi": True}}}) + "\n")
 	    p.stdin.write(json.dumps({"method": "initialized"}) + "\n")
-	    p.stdin.write(json.dumps({"id": 2, "method": "hooks/list", "params": {"cwds": [ws]}}) + "\n")
+	    p.stdin.write(json.dumps({"id": 2, "method": "model/list", "params": {}}) + "\n")
+	    p.stdin.write(json.dumps({"id": 3, "method": "hooks/list", "params": {"cwds": [ws]}}) + "\n")
 	    p.stdin.flush()
+	    models = []
 	    hooks = []
-	    for _ in range(30):
+	    got = set()
+	    for _ in range(60):
 	        line = p.stdout.readline()
 	        if not line:
 	            break
 	        msg = json.loads(line)
-	        if msg.get("id") == 2 and "result" in msg:
+	        mid = msg.get("id")
+	        if mid == 2 and "result" in msg:
+	            models = (msg["result"] or {}).get("data") or []
+	            got.add(2)
+	        elif mid == 3 and "result" in msg:
 	            data = (msg["result"] or {}).get("data") or []
 	            if data:
 	                hooks = data[0].get("hooks") or []
+	            got.add(3)
+	        if got == {2, 3}:
 	            break
+
+	    chosen_model = ""
+	    chosen_effort = "low"
+	    if models:
+	        best = sorted(models, key=model_rank)[0]
+	        chosen_model = best.get("model") or ""
+	        supp = [
+	            (e.get("reasoningEffort") or "").lower()
+	            for e in (best.get("supportedReasoningEfforts") or [])
+	            if isinstance(e, dict) and e.get("reasoningEffort")
+	        ]
+	        if supp:
+	            chosen_effort = sorted(supp, key=lambda x: effort_order.index(x) if x in effort_order else 99)[0]
+
+	    edits = []
+	    if chosen_model:
+	        edits.append({"keyPath": "model", "value": chosen_model, "mergeStrategy": "upsert"})
+	    if chosen_effort:
+	        edits.append({"keyPath": "model_reasoning_effort", "value": chosen_effort, "mergeStrategy": "upsert"})
+	    if edits:
+	        p.stdin.write(json.dumps({"id": 4, "method": "config/batchWrite", "params": {"edits": edits, "filePath": None, "expectedVersion": None}}) + "\n")
+	        p.stdin.flush()
+	        for _ in range(20):
+	            line = p.stdout.readline()
+	            if not line:
+	                break
+	            if json.loads(line).get("id") == 4:
+	                break
+	        with open(out_json, "w", encoding="utf-8") as jf:
+	            json.dump({"model": chosen_model, "reasoning_effort": chosen_effort}, jf)
+
+	    txt = open(cfg_path, encoding="utf-8").read() if os.path.exists(cfg_path) else ""
+	    proj_hdr = f'[projects.{json.dumps(ws)}]'
+	    if proj_hdr not in txt:
+	        txt = txt.rstrip() + f'\n\n{proj_hdr}\ntrust_level = "trusted"\n'
 	    if hooks:
-	        with open(cfg_path, "a", encoding="utf-8") as cf:
-	            for h in hooks:
-	                if h.get("key") and h.get("currentHash"):
-	                    cf.write(f'\n[hooks.state.{json.dumps(h["key"])}]\ntrusted_hash={json.dumps(h["currentHash"])}\n')
+	        for h in hooks:
+	            if h.get("key") and h.get("currentHash"):
+	                hdr = f'[hooks.state.{json.dumps(h["key"])}]'
+	                txt = re.sub(re.escape(hdr) + r"\n(?:[^\[]*\n?)*", "", txt)
+	                txt = txt.rstrip() + f'\n\n{hdr}\ntrusted_hash = {json.dumps(h["currentHash"])}\n'
+	    with open(cfg_path, "w", encoding="utf-8") as cf:
+	        cf.write(txt)
 	finally:
 	    p.kill()
 	PY
+	if [ -f "$tmp_dir/codex-model.json" ]; then
+		echo "  Codex temporary profile: $(cat "$tmp_dir/codex-model.json")" | tty_out
+	fi
 }
 
 # manual runs one desktop section: attempts automated macOS UI sign-off first
@@ -436,6 +513,8 @@ manual() { # context harness heading
 	trap "restore '$harness' '$usual' '$tmp' '$ws' '$restore_claude' '$had_mod'" EXIT
 	trap 'exit 130' INT TERM
 	if [ "$harness" = claude ]; then
+		mkdir -p "$ws/.claude"
+		printf '{"model":"haiku","effortLevel":"low"}\n' >"$ws/.claude/settings.local.json"
 		(cd "$ws" && "$cand" install --harness claude --mod) >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"; return 1; }
 		setup_claude_env_wrapper "$cand" "$tmp"
 	else
@@ -471,7 +550,7 @@ manual() { # context harness heading
 	if [ "$force_manual" = 0 ] && [ "$(uname -s)" = Darwin ] && [ -n "$ver" ] && command -v node >/dev/null 2>&1; then
 		echo "Running automated desktop sign-off ($harness)..." | tty_out
 		set +e
-		node scripts/desktop-signoff.mjs "$harness" "$ws" "$tmp"
+		caffeinate -di node scripts/desktop-signoff.mjs "$harness" "$ws" "$tmp"
 		auto_rc=$?
 		set -e
 		if [ "$auto_rc" = 0 ]; then
@@ -479,8 +558,13 @@ manual() { # context harness heading
 			post "$ctx" success "$ver: $row_total/$row_total rows passed"
 			return 0
 		fi
+		if [ "$auto_rc" = 75 ] && { [ ! -t 0 ] || [ "$no_fallback" = 1 ]; }; then
+			restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"
+			post "$ctx" failure "$ver: macOS Accessibility permission required for automated check"
+			return 1
+		fi
 		if [ "$auto_rc" != 75 ]; then
-			if ( : >/dev/tty ) 2>/dev/null; then
+			if [ "$no_fallback" = 0 ] && [ -t 0 ] && ( : >/dev/tty ) 2>/dev/null; then
 				ask "  Automated run failed (exit $auto_rc). [m]anual guided fallback, or [f]ail? "
 				if [ "$reply" != m ] && [ "$reply" != M ]; then
 					restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"
@@ -500,9 +584,13 @@ manual() { # context harness heading
 		# Project rules apply only to sessions working in $ws.
 		target=$ws
 		# A plain open only focuses the app; these links start a local session in $ws.
-		[ "$app" = Claude ] && target="claude://code/new?folder=$ws&source=services"
-		[ "$app" = ChatGPT ] && target="codex://new?path=$ws"
-		open -a "$app" "$target" && echo "Opened $app on the workspace; use that session for every row." | tty_out
+		if [ "$app" = Claude ]; then
+			open -a "$app" -u "claude://code/new?folder=$ws&source=services" && echo "Opened $app on the workspace; use that session for every row." | tty_out
+		elif [ "$app" = ChatGPT ]; then
+			open -a "$app" -u "codex://new?path=$ws" && echo "Opened $app on the workspace; use that session for every row." | tty_out
+		else
+			open -a "$app" "$ws" && echo "Opened $app on the workspace; use that session for every row." | tty_out
+		fi
 	else
 		ask "$app.app not found in /Applications; app version: "
 		ver=$reply

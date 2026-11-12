@@ -220,6 +220,11 @@ func TestDesktopSignoffCursorCDPDryFlow(t *testing.T) {
 			switch {
 			case strings.Contains(expr, ".monaco-workbench"):
 				return map[string]interface{}{"result": map[string]interface{}{"value": true}}
+			case strings.Contains(expr, "execCommand('insertText'"):
+				if m := markerRe.FindStringSubmatch(expr); len(m) == 2 {
+					draftedText = "touch " + m[1]
+				}
+				return map[string]interface{}{"result": map[string]interface{}{"value": true}}
 			case strings.Contains(expr, ".aislash-editor-input"):
 				return map[string]interface{}{"result": map[string]interface{}{"value": map[string]float64{"x": 300, "y": 500}}}
 			case strings.Contains(expr, "hasPrompt"):
@@ -298,6 +303,10 @@ if cmd == "check":
     print("trusted")
 elif cmd == "wait-ready":
     print("ready:AXTextArea:100,500")
+elif cmd == "dismiss-stale-trust":
+    print("none")
+elif cmd == "claude-haiku":
+    print("model:haiku")
 elif cmd == "claude-mode":
     st["mode"] = args[1]
     save_state(st)
@@ -322,7 +331,7 @@ elif cmd == "send-prompt":
             log_dec(f, "rule", "ask")
             save_state(st)
     print("sent")
-elif cmd == "click-text":
+elif cmd in ("click-text", "choose-ask"):
     choice = args[2]
     f = st.get("pending", "")
     if choice == "Allow once" and f:
@@ -341,17 +350,17 @@ elif cmd == "click-text":
     elif choice == "Explain" and f:
         st["explained"] = True
     save_state(st)
-    print("clicked:AXButton:" + choice)
-elif cmd == "wait-text":
+    print("submitted:" + choice)
+elif cmd in ("wait-text", "wait-explained"):
     f = st.get("pending", "")
     if st.get("explained"):
         print(json.dumps(["yolonot: matched rule\n\n$ touch " + f + "\n\nTouches a test marker file inside the temporary workspace."]))
     else:
         print(json.dumps(["Allow once", "Allow this session", "Explain", "Deny"]))
-elif cmd == "key":
+elif cmd in ("key", "esc-ask"):
     st["pending"] = ""
     save_state(st)
-    print("key:" + args[2])
+    print("escaped")
 `, statePath, decisionsLog)
 	if err := os.WriteFile(fakeAx, []byte(fakeScript), 0o755); err != nil {
 		t.Fatal(err)
@@ -375,6 +384,126 @@ elif cmd == "key":
 		"✓ #6 ASK-CD-EXPLAIN: see: An explanation was shown, not an HTTP or credential error?",
 		"✓ #7 ASK-CD-ESC: no log session_deny:deny",
 		"✓ #10 ASK-CD-AUTO: log human:deny",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("missing %q in output:\n%s", want, out)
+		}
+	}
+}
+
+func TestDesktopSignoffCodexCDPDryFlow(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not installed")
+	}
+	root := repoRootForTest(t)
+	ws := t.TempDir()
+	tmp := t.TempDir()
+	decisionsLog := filepath.Join(tmp, "decisions.jsonl")
+	_ = os.WriteFile(filepath.Join(tmp, "codex-model.json"), []byte(`{"model":"gpt-5-mini","reasoning_effort":"low"}`), 0o600)
+
+	var mu sync.Mutex
+	var draftedText string
+	var pendingAskMarker string
+	appendLog := func(file, layer, decision string) {
+		rec, _ := json.Marshal(map[string]string{
+			"command":  "touch " + file,
+			"cwd":      ws,
+			"layer":    layer,
+			"decision": decision,
+		})
+		f, err := os.OpenFile(decisionsLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, _ = f.Write(append(rec, '\n'))
+			_ = f.Close()
+		}
+	}
+	markerRe := regexp.MustCompile(`touch ([^\s]+\.marker)`)
+
+	srv := serveMockCDPWebSocket(t, func(_ int, method string, params map[string]interface{}) interface{} {
+		mu.Lock()
+		defer mu.Unlock()
+		switch method {
+		case "Runtime.enable":
+			return map[string]interface{}{}
+		case "Input.dispatchKeyEvent":
+			typ, _ := params["type"].(string)
+			key, _ := params["key"].(string)
+			if typ == "keyDown" && key == "Enter" && draftedText != "" {
+				m := markerRe.FindStringSubmatch(draftedText)
+				draftedText = ""
+				if len(m) == 2 {
+					file := m[1]
+					switch {
+					case strings.Contains(file, "ALLOW"):
+						_ = os.WriteFile(file, nil, 0o644)
+						appendLog(file, "rule", "allow")
+					case strings.Contains(file, "DENY"):
+						appendLog(file, "rule", "deny")
+					case strings.Contains(file, "ASK"):
+						pendingAskMarker = file
+						appendLog(file, "rule", "ask")
+					}
+				}
+			}
+			return map[string]interface{}{}
+		case "Input.dispatchMouseEvent":
+			typ, _ := params["type"].(string)
+			x, _ := params["x"].(float64)
+			if typ == "mousePressed" && pendingAskMarker != "" {
+				if x < 150 { // Allow once⏎ button at x=100
+					_ = os.WriteFile(pendingAskMarker, nil, 0o644)
+				}
+				pendingAskMarker = ""
+			}
+			return map[string]interface{}{}
+		case "Runtime.evaluate":
+			expr, _ := params["expression"].(string)
+			switch {
+			case strings.Contains(expr, "execCommand('insertText'"):
+				if m := markerRe.FindStringSubmatch(expr); len(m) == 2 {
+					draftedText = "touch " + m[1]
+				}
+				return map[string]interface{}{"result": map[string]interface{}{"value": true}}
+			case strings.Contains(expr, "hasCard: true"):
+				if pendingAskMarker == "" {
+					return map[string]interface{}{"result": map[string]interface{}{"value": nil}}
+				}
+				return map[string]interface{}{
+					"result": map[string]interface{}{
+						"value": map[string]interface{}{
+							"hasCard": true,
+							"approve": map[string]interface{}{"text": "Allow once⏎", "x": 100.0, "y": 400.0},
+							"reject":  map[string]interface{}{"text": "DenyEsc", "x": 220.0, "y": 400.0},
+						},
+					},
+				}
+			case strings.Contains(expr, "[data-composer-markdown]"):
+				return map[string]interface{}{"result": map[string]interface{}{"value": map[string]float64{"x": 300, "y": 500}}}
+			case strings.Contains(expr, ".slice(0, 15)"):
+				return map[string]interface{}{"result": map[string]interface{}{"value": []string{filepath.Base(ws), "Ask for approval", "gpt-5-mini", "Light"}}}
+			default:
+				return map[string]interface{}{"result": map[string]interface{}{"value": nil}}
+			}
+		}
+		return map[string]interface{}{}
+	})
+
+	cmd := exec.Command("node", filepath.Join(root, "scripts", "desktop-signoff.mjs"), "codex", ws, tmp)
+	cmd.Env = append(os.Environ(),
+		"YOLONOT_DESKTOP_SETTLE_MS=50",
+		"YOLONOT_CODEX_CDP_URL="+srv.URL,
+		"YOLONOT_DECISIONS_LOG="+decisionsLog,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("desktop-signoff.mjs codex failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"✓ #1 ALLOW-CX: marker",
+		"✓ #2 DENY-CX: log rule:deny",
+		"✓ #3 ASK-CX-APPROVE: see: The chat waited for your approval before running?",
+		"✓ #4 ASK-CX-REJECT: no log human:allow",
+		"✓ #5 ASK-CX-REPEAT: see: The repeat asked for approval again?",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("missing %q in output:\n%s", want, out)
