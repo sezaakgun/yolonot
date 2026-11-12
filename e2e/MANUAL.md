@@ -1,11 +1,15 @@
-# Manual desktop checklist
+# Desktop sign-off checklist
 
-Desktop apps cannot be driven by `go test -tags e2e`. Run this list before a
-release, against the commit you are about to ship:
+`scripts/signoff` automates macOS desktop checks by default (`Cursor.app` and
+`ChatGPT.app` over Chrome DevTools Protocol, and `Claude.app` over native macOS
+Accessibility via `scripts/ax-desktop.swift`), falling back to the guided
+checklist below when `--manual` is passed or Accessibility permission is not
+granted to your terminal:
 
 ```bash
-scripts/signoff --dry-run claude-desktop    # guided run, nothing posted
-scripts/signoff claude-desktop              # same, then posts manual/claude-desktop
+scripts/signoff --dry-run claude-desktop cursor-ide    # automated run, nothing posted
+scripts/signoff claude-desktop cursor-ide              # automated run, posts manual/*
+scripts/signoff --manual claude-desktop                # force guided step-by-step mode
 ```
 
 The script builds the candidate, creates a workspace with these project

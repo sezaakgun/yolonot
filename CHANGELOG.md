@@ -5,6 +5,33 @@ All notable changes to yolonot are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Automated macOS desktop sign-off (`scripts/signoff`, `scripts/desktop-signoff.mjs`, `scripts/ax-desktop.swift`).** Automates `manual/cursor-ide` and `manual/codex-desktop` over Chrome DevTools Protocol and `manual/claude-desktop` over native macOS Accessibility while preserving `--manual` guided fallback (`--no-fallback` for strict automated CI/local runs).
+
+### Fixed
+- **Upgrade skill refresh (`yolonot upgrade`).** Refreshes installed harness `SKILL.md` files via the newly upgraded binary after self-upgrade.
+- **Safe `yolonot suggest` rule writes.** Resolves `projectRoot(cwd)` across subdirectories/worktrees, rejects symlinked `.yolonot` targets, writes atomically, and emits a single `# Suggested by yolonot (...)` header cleanly separated by a newline.
+- **Per-harness capability scoping in `doctor` & `audit`.** Scopes `prepareHarnessCapabilities` per iteration inside `healthChecks` and `policyRiskChecks` rather than deferring until function return.
+
+## [1.1.0] — 2026-11-11
+
+### Added
+- **Full 24-harness `rules discover` & `audit` parity (#40).** `yolonot rules discover` and `yolonot audit` now inspect host permissions, approval policies, and sandbox postures across all 24 supported harnesses (`claude`, `codex`, `opencode`, `antigravity`, `cursor`, `qwen`, `copilot`, `grok`, `crush`, `goose`, `kilo`, `pi`, `openhands`, `kimi`, `zcode`, `cline`, `muse`, `kiro`, `hermes`, `deepseek`, `devin`, `openclaw`, `mirror`, and `amp`).
+- **Cross-harness human resolution tracking (`yolonot mod resolve`, #40).** Plugin and mod harnesses (`claude --mod`, `amp`, `pi`, `openclaw`, `mirror`, `kilo`, and OpenCode V2 live `permission.asked` / `permission.replied` SSE correlation) record `allow_once`, `ask_approved`, and `ask_rejected` outcomes with sandbox-bypass isolation (`[unsandboxed]`) and dialog-time command snapshot binding.
+- **Editable `$defaults` classifier rules (#39).** Built-in classifier allow/ask/deny rules now live under `$defaults` in `prompt` config rather than hardcoded Go logic, making every default rule visible via `yolonot rules defaults` and customizable in `config.json`.
+- **Multi-harness Docker E2E & per-harness sign-off (#40).** Containerized E2E suite (`e2e/Dockerfile`, `scripts/e2e-docker`) and per-harness `e2e/*` sign-off checks across all 19 extended hosts.
+
+### Fixed
+- **Cursor + Claude Code hook coexistence (#40).** Cursor's `claude-code-mapper` imports `.claude/settings*.json` hooks in bare exec form (`command: "yolonot"` with `args` stripped). `yolonot` now detects Cursor hook JSON on stdin, silently passes through imported hooks when native Cursor hooks are installed (preventing double-evaluation and duplicate `decisions.jsonl` rows), and routes to `CursorHarness` otherwise.
+- **Environment-based harness detection (#40).** Hardened `ActiveHarness()` ordering (`YOLONOT_MOD`, `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT` prioritized ahead of inherited parent terminal env vars) and extended session/env detection across all 24 harnesses.
+
+## [1.0.1] — 2026-11-04
+
+### Changed
+- Relicensed repository under Apache-2.0, refreshed README brand assets, and updated dependencies (#30, #31, #35).
+
 ## [1.0.0] — 2026-11-02
 
 ### 1.0.0 — the config contract

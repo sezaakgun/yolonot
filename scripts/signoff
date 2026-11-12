@@ -1,10 +1,11 @@
 #!/bin/sh
 # Sign off native and containerized harness checks for the current commit.
 #
-#   scripts/signoff [--dry-run] [--skip "reason"] <check>... | docker | all
+#   scripts/signoff [--dry-run] [--manual] [--skip "reason"] <check>... | docker | desktop | all
 #
-# Each check runs its e2e tests (or walks the manual desktop checklist in
-# e2e/MANUAL.md) and posts a GitHub commit status on HEAD: e2e/<check> or
+# Each check runs its e2e tests (or drives the macOS desktop app automatically,
+# falling back to e2e/MANUAL.md when --manual is set or Accessibility is absent)
+# and posts a GitHub commit status on HEAD: e2e/<check> or
 # manual/<check>. A status belongs to one SHA, so any new push needs a new
 # sign-off. --skip posts success with the reason visible on the PR.
 set -eu
@@ -16,10 +17,14 @@ ALL="$NATIVE $DOCKER $MANUAL"
 cd "$(git rev-parse --show-toplevel)"
 
 dry=0
+force_manual=0
+no_fallback=0
 skip=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--dry-run) dry=1; shift ;;
+	--manual) force_manual=1; shift ;;
+	--no-fallback) no_fallback=1; shift ;;
 	--skip) skip="${2:-}"; [ -n "$skip" ] || { echo "--skip needs a reason" >&2; exit 2; }; shift 2 ;;
 	-*) echo "unknown flag $1" >&2; exit 2 ;;
 	*) break ;;
@@ -31,6 +36,7 @@ for arg in "$@"; do
 	case "$arg" in
 	all) expanded="$expanded $ALL" ;;
 	docker) expanded="$expanded $DOCKER" ;;
+	desktop) expanded="$expanded $MANUAL" ;;
 	*) expanded="$expanded $arg" ;;
 	esac
 done
@@ -43,7 +49,7 @@ repo=""
 
 # The status must describe exactly this commit: no tracked changes and no
 # untracked Go or e2e files that the tests would pick up.
-dirty=$(git status --porcelain --untracked-files=no; git ls-files --others --exclude-standard -- '*.go' 'e2e/*' go.mod go.sum)
+dirty=$(git status --porcelain --untracked-files=no; git ls-files --others --exclude-standard -- '*.go' 'e2e/*' 'scripts/*' go.mod go.sum)
 if [ -n "$dirty" ]; then
 	echo "working tree differs from $sha:" >&2
 	echo "$dirty" >&2
@@ -274,40 +280,217 @@ check() { # file item → status of one Check item from MANUAL.md
 	esac
 }
 
-restore() { # harness usual-binary tmp workspace [restore-claude] → put the usual build back
+tty_out() {
+	if ( : >/dev/tty ) 2>/dev/null; then
+		cat >/dev/tty
+	else
+		cat >&2
+	fi
+}
+
+restore() { # harness usual-binary tmp workspace [restore-claude] [had-mod] → put the usual build back
 	trap - EXIT INT TERM
 	keep_tmp=0
+	if [ -f "$3/codex-config.toml.bak" ]; then
+		cp "$3/codex-config.toml.bak" "${CODEX_HOME:-$HOME/.codex}/config.toml" 2>/dev/null || true
+	elif [ -f "$3/codex-config.toml.absent" ]; then
+		rm -f "${CODEX_HOME:-$HOME/.codex}/config.toml" 2>/dev/null || true
+	fi
+	if [ "$1" = claude ] && [ "${6:-1}" = 0 ]; then
+		"$3/yolonot" mod uninstall >/dev/null 2>&1 || true
+	fi
 	if [ "${5:-0}" = 1 ]; then
 		if [ -n "$2" ] && "$2" install --harness claude >/dev/null; then
-			echo "Restored $2 into your claude hooks." >/dev/tty
+			echo "Restored $2 into your claude hooks." | tty_out
 		elif [ -z "$2" ] && "$3/yolonot" uninstall --harness claude >/dev/null; then
-			echo "Removed the candidate from your claude hooks." >/dev/tty
+			echo "Removed the candidate from your claude hooks." | tty_out
 		else
-			echo "Could not restore your claude hooks; they still use the candidate kept in $3." >/dev/tty
+			echo "Could not restore your claude hooks; they still use the candidate kept in $3." | tty_out
 			keep_tmp=1
 		fi
 	fi
 	if [ -n "$2" ] && "$2" install --harness "$1" >/dev/null; then
-		echo "Restored $2 into your $1 hooks." >/dev/tty
+		echo "Restored $2 into your $1 hooks." | tty_out
 	elif [ -z "$2" ] && "$3/yolonot" uninstall --harness "$1" >/dev/null; then
-		echo "No yolonot on PATH; removed the candidate from your $1 hooks. Reinstall your usual build yourself." >/dev/tty
+		echo "No yolonot on PATH; removed the candidate from your $1 hooks. Reinstall your usual build yourself." | tty_out
 	else
-		echo "Could not restore your $1 hooks; they still use the candidate kept in $3. Reinstall your usual build, then delete it." >/dev/tty
+		echo "Could not restore your $1 hooks; they still use the candidate kept in $3. Reinstall your usual build, then delete it." | tty_out
 		keep_tmp=1
 	fi
 	[ "$keep_tmp" = 1 ] || rm -rf "$3"
 	rm -rf "$4"
 }
 
-# manual walks one MANUAL.md section: build the candidate, set up a
-# workspace, install into the app, guide each row, verify
-# markers and the decision log, then restore the usual build.
+setup_claude_env_wrapper() { # cand tmp → wraps cand with exported model env_keys for Desktop Explain
+	cand_bin=$1 tmp_dir=$2
+	wrap="$tmp_dir/yolonot-claude-env"
+	python3 - "$cand_bin" "$wrap" "${YOLONOT_DIR:-$HOME/.yolonot}/config.json" <<-'PY'
+	import json, os, shlex, sys
+
+	cand, wrap, cfg_path = sys.argv[1], sys.argv[2], sys.argv[3]
+	keys = set()
+	if os.path.exists(cfg_path):
+	    try:
+	        cfg = json.load(open(cfg_path, encoding="utf-8"))
+	        for m in (cfg.get("models") or {}).values():
+	            if isinstance(m, dict) and m.get("env_key"):
+	                keys.add(str(m["env_key"]))
+	        prov = cfg.get("provider") or {}
+	        if isinstance(prov, dict) and prov.get("env_key"):
+	            keys.add(str(prov["env_key"]))
+	    except Exception:
+	        pass
+	lines = ["#!/bin/sh"]
+	for k in sorted(keys):
+	    v = os.environ.get(k, "")
+	    if not v and k.replace("_", "").isalnum():
+	        try:
+	            import subprocess
+	            r = subprocess.run(
+	                ["zsh", "-lic", f'printf %s "${{{k}:-}}"'],
+	                capture_output=True, text=True, timeout=3
+	            )
+	            if r.returncode == 0 and r.stdout:
+	                v = r.stdout
+	        except Exception:
+	            pass
+	    if v and k.replace("_", "").isalnum():
+	        lines.append(f"export {k}={shlex.quote(v)}")
+	lines.append(f'exec {shlex.quote(cand)} "$@"')
+	with open(wrap, "w", encoding="utf-8") as wf:
+	    wf.write("\n".join(lines) + "\n")
+	os.chmod(wrap, 0o700)
+
+	for target in [
+	    os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "settings.json"),
+	    os.path.join(os.environ.get("YOLONOT_DIR") or os.path.expanduser("~/.yolonot"), "mod", "hooks", "register.tsx"),
+	]:
+	    if os.path.exists(target):
+	        txt = open(target, encoding="utf-8").read()
+	        if cand in txt:
+	            with open(target, "w", encoding="utf-8") as tf:
+	                tf.write(txt.replace(cand, wrap))
+	PY
+}
+
+trust_codex_hooks_temp() { # tmp ws → backs up ~/.codex/config.toml, sets lowest model/reasoning, and trusts candidate hook hashes
+	tmp_dir=$1 ws_dir=$2
+	command -v codex >/dev/null 2>&1 || return 0
+	codex_cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
+	if [ -f "$codex_cfg" ]; then
+		cp "$codex_cfg" "$tmp_dir/codex-config.toml.bak"
+	else
+		mkdir -p "$(dirname "$codex_cfg")"
+		: >"$tmp_dir/codex-config.toml.absent"
+	fi
+	python3 - "$codex_cfg" "$ws_dir" "$tmp_dir/codex-model.json" <<-'PY' 2>/dev/null || true
+	import json, os, re, subprocess, sys
+
+	cfg_path, ws, out_json = sys.argv[1], sys.argv[2], sys.argv[3]
+	p = subprocess.Popen(
+	    ["codex", "app-server", "--stdio"],
+	    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, cwd=ws
+	)
+
+	def model_rank(m_obj):
+	    name = (m_obj.get("model") or "").lower()
+	    tier = 50
+	    for idx, tok in enumerate(["nano", "mini", "spark", "flash", "small", "haiku", "luna", "codex", "terra", "pro", "max", "ultra"]):
+	        if tok in name:
+	            tier = idx
+	            break
+	    ver_m = re.search(r"(\d+(?:\.\d+)?)", name)
+	    ver = float(ver_m.group(1)) if ver_m else 99.0
+	    return (tier, ver, name)
+
+	effort_order = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+
+	try:
+	    p.stdin.write(json.dumps({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "signoff", "version": "1"}, "capabilities": {"experimentalApi": True}}}) + "\n")
+	    p.stdin.write(json.dumps({"method": "initialized"}) + "\n")
+	    p.stdin.write(json.dumps({"id": 2, "method": "model/list", "params": {}}) + "\n")
+	    p.stdin.write(json.dumps({"id": 3, "method": "hooks/list", "params": {"cwds": [ws]}}) + "\n")
+	    p.stdin.flush()
+	    models = []
+	    hooks = []
+	    got = set()
+	    for _ in range(60):
+	        line = p.stdout.readline()
+	        if not line:
+	            break
+	        msg = json.loads(line)
+	        mid = msg.get("id")
+	        if mid == 2 and "result" in msg:
+	            models = (msg["result"] or {}).get("data") or []
+	            got.add(2)
+	        elif mid == 3 and "result" in msg:
+	            data = (msg["result"] or {}).get("data") or []
+	            if data:
+	                hooks = data[0].get("hooks") or []
+	            got.add(3)
+	        if got == {2, 3}:
+	            break
+
+	    chosen_model = ""
+	    chosen_effort = "low"
+	    if models:
+	        best = sorted(models, key=model_rank)[0]
+	        chosen_model = best.get("model") or ""
+	        supp = [
+	            (e.get("reasoningEffort") or "").lower()
+	            for e in (best.get("supportedReasoningEfforts") or [])
+	            if isinstance(e, dict) and e.get("reasoningEffort")
+	        ]
+	        if supp:
+	            chosen_effort = sorted(supp, key=lambda x: effort_order.index(x) if x in effort_order else 99)[0]
+
+	    edits = []
+	    if chosen_model:
+	        edits.append({"keyPath": "model", "value": chosen_model, "mergeStrategy": "upsert"})
+	    if chosen_effort:
+	        edits.append({"keyPath": "model_reasoning_effort", "value": chosen_effort, "mergeStrategy": "upsert"})
+	    if edits:
+	        p.stdin.write(json.dumps({"id": 4, "method": "config/batchWrite", "params": {"edits": edits, "filePath": None, "expectedVersion": None}}) + "\n")
+	        p.stdin.flush()
+	        for _ in range(20):
+	            line = p.stdout.readline()
+	            if not line:
+	                break
+	            if json.loads(line).get("id") == 4:
+	                break
+	        with open(out_json, "w", encoding="utf-8") as jf:
+	            json.dump({"model": chosen_model, "reasoning_effort": chosen_effort}, jf)
+
+	    txt = open(cfg_path, encoding="utf-8").read() if os.path.exists(cfg_path) else ""
+	    proj_hdr = f'[projects.{json.dumps(ws)}]'
+	    if proj_hdr not in txt:
+	        txt = txt.rstrip() + f'\n\n{proj_hdr}\ntrust_level = "trusted"\n'
+	    if hooks:
+	        for h in hooks:
+	            if h.get("key") and h.get("currentHash"):
+	                hdr = f'[hooks.state.{json.dumps(h["key"])}]'
+	                txt = re.sub(re.escape(hdr) + r"\n(?:[^\[]*\n?)*", "", txt)
+	                txt = txt.rstrip() + f'\n\n{hdr}\ntrusted_hash = {json.dumps(h["currentHash"])}\n'
+	    with open(cfg_path, "w", encoding="utf-8") as cf:
+	        cf.write(txt)
+	finally:
+	    p.kill()
+	PY
+	if [ -f "$tmp_dir/codex-model.json" ]; then
+		echo "  Codex temporary profile: $(cat "$tmp_dir/codex-model.json")" | tty_out
+	fi
+}
+
+# manual runs one desktop section: attempts automated macOS UI sign-off first
+# (unless --manual is set), falling back to the guided checklist in e2e/MANUAL.md.
 manual() { # context harness heading
 	ctx=$1 harness=$2 heading=$3
 	section=$(awk -v h="## $heading" '$0 == h { on = 1; next } /^## / { on = 0 } on' e2e/MANUAL.md)
 	rows=$(printf '%s\n' "$section" | grep -E '^\| [0-9]+ \|')
 	[ -n "$rows" ] || { echo "no checklist rows for $heading" >&2; return 1; }
+	row_total=$(printf '%s\n' "$rows" | wc -l | tr -d ' ')
 	tmp=$(mktemp -d)
+	chmod 700 "$tmp"
 	cand="$tmp/yolonot"
 	go build -o "$cand" . || return 1
 	ws=$(cd "$(mktemp -d /tmp/yolonot-manual-XXXX)" && pwd -P)
@@ -315,21 +498,32 @@ manual() { # context harness heading
 	printf 'allow-cmd touch *ALLOW*\ndeny-cmd touch *DENY*\nask-cmd touch *ASK*\n' >"$ws/.yolonot"
 	usual=$(command -v yolonot || true)
 	restore_claude=0
+	had_mod=1
+	if [ "$harness" = claude ] && [ ! -d "${YOLONOT_DIR:-$HOME/.yolonot}/mod" ]; then
+		had_mod=0
+	fi
 	claude_settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 	if [ "$harness" = cursor ] && grep -q yolonot "$claude_settings" 2>/dev/null; then
 		restore_claude=1
 	fi
 
 	printf '\n== %s\nWorkspace: %s\nInstalled the candidate into your %s hooks; your usual build is restored when this ends, also on Ctrl+C.\n' \
-		"$heading" "$ws" "$harness" >/dev/tty
+		"$heading" "$ws" "$harness" | tty_out
 	# shellcheck disable=SC2064 # expand the paths now, they are local to this run
-	trap "restore '$harness' '$usual' '$tmp' '$ws' '$restore_claude'" EXIT
+	trap "restore '$harness' '$usual' '$tmp' '$ws' '$restore_claude' '$had_mod'" EXIT
 	trap 'exit 130' INT TERM
-	(cd "$ws" && "$cand" install --harness "$harness") >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"; return 1; }
+	if [ "$harness" = claude ]; then
+		mkdir -p "$ws/.claude"
+		printf '{"model":"haiku","effortLevel":"low"}\n' >"$ws/.claude/settings.local.json"
+		(cd "$ws" && "$cand" install --harness claude --mod) >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"; return 1; }
+		setup_claude_env_wrapper "$cand" "$tmp"
+	else
+		(cd "$ws" && "$cand" install --harness "$harness") >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"; return 1; }
+	fi
 	if [ "$restore_claude" = 1 ]; then
 		# Cursor imports ~/.claude/settings.json before ~/.cursor/hooks.json;
 		# update it to the candidate too so the old system binary is not called.
-		(cd "$ws" && "$cand" install --harness claude) >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"; return 1; }
+		(cd "$ws" && "$cand" install --harness claude) >/dev/null || { restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"; return 1; }
 	fi
 	if [ "$harness" = cursor ]; then
 		# Native ask is opt-in by env; a wrapper sets it for the hook only.
@@ -338,7 +532,10 @@ manual() { # context harness heading
 		chmod +x "$wrap"
 		sed -i '' "s|'$cand' hook|'$wrap' hook|g" "$HOME/.cursor/hooks.json"
 	fi
-	printf '%s\n' "$section" | awk '/^Before:/ { on = 1 } /^\|/ { on = 0 } on' >/dev/tty
+	if [ "$harness" = codex ]; then
+		trust_codex_hooks_temp "$tmp" "$ws"
+	fi
+
 	case "$harness" in
 	claude) app=Claude ;;
 	codex) app=ChatGPT ;; # Codex Desktop ships inside the ChatGPT app
@@ -347,17 +544,57 @@ manual() { # context harness heading
 	ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "/Applications/$app.app/Contents/Info.plist" 2>/dev/null || true)
 	if [ -n "$ver" ]; then
 		ver="$app $ver"
-		echo "App version: $ver" >/dev/tty
+		echo "App version: $ver" | tty_out
+	fi
+
+	if [ "$force_manual" = 0 ] && [ "$(uname -s)" = Darwin ] && [ -n "$ver" ] && command -v node >/dev/null 2>&1; then
+		echo "Running automated desktop sign-off ($harness)..." | tty_out
+		set +e
+		caffeinate -di node scripts/desktop-signoff.mjs "$harness" "$ws" "$tmp"
+		auto_rc=$?
+		set -e
+		if [ "$auto_rc" = 0 ]; then
+			restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"
+			post "$ctx" success "$ver: $row_total/$row_total rows passed"
+			return 0
+		fi
+		if [ "$auto_rc" = 75 ] && { [ ! -t 0 ] || [ "$no_fallback" = 1 ]; }; then
+			restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"
+			post "$ctx" failure "$ver: macOS Accessibility permission required for automated check"
+			return 1
+		fi
+		if [ "$auto_rc" != 75 ]; then
+			if [ "$no_fallback" = 0 ] && [ -t 0 ] && ( : >/dev/tty ) 2>/dev/null; then
+				ask "  Automated run failed (exit $auto_rc). [m]anual guided fallback, or [f]ail? "
+				if [ "$reply" != m ] && [ "$reply" != M ]; then
+					restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"
+					post "$ctx" failure "$ver: automated desktop check failed"
+					return 1
+				fi
+			else
+				restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"
+				post "$ctx" failure "$ver: automated desktop check failed"
+				return 1
+			fi
+		fi
+	fi
+
+	printf '%s\n' "$section" | awk '/^Before:/ { on = 1 } /^\|/ { on = 0 } on' | tty_out
+	if [ -n "$ver" ]; then
 		# Project rules apply only to sessions working in $ws.
 		target=$ws
 		# A plain open only focuses the app; these links start a local session in $ws.
-		[ "$app" = Claude ] && target="claude://code/new?folder=$ws&source=services"
-		[ "$app" = ChatGPT ] && target="codex://new?path=$ws"
-		open -a "$app" "$target" && echo "Opened $app on the workspace; use that session for every row." >/dev/tty
+		if [ "$app" = Claude ]; then
+			open -a "$app" -u "claude://code/new?folder=$ws&source=services" && echo "Opened $app on the workspace; use that session for every row." | tty_out
+		elif [ "$app" = ChatGPT ]; then
+			open -a "$app" -u "codex://new?path=$ws" && echo "Opened $app on the workspace; use that session for every row." | tty_out
+		else
+			open -a "$app" "$ws" && echo "Opened $app on the workspace; use that session for every row." | tty_out
+		fi
 	else
 		ask "$app.app not found in /Applications; app version: "
 		ver=$reply
-		[ -n "$ver" ] || { echo "version required" >&2; restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"; return 1; }
+		[ -n "$ver" ] || { echo "version required" >&2; restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"; return 1; }
 	fi
 
 	failed="" n=0
@@ -413,7 +650,7 @@ ITEMS
 $rows
 EOF
 
-	restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude"
+	restore "$harness" "$usual" "$tmp" "$ws" "$restore_claude" "$had_mod"
 	if [ -n "$failed" ]; then
 		post "$ctx" failure "$ver: rows$failed failed"
 		return 1

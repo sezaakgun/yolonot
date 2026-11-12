@@ -126,8 +126,8 @@ nor records the test commands.
 
 Missing hosts are skipped; `YOLONOT_E2E_<NAME>` (for example
 `YOLONOT_E2E_CURSOR_AGENT`) points at a binary outside `PATH`, and
-`YOLONOT_E2E_DEBUG=1` prints each scripted model request. Desktop apps stay
-manual: follow [e2e/MANUAL.md](e2e/MANUAL.md). For new native checks, prefer isolated HOME/XDG directories, install the candidate there, use a
+`YOLONOT_E2E_DEBUG=1` prints each scripted model request. Desktop apps run via
+`scripts/signoff desktop` on macOS (falling back to [e2e/MANUAL.md](e2e/MANUAL.md)). For new native checks, prefer isolated HOME/XDG directories, install the candidate there, use a
 scripted local model or native tool API, and assert harmless marker execution
 for allow/deny/ask/reject. Codex also needs trusted hook hashes and a
 PermissionRequest client; verify untrusted hooks are skipped. Never change
@@ -145,16 +145,20 @@ metadata and machine-specific test captures out of version control.
 running the checks locally on the PR's final commit:
 
 ```bash
-scripts/signoff all                    # every check below
+scripts/signoff all                    # every native, Docker, and desktop check below
 scripts/signoff codex opencode         # selected checks
+scripts/signoff docker                 # all 19 containerized CLI/runtime checks
+scripts/signoff desktop                # automated macOS desktop checks (falls back to guided if needed)
+scripts/signoff --manual claude-desktop # force guided desktop walk-through
 scripts/signoff --skip "docs only" claude-desktop codex-desktop cursor-ide
 scripts/signoff --dry-run codex        # run without posting
 ```
 
 | Status | Source |
 |--------|--------|
-| `e2e/claude-cli`, `e2e/claude-mod`, `e2e/codex`, `e2e/opencode`, `e2e/agy`, `e2e/cursor-cli` | e2e tests, no account |
-| `manual/claude-desktop`, `manual/codex-desktop`, `manual/cursor-ide` | guided run of [e2e/MANUAL.md](e2e/MANUAL.md): you act in the app, the script checks markers and the decision log |
+| `e2e/claude-cli`, `e2e/claude-mod`, `e2e/codex`, `e2e/opencode`, `e2e/agy`, `e2e/cursor-cli` | native e2e tests, no account |
+| `e2e/crush`, `e2e/goose`, `e2e/qwen`, `e2e/kilo`, `e2e/pi`, `e2e/openhands`, `e2e/kimi`, `e2e/zcode`, `e2e/cline`, `e2e/grok`, `e2e/copilot`, `e2e/kiro`, `e2e/mirror`, `e2e/openclaw`, `e2e/amp`, `e2e/hermes`, `e2e/deepseek`, `e2e/devin`, `e2e/muse` | containerized e2e tests (`scripts/e2e-docker`), no account |
+| `manual/claude-desktop`, `manual/codex-desktop`, `manual/cursor-ide` | automated macOS desktop driver (`scripts/desktop-signoff.mjs` + `scripts/ax-desktop.swift`), with guided fallback to [e2e/MANUAL.md](e2e/MANUAL.md) |
 
 The script refuses a working tree that differs from `HEAD` and fails a check
 whose tests were skipped. A status belongs to one commit: a new push needs a

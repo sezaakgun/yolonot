@@ -1,9 +1,6 @@
 package yolonot
 
-import (
-	"os"
-	"path/filepath"
-)
+import "path/filepath"
 
 func init() { RegisterHarness(newDevinHarness()) }
 
@@ -22,19 +19,6 @@ func newDevinHarness() *DevinHarness {
 			configDirFn:    devinConfigDir,
 			settingsPathFn: func() string { return filepath.Join(devinConfigDir(), "config.json") },
 			riskMap:        claudeCompatRiskMap(),
-			parseFn: func(input []byte) (HookPayload, error) {
-				p, err := parseFlexibleHookPayload(input)
-				if err == nil && p.HookEventName != "" {
-					if p.Cwd == "" {
-						p.Cwd, _ = os.Getwd()
-					} else if !filepath.IsAbs(p.Cwd) {
-						if wd, werr := os.Getwd(); werr == nil && wd != "" {
-							p.Cwd = filepath.Join(wd, p.Cwd)
-						}
-					}
-				}
-				return p, err
-			},
 			notes: []string{
 				"Devin CLI also imports ~/.claude/settings.json hooks automatically; its shell tool is 'exec'.",
 				"Note: any Exec(...) rule under sandbox.excluded.allow in ~/.config/devin/config.json runs unsandboxed without prompting.",

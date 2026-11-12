@@ -23,6 +23,6 @@ changelog:
   sort: asc
   filters:
     exclude:
-      - "^docs:"
-      - "^test:"
-      - "^ci:"
+      - "^docs(\\([^)]*\\))?:"
+      - "^test(\\([^)]*\\))?:"
+      - "^ci(\\([^)]*\\))?:"
